@@ -5,7 +5,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --import tsx --test test/*.test.ts",
-    "e2e": "node --import tsx test/e2e/run.ts && node --import tsx test/e2e/sync.ts",
+    "e2e": "node --import tsx test/e2e/run.ts && node --import tsx test/e2e/sync.ts && node --import tsx test/e2e/hands.ts",
     "check": "npx tsc --noEmit -p . && npm test && npm run build && npm run e2e",
     "probe:real": "node --import tsx tools/probes/final.e2e.ts"
   },

@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
 import { ImproveSection } from "./Improve";
+import { Slider, snackbar } from "./kit";
 import { retentionTradeoff } from "../scheduler/optimize";
 import { importAnki } from "../import/anki";
 import { inflateRaw, zstd } from "../lib/decompress";
@@ -152,45 +153,38 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <div className="row" style={{ marginTop: 12, gap: 8 }}><span className="small grow">Card look</span>
             <div className="seg">{(["yuzu", "deck"] as const).map((v) => <button key={v} className={s.cardStyle === v ? "on" : ""} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div></div>
           <p className="small muted" style={{ margin: "6px 0 0" }}>Yuzu gives every deck the same calm type, orange cloze answers and tidy extras; the deck's own look shows each Anki deck as it was designed.</p>
+          <DeviceToggles />
         </div>
       </details>
       <details className="section" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span></summary>
       <div className="card-box">
-        <div className="field"><label>New cards per day</label><input type="number" min={0} max={500} value={s.newPerDay} onChange={(e) => store.saveSettings({ newPerDay: Number(e.target.value) })} /></div>
-        <div className="field"><label>Daily review goal</label><input type="number" min={1} max={2000} value={s.dailyGoal} onChange={(e) => store.saveSettings({ dailyGoal: Number(e.target.value) })} /></div>
-        <div className="field"><label>Max due cards per day (0 = no limit)</label><input type="number" min={0} max={5000} value={s.maxReviewsPerDay} onChange={(e) => store.saveSettings({ maxReviewsPerDay: Number(e.target.value) })} /><span className="small muted">With a backlog, keeps each day to a size you will actually finish. The rest waits; nothing is lost.</span></div>
+        <Slider label="New cards per day" value={s.newPerDay} min={0} max={100} step={1} onCommit={(v) => store.saveSettings({ newPerDay: v })} sub="Each new card brings about 10 reviews over its first year." />
+        <Slider label="Daily review goal" value={Math.min(s.dailyGoal, 500)} min={10} max={500} step={10} onCommit={(v) => store.saveSettings({ dailyGoal: v })} />
+        <Slider label="Max due cards per day" value={Math.min(s.maxReviewsPerDay, 1000)} min={0} max={1000} step={25} format={(v) => (v ? String(v) : "no limit")} onCommit={(v) => store.saveSettings({ maxReviewsPerDay: v })} sub="With a backlog, keeps each day to a size you'll actually finish. The rest waits; nothing is lost." />
         <div className="field"><label>Order of due cards</label>
           <select value={s.dueOrder} onChange={(e) => store.saveSettings({ dueOrder: e.target.value as any })}>
             <option value="forgotten">Most forgotten first (lowest recall probability)</option>
+            <option value="rescue">Most likely remembered first (best for clearing a backlog)</option>
             <option value="due">By due date</option>
             <option value="shuffle">Shuffled</option>
           </select><span className="small muted">Cards are also spread across systems so neighbours differ.</span></div>
-        <div className="field"><label>Desired retention (FSRS-6)</label>
-          <select value={s.scheduler.desiredRetention} onChange={(e) => store.saveSettings({ scheduler: { ...s.scheduler, desiredRetention: Number(e.target.value) } })}>
-            {[0.8, 0.82, 0.85, 0.87, 0.88, 0.9, 0.92, 0.95].map((r) => <option key={r} value={r}>{Math.round(r * 100)}%</option>)}
-          </select>
-          <span className="small muted">The chance you still remember a card when it comes back. Higher = more reviews.</span>
-          <Tradeoff /></div>
+        <RetentionSlider />
+        <EasyDays />
         <div className="field"><label>Scheduler weights</label>
           <div className="row"><button className="btn grow" disabled={!!store.fitting} onClick={async () => { setFitMsg("Fitting…"); setFitMsg(await store.optimizeScheduler()); }}>{store.fitting ? `Fitting… ${Math.round(store.fitting.progress * 100)}%` : "Tune to my history"}</button></div>
           <p className="small muted" style={{ marginBottom: 0 }}>{fitMsg || (s.fit ? `FSRS-6, fitted ${fmtDate(s.fit.at)} on ${s.fit.n.toLocaleString()} reviews (error ${s.fit.before.toFixed(3)} → ${s.fit.after.toFixed(3)}). Re-runs automatically every ~1000 reviews.` : "Default FSRS-6 weights. Tuning to your history runs automatically once you have ~400 spaced reviews.")}</p>
         </div>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.nightCards} onChange={(e) => store.saveSettings({ nightCards: e.target.checked })} /> Slate cards (dark card paper, easier at night)</label>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to answer (left = Again, right = Good)</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to rate (← Again · ↓ Hard · → Good · ↑ Easy)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
-        <div className="field"><label>Offer to retire as mastered when the next review is more than</label>
-          <select value={s.retireAskYears ?? 5} onChange={(e) => { const v = Number(e.target.value); store.saveSettings({ retireAskYears: v, ...((s.retireAutoYears ?? 20) && (s.retireAutoYears ?? 20) <= v ? { retireAutoYears: 0 } : {}) }); }}>
-            {[1, 2, 3, 5, 7, 10].map((y) => <option key={y} value={y}>{y} year{y === 1 ? "" : "s"} away</option>)}
-          </select></div>
-        <div className="field"><label>Retire automatically when the next review is more than</label>
-          <select value={s.retireAutoYears ?? 20} onChange={async (e) => {
-            const v = Number(e.target.value);
-            if (v) { const n = store.countBeyond(v); if (n && !confirm(`${n.toLocaleString()} card${n === 1 ? " is" : "s are"} already past ${v} years and would be retired now (deleted, kept in the Mastered log). Go ahead?`)) return; }
+        <Slider label="Offer to retire as mastered when the next review is more than" value={s.retireAskYears ?? 5} min={1} max={10} format={(v) => `${v} y`} onCommit={(v) => store.saveSettings({ retireAskYears: v, ...((s.retireAutoYears ?? 20) && (s.retireAutoYears ?? 20) <= v ? { retireAutoYears: 0 } : {}) })} sub="Those cards are listed in Progress → Mastered for you to decide." />
+        <Slider label="Retire automatically when the next review is more than" value={s.retireAutoYears ?? 20} min={0} max={30} step={5} format={(v) => (v ? `${v} y` : "never")} sub={`Must be above the offer line (${s.retireAskYears ?? 5} y). Retired cards are deleted and kept in the Mastered log.`}
+          onCommit={async (v) => {
+            if (v && v <= (s.retireAskYears ?? 5)) { snackbar(`Has to be above ${s.retireAskYears ?? 5} years`); return false; }
+            if (v) { const n = store.countBeyond(v); if (n && !confirm(`${n.toLocaleString()} card${n === 1 ? " is" : "s are"} already past ${v} years and would be retired now (deleted, kept in the Mastered log). Go ahead?`)) return false; }
             await store.saveSettings({ retireAutoYears: v }); if (v) store.autoMaster();
-          }}>
-            {[0, 5, 10, 15, 20, 30].filter((y) => !y || y > (s.retireAskYears ?? 5)).map((y) => <option key={y} value={y}>{y ? `${y} years away` : "Never (always ask)"}</option>)}
-          </select></div>
+          }} />
         <div className="field"><label>Streak rest days per week</label>
           <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
             {[0, 1, 2].map((h) => <option key={h} value={h}>{h}</option>)}
@@ -330,8 +324,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <div className="card-box">
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device. A quick backup holds only what cannot be rebuilt (reviews, scheduling, settings, your hooks; about 1 MB); the full one includes every card's text.</div>
         <div className="row" style={{ marginTop: 10 }}>
-          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.quickBackup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${dmy()}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
-          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${dmy()}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Full backup</button>
+          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.quickBackup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
+          <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Full backup</button>
           <button className="btn grow" onClick={() => restoreRef.current?.click()}>Restore backup</button>
           <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const r = await store.restore(JSON.parse(await f.text())); setResult(`Restored: ${r.cards} cards, ${r.notes} notes and ${r.reviews} reviews merged.`); } catch (err: any) { setResult("Restore failed: " + err.message); } e.target.value = ""; }} />
         </div>
@@ -412,33 +406,30 @@ function AutoSend({ busy }: { busy: boolean }) {
   );
 }
 
-/** Workload vs recall target from a simulated year with the user's own weights, answer times and daily new cards. */
-function Tradeoff() {
+/** Target recall as a slider: under the thumb, live, what that choice costs (a simulated year with the user's own data). */
+function RetentionSlider() {
   const s = store.settings; const perDay = Math.max(1, s.newPerDay || 10);
-  const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<{ key: string; curve: Awaited<ReturnType<typeof retentionTradeoff>>["curve"] } | null>(null);
   const key = `${perDay}:${s.scheduler.w.join(",")}:${store.reviews.length >> 9}`; // redo when the inputs change (or every ~500 reviews)
   useEffect(() => {
-    if (!open || rows?.key === key) return; let live = true;
-    retentionTradeoff(s.scheduler.w, store.reviews, { perDay, from: 0.8, to: 0.95 }).then((r) => { if (live) setRows({ key, curve: r.curve }); });
-    return () => { live = false; };
-  }, [open, key]);
-  const show = [0.8, 0.82, 0.85, 0.87, 0.88, 0.9, 0.92, 0.95];
-  const cur = s.scheduler.desiredRetention;
+    if (rows?.key === key) return; let live = true;
+    const t = setTimeout(() => retentionTradeoff(s.scheduler.w, store.reviews, { perDay, from: 0.8, to: 0.95 }).then((r) => { if (live) setRows({ key, curve: r.curve }); }), 400);
+    return () => { live = false; clearTimeout(t); };
+  }, [key]);
+  const at = (v: number) => rows?.key === key ? rows.curve.find((r) => Math.abs(r.r - v) < 0.001) : undefined;
+  const now = at(s.scheduler.desiredRetention);
   return (
-    <details className="how" onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary className="small">What each choice costs you</summary>
-      {!rows || rows.key !== key ? <p className="small muted">Working it out from your reviews…</p> : (<>
-        <table className="small" style={{ borderCollapse: "collapse", width: "100%", marginTop: 6 }}>
-          <thead><tr><th style={{ textAlign: "left" }}>Target</th><th style={{ textAlign: "right" }}>Study / day</th><th style={{ textAlign: "right" }}>Still remembered after a year</th></tr></thead>
-          <tbody>{rows.curve.filter((r) => show.some((x) => Math.abs(x - r.r) < 0.001)).map((r) => (
-            <tr key={r.r} style={Math.abs(r.r - cur) < 0.001 ? { color: "var(--orange)", fontWeight: 700 } : undefined}>
-              <td>{Math.round(r.r * 100)}%{Math.abs(r.r - cur) < 0.001 ? " (now)" : ""}</td><td style={{ textAlign: "right" }}>{r.minutesPerDay.toFixed(0)} min</td><td style={{ textAlign: "right" }}>{Math.round(r.rememberedShare * 100)}%</td>
-            </tr>))}</tbody>
-        </table>
-        <p className="small muted" style={{ margin: "6px 0 0" }}>A simulated year of {perDay} new cards a day, with your tuned scheduler, your answer times and your Again/Hard/Good/Easy mix. Below ~85% you save time but forget more of what you've learned; above ~90% each extra point costs a lot more time. For medicine you need to recall reliably, 85–90% is the usual sweet spot.</p>
-      </>)}
-    </details>
+    <div className="field">
+      <Slider label="Target recall (FSRS-6)" value={s.scheduler.desiredRetention} min={0.8} max={0.95} step={0.01} format={(v) => `${Math.round(v * 100)}%`}
+        sub="The chance you still remember a card when it comes back. Higher = more reviews."
+        onCommit={(v) => store.saveSettings({ scheduler: { ...s.scheduler, desiredRetention: Math.round(v * 100) / 100 } })}
+        below={(v) => { const r = at(v); return (
+          <div className="kit-cost small">{!r ? <span className="muted">Working out what each choice costs you…</span> : (<>
+            <span data-hint={`Study per day|A simulated year of ${perDay} new cards a day with your tuned scheduler, answer times and rating mix.`}><b>{r.minutesPerDay.toFixed(0)} min</b> a day{now && Math.abs(v - s.scheduler.desiredRetention) > 0.001 ? <span className="muted"> ({r.minutesPerDay >= now.minutesPerDay ? "+" : "−"}{Math.abs(r.minutesPerDay - now.minutesPerDay).toFixed(0)})</span> : null}</span>
+            <span data-hint="Still remembered|Of everything learned in that year, the share you'd still recall at its end."><b>{Math.round(r.rememberedShare * 100)}%</b> still remembered after a year</span>
+          </>)}</div>); }} />
+      <p className="small muted" style={{ margin: 0 }}>Below ~85% you save time but forget more; above ~90% each extra point costs a lot more time. For medicine, 85–90% is the usual sweet spot.</p>
+    </div>
   );
 }
 
@@ -446,3 +437,35 @@ function Tradeoff() {
 function dmy(d = new Date()) { return `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`; }
 
 function downloadBlob(blob: Blob, name: string) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 120000); }
+
+/** Per-device switches (like Orange): vibration and animations. Reduced-motion in the system is respected too. */
+function DeviceToggles() {
+  const get = (k: string) => { try { return localStorage.getItem(k) !== "off"; } catch { return true; } };
+  const [h, setH] = useState(() => get("yuzu-haptics")); const [fx, setFx] = useState(() => get("yuzu-effects"));
+  const set = (k: string, on: boolean) => { try { localStorage.setItem(k, on ? "on" : "off"); } catch { /* fine */ } };
+  return (<>
+    <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={h} onChange={(e) => { setH(e.target.checked); set("yuzu-haptics", e.target.checked); if (e.target.checked) navigator.vibrate?.(12); }} /> Vibration (Android): ratings, holds, drags</label>
+    <label className="row small" style={{ margin: "8px 0 0" }}><input type="checkbox" checked={fx} onChange={(e) => { setFx(e.target.checked); set("yuzu-effects", e.target.checked); document.documentElement.dataset.effects = e.target.checked ? "on" : "off"; }} /> Animations and effects (card fly-off, sheets sliding)</label>
+  </>);
+}
+
+/** Light weekdays and a break: the load balancer steers new due dates away from them (Anki 24.11's "easy days"). */
+function EasyDays() {
+  const s = store.settings; const days = s.easyDays ?? [1, 1, 1, 1, 1, 1, 1];
+  const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]; const order = [5, 6, 0, 1, 2, 3, 4]; // the user's week starts on Friday
+  const next = (v: number) => (v >= 1 ? 0.5 : v > 0 ? 0 : 1);
+  return (
+    <div className="field">
+      <label>Light days and breaks</label>
+      <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+        {order.map((d) => <button key={d} className={"chip" + (days[d] < 1 ? " orange" : "")} data-hint={`${names[d]}|Tap to cycle: normal → light (about half the reviews) → off (as few as the schedule allows).`} onClick={() => { const e = [...days]; e[d] = next(e[d]); store.saveSettings({ easyDays: e }); }}>{names[d]} · {days[d] >= 1 ? "normal" : days[d] > 0 ? "light" : "off"}</button>)}
+      </div>
+      <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        <span className="small">Break from</span><input type="date" value={s.breakFrom} onChange={(e) => store.saveSettings({ breakFrom: e.target.value })} style={{ width: 150 }} />
+        <span className="small">to</span><input type="date" value={s.breakTo} min={s.breakFrom || undefined} onChange={(e) => store.saveSettings({ breakTo: e.target.value })} style={{ width: 150 }} />
+        {(s.breakFrom || s.breakTo) && <button className="chip" onClick={() => store.saveSettings({ breakFrom: "", breakTo: "" })}>Clear</button>}
+      </div>
+      <span className="small muted">Each answer's next date moves by a day or two within the scheduler's normal spread to the quietest day — so reviews avoid light days, off days and your break (e.g. a night-shift week). No card is pushed past what the spread allows.</span>
+    </div>
+  );
+}

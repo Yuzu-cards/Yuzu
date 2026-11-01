@@ -33,15 +33,7 @@ export function ImproveSection() {
   const [msg, setMsg] = useState("");
   const [showAll, setShowAll] = useState(false);
   const text = (h: string) => h.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
-  async function send() {
-    const data = store.improveExport(); const d = new Date();
-    const name = `yuzu-improve-${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}.json`;
-    const file = new File([JSON.stringify(data, null, 1)], name, { type: "application/json" });
-    // Phone: the share sheet sends it straight to the Claude app. PC (or no share): save the file and attach it in the chat.
-    try { if ((navigator as any).canShare?.({ files: [file] }) && window.matchMedia?.("(pointer: coarse)").matches) { await navigator.share({ files: [file], title: "Cards to improve", text: `Please improve these ${data.count} Yuzu cards and send back a curation file.` }); setMsg(`Shared ${data.count} cards. When Claude sends the file back, import it in Import from Anki → Choose file.`); return; } } catch (e: any) { if (e?.name === "AbortError") return; }
-    const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-    setMsg(`Saved ${name}. Attach it in a chat with Claude; import the file Claude sends back in Import from Anki → Choose file.`);
-  }
+  async function send() { const m = await sendImproveToClaude(); if (m) setMsg(m); }
   return (
     <div className="card-box">
       <p className="small muted" style={{ marginTop: 0 }}>Cards you marked “Needs improving” (⋯ menu while studying, or select cards in Library) and leeches you mix up with something similar. Claude rewrites them, splits overfilled ones with each picture on the right card, and sends one file back — your review history stays, and the marks clear themselves.</p>
@@ -62,3 +54,13 @@ export function ImproveSection() {
   );
 }
 const Store_REASON_SHORT: Record<string, string> = { split: "split", unclear: "unclear", wrong: "wrong/outdated", format: "formatting", media: "picture/sound", confusion: "mixed up", other: "other" };
+
+/** Package the marked cards for Claude: the share sheet on a phone (straight into the Claude app), a file on a PC. */
+export async function sendImproveToClaude(): Promise<string | null> {
+  const data = store.improveExport(); const d = new Date();
+  const name = `yuzu-improve-${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}.json`;
+  const file = new File([JSON.stringify(data, null, 1)], name, { type: "application/json" });
+  try { if ((navigator as any).canShare?.({ files: [file] }) && window.matchMedia?.("(pointer: coarse)").matches) { await navigator.share({ files: [file], title: "Cards to improve", text: `Please improve these ${data.count} Yuzu cards and send back a curation file.` }); return `Shared ${data.count} cards. When Claude sends the file back, import it in Import from Anki → Choose file.`; } } catch (e: any) { if (e?.name === "AbortError") return null; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  return `Saved ${name}. Attach it in a chat with Claude; import the file Claude sends back in Import from Anki → Choose file.`;
+}

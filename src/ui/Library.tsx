@@ -10,13 +10,22 @@ import { Duplicates } from "./Duplicates";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
+import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, type SheetItem } from "./kit";
 import { systemColor } from "./theme";
 
+let overMemo: { ids: string[]; set: Set<string> } | null = null;
+const overSet = () => { const ids = store.overfilled(); if (overMemo?.ids !== ids) overMemo = { ids, set: new Set(ids) }; return overMemo.set; };
+const FILTER_HINT: Record<string, string> = {
+  flagged: "Flagged|Cards you flagged while studying or here.", improve: "To improve|Cards marked “Needs improving” — send them to Claude from Settings → Cards to improve.",
+  overfilled: "Overfilled|Answers with too much on one card (long text or 6+ list items). One fact per card sticks better (Wozniak's minimum-information rule). Select them → Needs improving → Claude splits them.",
+  leech: "Leeches|Cards you keep forgetting after learning them.", suspended: "Paused|Kept with their history but never shown until unpaused.",
+};
 /** Quick filters in the card list. */
-function passes(c: Card, only: "flagged" | "improve" | "suspended" | "leech"): boolean {
+function passes(c: Card, only: "flagged" | "improve" | "suspended" | "leech" | "overfilled"): boolean {
   if (only === "flagged") return !!c.flag;
   if (only === "suspended") return c.suspended;
   if (only === "improve") return !!store.improveFor(c.nid);
+  if (only === "overfilled") return overSet().has(c.nid);
   return !!store.noteFor(c)?.tags.includes("leech");
 }
 
@@ -77,20 +86,20 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
       <Group title="State" items={["new", "learning", "review", "relearning"]} k="states" />
       <div className="row" style={{ marginTop: 14 }}>
         {initial && <button className="btn danger" onClick={async () => { await store.saveSettings({ smart: store.settings.smart.filter((x) => x.id !== sd.id) }); onClose(); }}>Delete</button>}
-        <button className="btn primary grow" disabled={!sd.name.trim()} onClick={async () => { const rest = store.settings.smart.filter((x) => x.id !== sd.id); await store.saveSettings({ smart: [...rest, sd] }); onClose(); }}>Save</button>
+        <button className="btn primary grow" disabled={!sd.name.trim()} onClick={async () => { const list = store.settings.smart; const at = list.findIndex((x) => x.id === sd.id); await store.saveSettings({ smart: at >= 0 ? list.map((x) => (x.id === sd.id ? sd : x)) : [...list, sd] }); onClose(); /* editing keeps its place */ }}>Save</button>
       </div>
     </div></div>
   );
 }
 
-export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, view: View, extra?: Partial<StudyScope>) => void; onBoss: (path: string, view: View, name: string) => void; initial?: { view: View; path: string; query?: string; n: number } | null }) {
+export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, view: View, extra?: Partial<StudyScope>) => void; onBoss: (path: string, view: View, name: string) => void; initial?: { view: View; path: string; query?: string; only?: "flagged" | "improve" | "suspended" | "leech" | "overfilled"; n: number } | null }) {
   const [view, setView] = useState<View>(initial?.view ?? "decks");
   const [path, setPath] = useState(initial?.path ?? "");
-  useEffect(() => { if (initial) { setView(initial.view); setPath(initial.path); setQuery(initial.query ?? ""); setShowCards(!!initial.query); } }, [initial?.n]);
+  useEffect(() => { if (initial) { setView(initial.view); setPath(initial.path); setQuery(initial.query ?? ""); setShowCards(!!initial.query); if (initial.only) setOnly(initial.only); } }, [initial?.n]);
   const [showCards, setShowCards] = useState(false);
   const [query, setQuery] = useState("");
   const [q, setQ] = useState(""); // debounced
-  const [only, setOnly] = useState<null | "flagged" | "improve" | "suspended" | "leech">(null); // quick filters
+  const [only, setOnly] = useState<null | "flagged" | "improve" | "suspended" | "leech" | "overfilled">(null); // quick filters
   useEffect(() => { const t = setTimeout(() => setQ(query.trim().toLowerCase()), 160); return () => clearTimeout(t); }, [query]);
   const [sort, setSort] = useState<"due" | "new" | "state" | "deck">("due");
   const [allTags, setAllTags] = useState(false);
@@ -134,7 +143,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     else out.sort((a, b) => a.source.localeCompare(b.source));
     return out;
   }, [scopeCards, showCards, q, sort, only, store.getVersion()]);
-  const filterCounts = useMemo(() => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0 }; const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); } k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }, [scopeCards, store.getVersion()]);
+  const filterCounts = useMemo(() => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0, overfilled: 0 }; const over = overSet(); const overN = new Set<string>(); const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); if (over.has(c.nid)) overN.add(c.nid); } k.overfilled = overN.size; k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }, [scopeCards, store.getVersion()]);
   const list = useMemo(() => matches.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "suspended" : c.state }; }), [matches]);
 
   // Hooks first, always in the same order (the empty-library screen below returns early).
@@ -142,6 +151,31 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   useBack(!!path, () => go(path.split("::").slice(0, -1).join("::")));
   const [deleted, setDeleted] = useState<{ n: number; token: unknown } | null>(null);
   const [improveFor, setImproveFor] = useState<string[] | null>(null);
+  const [sheet, setSheet] = useState<{ title: string; sub?: string; items: SheetItem[] } | null>(null);
+  const [editCard, setEditCard] = useState<Card | null>(null);
+  const smartList = useRef<HTMLDivElement>(null);
+  const smartDrag = useDragReorder({ listRef: smartList, onMove: (a, b) => { const l = [...store.settings.smart]; const [x] = l.splice(a, 1); l.splice(b, 0, x); store.saveSettings({ smart: l }); } });
+  const isPinned = (p: string, v: View) => store.settings.pins.some((x) => x.path === p && x.view === v);
+  const nodeSheet = (c: { name: string; path: string; due: number; learning: number; newCount: number; total?: number }) => setSheet({ title: c.name, sub: `${c.due.toLocaleString()} due · ${c.learning} learning · ${c.newCount.toLocaleString()} new`, items: [
+    { label: "Open", onClick: () => go(c.path) },
+    { label: "Study", onClick: () => onStudy(c.path, view), disabled: c.due + c.learning + c.newCount === 0 },
+    { label: "Due only", onClick: () => onStudy(c.path, view, { only: "due" }), disabled: !c.due && !c.learning },
+    { label: "New only", onClick: () => onStudy(c.path, view, { only: "new" }), disabled: !c.newCount },
+    ...(view === "systems" ? [{ label: "Boss fight", onClick: () => onBoss(c.path, view, c.name) }] : []),
+    isPinned(c.path, view) ? { label: "Unpin from Today", onClick: () => store.saveSettings({ pins: store.settings.pins.filter((x) => !(x.path === c.path && x.view === view)) }) } : { label: "Pin to Today", onClick: () => store.saveSettings({ pins: [...store.settings.pins, { path: c.path, view }] }) },
+    { label: "Show its cards", onClick: () => { go(c.path); setShowCards(true); } },
+    { label: "Select all its cards", onClick: () => { go(c.path); setShowCards(true); setSelecting(true); setTimeout(() => setSelected(new Set(store.cardsIn(c.path, view).map((x) => x.id))), 0); } },
+  ] });
+  const cardSheet = (card: Card, title: string) => { const n = store.noteFor(card); setSheet({ title, sub: card.source.split("::").slice(-2).join(" › "), items: [
+    { label: "Preview", onClick: () => setPreview(card) },
+    { label: "Study it", onClick: () => onStudy(path, view, { preset: [card], title: "This card" }) },
+    { label: "Edit", onClick: () => setEditCard(card) },
+    { label: n && store.improveFor(n.id) ? "Change improve mark" : "Needs improving…", onClick: () => n && setImproveFor([n.id]) },
+    { label: card.flag ? "Unflag" : "Flag", onClick: () => store.setFlag(card.id, card.flag ? 0 : 1) },
+    { label: card.suspended ? "Unpause" : "Pause", onClick: async () => { await store.setSuspended(card.id, !card.suspended); snackbar(card.suspended ? "Unpaused" : "Paused", () => store.setSuspended(card.id, card.suspended)); } },
+    { label: "Select", onClick: () => { setSelecting(true); setSelected(new Set([card.id])); } },
+    { label: "Delete", danger: true, onClick: async () => { if (!n) return; await store.deleteNotes([n.id]); snackbar("Deleted", () => { store.undoDelete(); }); } },
+  ] }); };
 
   if (store.cards.size === 0) {
     return (<div className="screen"><h1>Library</h1><div className="empty">No cards yet. Import your Anki collection from Settings.</div></div>);
@@ -165,9 +199,12 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
       {view === "smart" && !smart ? (
         <>
           <p className="small muted">Smart decks combine systems, specialties, decks and states into one study scope, e.g. "Step 1 · Cardio".</p>
-          {store.settings.smart.map((sd) => (
-            <button key={sd.id} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => go(sd.id)}><span className="name">{sd.name}</span><span className="small muted">{store.cardsMatching(sd).length.toLocaleString()} cards</span><span className="muted"><IconChevron /></span></button>
-          ))}
+          <div ref={smartList}>{store.settings.smart.map((sd, i) => (
+            <div key={sd.id} data-drag-item className="row" style={{ gap: 0, alignItems: "stretch" }}>
+            <button className="tree-row grow" style={{ width: "100%", textAlign: "left" }} onClick={() => go(sd.id)}><span className="name">{sd.name}</span><span className="small muted">{store.cardsMatching(sd).length.toLocaleString()} cards</span><span className="muted"><IconChevron /></span></button>
+            {store.settings.smart.length > 1 && <DragHandle {...smartDrag.handle(i, sd.name, store.settings.smart.length)} />}
+            </div>
+          ))}</div>
           <button className="btn block" style={{ marginTop: 12 }} onClick={() => setEditSmart("new")}>New smart deck</button>
         </>
       ) : (
@@ -195,19 +232,19 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           </div>
           <div className="field"><input placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
           <div className="row" style={{ flexWrap: "wrap", gap: 6, margin: "-4px 0 10px" }}>
-            {([["flagged", "Flagged"], ["improve", "To improve"], ["leech", "Leeches"], ["suspended", "Paused"]] as const).map(([k, label]) => (
-              <button key={k} className={"chip" + (only === k ? " orange" : "")} disabled={!filterCounts[k] && only !== k} onClick={() => setOnly(only === k ? null : k)}>{label} · {filterCounts[k].toLocaleString()}</button>))}
+            {([["flagged", "Flagged"], ["improve", "To improve"], ["overfilled", "Overfilled"], ["leech", "Leeches"], ["suspended", "Paused"]] as const).map(([k, label]) => (
+              <button key={k} data-hint={FILTER_HINT[k]} className={"chip" + (only === k ? " orange" : "")} disabled={!filterCounts[k] && only !== k} onClick={() => setOnly(only === k ? null : k)}>{label} · {filterCounts[k].toLocaleString()}</button>))}
           </div>
           {!query && !only && node && node.children.length > 0 && (
             <>
               <h2>{view === "tags" ? "Tags" : "Categories"}</h2>
               {view === "tags" && !path && <label className="row small muted" style={{ marginBottom: 6 }}><input type="checkbox" checked={allTags} onChange={(e) => setAllTags(e.target.checked)} /> Show deck housekeeping tags (#, !)</label>}
               {[...node.children].filter((c) => view !== "tags" || allTags || !/^[#!~]/.test(c.name)).sort((a, b) => (["Other", "Unclassified", "No exam", "Untagged"].includes(a.name) ? 1 : 0) - (["Other", "Unclassified", "No exam", "Untagged"].includes(b.name) ? 1 : 0)).map((c) => (
-                <button key={c.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => go(c.path)}>
+                <HoldRow key={c.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onTap={() => go(c.path)} onHold={() => nodeSheet(c)}>
                   <span className="name">{view === "systems" && !path && <i style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: systemColor(c.name), marginRight: 8, verticalAlign: "1px" }} />}{c.name}</span>
                   <span className="counts">{c.due ? <span><b className="c-due">{c.due.toLocaleString()}</b> due</span> : null}{c.learning ? <span><b className="c-learn">{c.learning}</b> learning</span> : null}{c.newCount ? <span><b>{c.newCount.toLocaleString()}</b> new</span> : null}</span>
                   <span className="muted"><IconChevron /></span>
-                </button>
+                </HoldRow>
               ))}
             </>
           )}
@@ -222,16 +259,16 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
             <>
               <div className="row" style={{ marginTop: 18 }}>
                 <h2 className="grow" style={{ margin: 0 }}>{matches.length.toLocaleString()} cards{matches.length > 300 ? ", first 300 shown" : ""}</h2>
-                {matches.length > 0 && !selecting && <button className="chip orange" onClick={() => { const pool = only ? scopeCards.filter((c) => passes(c, only) && (!q || store.searchText(store.noteFor(c)!).includes(q))) : matches; onStudy(path, view, { preset: pool.filter((c) => only === "suspended" || !c.suspended).slice(0, 500), title: only ? { flagged: "Flagged cards", improve: "Cards to improve", leech: "Leeches", suspended: "Paused cards" }[only] : `“${query}”` }); }}><IconPlay /> Study these</button>}
+                {matches.length > 0 && !selecting && <button className="chip orange" onClick={() => { const pool = only ? scopeCards.filter((c) => passes(c, only) && (!q || store.searchText(store.noteFor(c)!).includes(q))) : matches; onStudy(path, view, { preset: pool.filter((c) => only === "suspended" || !c.suspended).slice(0, 500), title: only ? { flagged: "Flagged cards", improve: "Cards to improve", leech: "Leeches", suspended: "Paused cards", overfilled: "Overfilled cards" }[only] : `“${query}”` }); }}><IconPlay /> Study these</button>}
                 <select className="chip" value={sort} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort"><option value="due">by due</option><option value="new">newest</option><option value="state">by state</option><option value="deck">by deck</option></select>
                 <button className="chip" onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}>{selecting ? "Cancel" : "Select"}</button>
                 {selecting && <button className="chip" onClick={() => setSelected(new Set(matches.map((c) => c.id)))}>All {matches.length.toLocaleString()}</button>}
               </div>
               {list.map((r) => (
-                <button key={r.card.id} className="list-row" style={{ width: "100%", textAlign: "left" }} onClick={() => { if (selecting) { const s = new Set(selected); s.has(r.card.id) ? s.delete(r.card.id) : s.add(r.card.id); setSelected(s); } else setPreview(r.card); }}>
+                <HoldRow key={r.card.id} className="list-row" style={{ width: "100%", textAlign: "left" }} onHold={() => cardSheet(r.card, r.title)} onTap={() => { if (selecting) { const s = new Set(selected); s.has(r.card.id) ? s.delete(r.card.id) : s.add(r.card.id); setSelected(s); } else setPreview(r.card); }}>
                   {selecting && <input type="checkbox" readOnly checked={selected.has(r.card.id)} />}
                   <span className="t">{r.title}<div className="small muted" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{r.card.source.split("::").slice(-2).join(" › ")}</div></span><span className={"chip " + (r.state === "new" ? "" : "orange")}>{r.state}</span>
-                </button>
+                </HoldRow>
               ))}
             </>
           )}
@@ -295,6 +332,8 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
         </div></div>
       )}
       {preview && <Preview card={preview} onClose={() => setPreview(null)} onStudy={(cards, t) => { setPreview(null); onStudy(path, view, { preset: cards, title: t }); }} />}
+      {sheet && <ActionSheet title={sheet.title} sub={sheet.sub} items={sheet.items} onClose={() => setSheet(null)} />}
+      {editCard && <CardInfo card={editCard} onClose={() => setEditCard(null)} onSaved={() => setEditCard(null)} />}
       {improveFor && <ImproveSheet nids={improveFor} onClose={() => { setImproveFor(null); setSelected(new Set()); setSelecting(false); }} />}
       {editSmart && <SmartEditor initial={editSmart === "new" ? undefined : editSmart} onClose={() => { setEditSmart(null); if (view === "smart" && path && !store.settings.smart.some((s) => s.id === path)) go(""); }} />}
     </div>

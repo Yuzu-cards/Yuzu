@@ -5,7 +5,13 @@ import { systemColor } from "./theme";
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useBack } from "./useBack";
+import { Recap } from "./Recap";
 
+/** What each mastery label means, with the stability thresholds from Settings. */
+function masteryHint(k: string) {
+  const t = store.settings.mastery;
+  return ({ learning: `Learning|Seen, but stability under ${t.developing} days — still fragile.`, developing: `Developing|Stability ${t.developing}–${t.mastered} days: recall holds for weeks.`, mastered: `Mastered|Stability ${t.mastered}–${t.durable} days: recall holds for months.`, durable: `Durable|Stability over ${t.durable} days: you'd likely still know it in a quarter of a year without review.` } as Record<string, string>)[k] ?? "";
+}
 const MASTERY: { key: "durable" | "mastered" | "developing" | "learning"; label: string; color: string }[] = [
   { key: "durable", label: "durable", color: "var(--yuzu)" }, { key: "mastered", label: "mastered", color: "var(--orange)" },
   { key: "developing", label: "developing", color: "var(--orange-2)" }, { key: "learning", label: "learning", color: "var(--again)" },
@@ -25,7 +31,7 @@ function Calibration() {
         <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(0)} stroke="var(--line)" /><line x1={x(0)} y1={y(0)} x2={x(0)} y2={y(1)} stroke="var(--line)" />
         {[0, 0.5, 1].map((t) => <text key={t} x={x(t)} y={H - 4} fontSize="10" fill="var(--muted)" textAnchor="middle" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
         {[0.5, 1].map((t) => <text key={t} x={pad - 2} y={y(t) + 3} fontSize="10" fill="var(--muted)" textAnchor="end" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
-        {rows.map((r) => { const h = 2 + Math.round(Math.min(4, Math.log10(r.n + 1) * 1.6)); return <rect key={r.bucket} x={Math.round(x(r.predicted)) - h} y={Math.round(y(r.observed)) - h} width={h * 2} height={h * 2} fill="var(--orange)" shapeRendering="crispEdges"><title>{r.bucket}: predicted {(r.predicted * 100).toFixed(0)}%, observed {(r.observed * 100).toFixed(0)}% ({r.n} reviews)</title></rect>; })}
+        {rows.map((r) => { const h = 2 + Math.round(Math.min(4, Math.log10(r.n + 1) * 1.6)); return <rect key={r.bucket} data-hint={`Predicted ${r.bucket}|You remembered ${Math.round(r.observed * 100)}% of ${r.n.toLocaleString()} reviews the scheduler expected ${Math.round(r.predicted * 100)}% for. On the dotted line = it knows your memory.`} x={Math.round(x(r.predicted)) - h} y={Math.round(y(r.observed)) - h} width={h * 2} height={h * 2} fill="var(--orange)" shapeRendering="crispEdges"><title>{r.bucket}: predicted {(r.predicted * 100).toFixed(0)}%, observed {(r.observed * 100).toFixed(0)}% ({r.n} reviews)</title></rect>; })}
       </svg>
       <div className="small muted">{store.settings.fit ? `FSRS-6 weights fitted ${fmtDate(store.settings.fit.at)} on ${store.settings.fit.n.toLocaleString()} reviews.` : "Using default FSRS-6 weights; tuning to your history runs automatically once there is enough (Settings → Studying)."}</div>
     </div>
@@ -69,6 +75,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
   return (
     <div className="screen">
       <h1>Progress</h1>
+      <RecapButton />
       <Mastered />
       <div className="stat-grid">
         <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>
@@ -98,7 +105,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
       <h2>Is the scheduler calibrated?</h2>
       <Calibration />
       {systems.length > 0 && (<><h2>Systems</h2>
-        <div className="row small muted" style={{ gap: 10, flexWrap: "wrap", marginBottom: 6 }}>{MASTERY.map((m) => <span key={m.key} className="row" style={{ gap: 4 }}><i style={{ width: 10, height: 10, borderRadius: 2, background: m.color, display: "inline-block" }} />{m.label}</span>)}<span>(from memory stability, among cards you have seen)</span></div>
+        <div className="row small muted" style={{ gap: 10, flexWrap: "wrap", marginBottom: 6 }}>{MASTERY.map((m) => <span key={m.key} className="row" style={{ gap: 4 }} data-hint={masteryHint(m.key)}><i style={{ width: 10, height: 10, borderRadius: 2, background: m.color, display: "inline-block" }} />{m.label}</span>)}<span>(from memory stability, among cards you have seen)</span></div>
         {systems.map((s) => { const m = mastery.get(s.name); const seen = m ? m.total - m.unseen : 0; return (
           <div key={s.name} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
             <div className="row"><i style={{ width: 10, height: 10, borderRadius: 3, background: systemColor(s.name), display: "inline-block" }} /><span className="t">{s.name}</span>{store.settings.bosses[`systems:${s.name}`]?.passed && <span className="chip yuzu" title="Boss defeated">⚔</span>}{m?.secs != null && <span className="small muted">{m.secs.toFixed(0)} s/card</span>}<span className="small muted">{seen.toLocaleString()} / {s.total.toLocaleString()} seen</span>{onBoss && (m?.mastered ?? 0) + (m?.durable ?? 0) >= 10 && <button className="chip" onClick={() => onBoss(s.name, "systems", s.name)}>Boss</button>}</div>
@@ -186,4 +193,17 @@ function Mastered() {
       )}
     </div>
   );
+}
+
+/** Recap entry + "known right now" (the sum of every learned card's recall probability). */
+function RecapButton() {
+  const [open, setOpen] = useState(false);
+  const v = store.getVersion(); const k = useMemo(() => store.knowledgeNow(), [Math.floor(v / 20)]);
+  return (<>
+    <div className="card-box row" style={{ gap: 12, marginBottom: 12 }}>
+      <span className="grow" data-hint="Known right now|The sum of every learned card's predicted recall today, from your own forgetting curves — the expected number of cards you'd get right if all were asked now."><b className="kit-num" style={{ fontSize: 20 }}>{k.known.toLocaleString()}</b><span className="small muted" style={{ display: "block", marginTop: 4 }}>cards you'd likely recall right now, of {k.of.toLocaleString()} learned</span></span>
+      <button className="btn primary" onClick={() => setOpen(true)}>Recap</button>
+    </div>
+    {open && <Recap onClose={() => setOpen(false)} />}
+  </>);
 }

@@ -8,8 +8,15 @@ import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./
 import { Progress } from "./Progress";
 import { Boss } from "./Boss";
 import { Inbox } from "./Inbox";
+import { HintLayer, SnackbarHost } from "./kit";
 
 type Tab = "today" | "library" | "progress" | "settings";
+const TAB_HINTS: Record<Tab, string> = {
+  today: "Today|What's ready to study, your goal, the week ahead and suggestions.",
+  library: "Library|Every card by deck, system, specialty, exam or tag. Filters, search, preview, edit.",
+  progress: "Progress|Streak, retention, mastery by system, mastered cards, recaps and how well the scheduler knows you.",
+  settings: "Settings|Studying, look and sound, media, sync, backups.",
+};
 
 /** Wipe caches and the service worker, then reload: fixes a broken update without touching the data. */
 export async function repairApp() {
@@ -65,7 +72,7 @@ function Recovery({ error }: { error: string }) {
   );
 }
 
-export function App() { return <ErrorBoundary><AppInner /></ErrorBoundary>; }
+export function App() { return <ErrorBoundary><AppInner /><HintLayer /><SnackbarHost /></ErrorBoundary>; }
 
 function AppInner() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
@@ -76,8 +83,8 @@ function AppInner() {
   const startBoss = (path: string, view: View, name: string) => setStudy({ path, view, boss: name });
   const [update, setUpdate] = useState<(() => void) | null>(null);
   const [inbox, setInbox] = useState(false);
-  const [libraryTarget, setLibraryTarget] = useState<{ view: View; path: string; query?: string; n: number } | null>(null);
-  const browse = (view: View, path: string, query?: string) => { setStudy(null); setInbox(false); setTab("library"); setLibraryTarget({ view, path, query, n: Date.now() }); };
+  const [libraryTarget, setLibraryTarget] = useState<{ view: View; path: string; query?: string; only?: "flagged" | "improve" | "suspended" | "leech" | "overfilled"; n: number } | null>(null);
+  const browse = (view: View, path: string, query?: string, only?: "flagged" | "improve" | "suspended" | "leech" | "overfilled") => { setStudy(null); setInbox(false); setTab("library"); setLibraryTarget({ view, path, query, only, n: Date.now() }); };
   const browseTag = (tag: string) => {
     if (tag.startsWith("auto::System::")) browse("systems", tag.slice(14));
     else if (tag.startsWith("auto::Specialty::")) browse("specialties", tag.slice(17));
@@ -103,7 +110,7 @@ function AppInner() {
   return (
     <div className="app">
       {inbox ? <Inbox onClose={() => setInbox(false)} /> : <>
-      {tab === "today" && <Today onStudy={startStudy} onInbox={() => setInbox(true)} onSearch={(q) => browse("decks", "", q)} onBoss={startBoss} />}
+      {tab === "today" && <Today onStudy={startStudy} onInbox={() => setInbox(true)} onSearch={(q) => browse("decks", "", q)} onBoss={startBoss} onFilter={(f) => browse("decks", "", undefined, f)} onTab={setTab} />}
       {tab === "library" && <Library onStudy={startStudy} onBoss={startBoss} initial={libraryTarget} />}
       {tab === "progress" && <Progress onBoss={startBoss} />}
       {tab === "settings" && <Settings onInbox={() => setInbox(true)} />}
@@ -112,7 +119,7 @@ function AppInner() {
       {update && <div className="toast row">New version ready <button className="btn primary" style={{ minHeight: 32, padding: "4px 12px" }} onClick={update}>Update</button></div>}
       <nav className="tabs">
         {([["today", "Today", <IconToday />], ["library", "Library", <IconLibrary />], ["progress", "Progress", <IconProgress />], ["settings", "Settings", <IconSettings />]] as const).map(([k, label, icon]) => (
-          <button key={k} className={"tab" + (tab === k ? " active" : "")} onClick={() => { setTab(k); setInbox(false); }}>{icon}{label}</button>
+          <button key={k} className={"tab" + (tab === k ? " active" : "")} data-hint={TAB_HINTS[k]} onClick={() => { setTab(k); setInbox(false); }}>{icon}{label}</button>
         ))}
       </nav>
     </div>

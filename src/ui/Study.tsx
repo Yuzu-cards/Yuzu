@@ -8,6 +8,7 @@ import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit 
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
+import { useHold, Slider, buzz } from "./kit";
 import { sfx } from "./sfx";
 import { SKIN_CSS, isShortCard } from "./cardskin";
 import { wireSounds, playSounds, stopSounds, cardSounds } from "./sound";
@@ -78,6 +79,32 @@ function hintFor(note: { fields: string[] } | undefined, ord: number): string | 
 }
 
 /** The paper index card: system-colored spine, rubber-stamp state, a tiny per-card tilt, and the next card peeking out below. */
+/** This card's forgetting curve: predicted recall from its last review to well past its due date. */
+function MemoryCurve({ card }: { card: Card }) {
+  const W = 300, H = 90, pad = 4; const now = Date.now(); const target = store.settings.scheduler.desiredRetention;
+  const dueD = Math.max(1, (card.due - card.lastReview) / DAY), nowD = (now - card.lastReview) / DAY; const span = Math.max(dueD * 2, nowD * 1.2, 2);
+  const x = (d: number) => pad + (d / span) * (W - 2 * pad), y = (r: number) => pad + (1 - r) * (H - 2 * pad);
+  const pts: string[] = []; for (let i = 0; i <= 60; i++) { const d = (span * i) / 60; pts.push(`${x(d).toFixed(1)},${y(retrievability(d, card.stability)).toFixed(1)}`); }
+  const rn = retrievability(nowD, card.stability);
+  return (
+    <div className="card-box" style={{ marginTop: 10, padding: "8px 10px" }} data-hint={`Memory curve|Predicted recall since the last review (${humanInterval(span * DAY)} shown). It comes back when the curve meets your ${Math.round(target * 100)}% target line; every successful review flattens it.`}>
+      <div className="small muted" style={{ marginBottom: 4 }}>Memory curve</div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} shapeRendering="crispEdges" aria-label="Forgetting curve">
+        <line x1={x(0)} y1={y(target)} x2={x(span)} y2={y(target)} stroke="var(--line)" strokeDasharray="3 4" />
+        <polyline points={pts.join(" ")} fill="none" stroke="var(--orange)" strokeWidth={2} />
+        <line x1={x(dueD)} y1={pad} x2={x(dueD)} y2={H - pad} stroke="var(--yuzu)" strokeDasharray="2 3" />
+        {nowD <= span && <rect x={x(nowD) - 3} y={y(rn) - 3} width={6} height={6} fill="var(--text)" />}
+      </svg>
+      <div className="row small muted" style={{ justifyContent: "space-between" }}><span>last review</span><span style={{ color: "var(--yuzu)" }}>due {humanInterval((card.due - card.lastReview))} after</span><span>now: {Math.round(rn * 100)}%</span></div>
+    </div>
+  );
+}
+
+const STAMP_HINT: Record<string, string> = {
+  new: "New: you haven't seen this card yet.", learning: "Learning: in its first short steps (minutes) before it gets a real interval.",
+  review: "Review: learned; it comes back when your recall is predicted to drop to your target.", relearning: "Relearning: you forgot it; a short step before its interval starts again.",
+  suspended: "Paused: kept with its history but never shown until you unpause it.",
+};
 export function Paper({ card, html, css, dark, side, children }: { card: Card; html: string; css: string; dark: boolean; side?: "front" | "back"; children?: React.ReactNode }) {
   const note = store.noteFor(card);
   const system = note?.tags.find((t) => t.startsWith("auto::System::"))?.slice(14);
@@ -85,7 +112,8 @@ export function Paper({ card, html, css, dark, side, children }: { card: Card; h
     <div className="paper-stage" style={{ "--spine": systemColor(system), "--tilt": `${tilt(card.id)}deg` } as any}>
       <div className="paper-under" />
       <div className={"paper" + (dark ? " slate" : "")}>
-        <span className="stamp">{stamp(card)}</span>
+        <span className="stamp" data-hint={`Card state|${STAMP_HINT[card.suspended ? "suspended" : card.state] ?? ""}`}>{stamp(card)}</span>
+        <span className="spine-hit" data-hint={`${system ?? "Unclassified"}|The coloured spine shows the body system this card belongs to.`} />
         <CardView html={html} css={css} dark={dark} side={side} autoplay={store.settings.autoplay} />
         {children}
       </div>
@@ -118,13 +146,14 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
         {!editing ? (
           <>
             <div className="stat-grid" style={{ marginTop: 0 }}>
-              <div className="stat"><b>{card.state}</b><span>state</span></div>
-              <div className="stat"><b>{card.stability ? humanInterval(card.stability * DAY) : "–"}</b><span>stability</span></div>
-              <div className="stat"><b>{card.difficulty ? card.difficulty.toFixed(1) : "–"}</b><span>difficulty /10</span></div>
-              <div className="stat"><b>{r === null ? "–" : Math.round(r * 100) + "%"}</b><span>recall now</span></div>
-              <div className="stat"><b>{card.reps}</b><span>reviews</span></div>
-              <div className="stat"><b>{card.lapses}</b><span>lapses</span></div>
+              <div className="stat" data-hint={`State|${STAMP_HINT[card.suspended ? "suspended" : card.state] ?? ""}`}><b>{card.state}</b><span>state</span></div>
+              <div className="stat" data-hint="Stability (S)|How long until your recall of this card drops to 90%. Grows with every successful review."><b>{card.stability ? humanInterval(card.stability * DAY) : "–"}</b><span>stability</span></div>
+              <div className="stat" data-hint="Difficulty (D)|1 = easy, 10 = hard for you. Again and Hard push it up; it drifts back slowly. Harder cards grow their intervals more slowly."><b>{card.difficulty ? card.difficulty.toFixed(1) : "–"}</b><span>difficulty /10</span></div>
+              <div className="stat" data-hint="Recall now (R)|The predicted chance you'd remember it right now, from your forgetting curve. It comes back when R reaches your target."><b>{r === null ? "–" : Math.round(r * 100) + "%"}</b><span>recall now</span></div>
+              <div className="stat" data-hint="Reviews|Every answer on this card so far."><b>{card.reps}</b><span>reviews</span></div>
+              <div className="stat" data-hint="Lapses|Times you forgot it after it was learned. Several in a row make it a leech."><b>{card.lapses}</b><span>lapses</span></div>
             </div>
+            {card.lastReview > 0 && card.stability > 0 && <MemoryCurve card={card} />}
             <p className="small muted">Due {card.state === "new" ? "never studied" : fmtDateTime(card.due)}<br />Source: {card.source}<br />Type: {nt.name}</p>
             {note.tags.length > 0 && <div className="row" style={{ flexWrap: "wrap", gap: 6, marginBottom: 8 }}>{note.tags.filter((t) => !t.startsWith("manual::")).map((t) => <button key={t} className={"chip" + (t.startsWith("auto::") ? " orange" : "")} onClick={() => onTag?.(t)} title="Browse this tag">{t.replace(/^auto::(System|Specialty|Exam|Level)::/, "$1: ")}</button>)}</div>}
             {history.length > 0 && (<><h2 style={{ marginTop: 6 }}>History</h2>
@@ -150,7 +179,7 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
 export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string; resume?: SavedSession };
 
 /** A study session saved as it goes, so a refresh (or Android reloading the app in the background) picks it up again. */
-export interface SavedSession { scope: { path: string; view?: View; only?: "all" | "due" | "new"; title?: string }; ids: string[]; idx: number; plan: number | null; done: number; results: { id: string; g: Rating; ms: number }[]; startedAt: number; savedAt: number }
+export interface SavedSession { scope: { path: string; view?: View; only?: "all" | "due" | "new"; title?: string }; ids: string[]; idx: number; plan: number | null; done: number; results: { id: string; g: Rating; ms: number; sure?: boolean }[]; startedAt: number; savedAt: number }
 const SESSION_KEY = "yuzu-session";
 export function loadSession(): SavedSession | null {
   try { const s = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null") as SavedSession | null; return s && Date.now() - s.savedAt < 6 * 3600000 && s.idx < s.ids.length ? s : null; } catch { return null; }
@@ -163,7 +192,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const fullQueue = useMemo(() => resumed ?? preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
   const [plan, setPlan] = useState<number | null>(resume ? resume.plan : preset || fullQueue.length <= 15 ? fullQueue.length : null);
   const startedAt = useRef(resume?.startedAt ?? Date.now());
-  const [results, setResults] = useState<{ id: string; g: Rating; ms: number }[]>(resume?.results ?? []);
+  const [results, setResults] = useState<{ id: string; g: Rating; ms: number; sure?: boolean }[]>(resume?.results ?? []);
   const [queue, setQueue] = useState<Card[]>(fullQueue);
   const [idx, setIdx] = useState(resume ? Math.min(resume.idx, Math.max(0, fullQueue.length - (resume.ids.length - resume.idx))) : 0);
   const [showAnswer, setShowAnswer] = useState(false);
@@ -180,11 +209,14 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [rev, setRev] = useState(0);
   const shownAt = useRef(Date.now());
   const touch = useRef<{ x: number; y: number; t: number } | null>(null);
-  const [drag, setDrag] = useState(0);
+  const [drag, setDrag] = useState<{ dx: number; dy: number; x: number; y: number } | null>(null); // finger offset while swiping
+  const [flying, setFlying] = useState<Rating | null>(null);
+  const [swipes, setSwipes] = useState(() => { try { return Number(localStorage.getItem("yuzu-swipes") ?? 0); } catch { return 0; } });
   const [typed, setTyped] = useState("");
   const [hint, setHint] = useState(false);
   const [hookOpen, setHookOpen] = useState(false);
   const [improveOpen, setImproveOpen] = useState(false);
+  const [planMin, setPlanMin] = useState(() => { try { return Number(localStorage.getItem("yuzu-plan-min") ?? 25); } catch { return 25; } });
   const [hookText, setHookText] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
   const [menu, setMenu] = useState(false);
@@ -245,14 +277,19 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     busy.current = true;
     const ms = Date.now() - shownAt.current;
     const before = store.stats().today;
+    // A "surprise": forgotten although the scheduler was ≥90% sure you'd know it (a mature card). Confident errors are
+    // the ones corrected best when looked at right away (the hypercorrection effect).
+    const rNow = card.lastReview ? retrievability((Date.now() - card.lastReview) / DAY, card.stability) : 0;
+    const sure = g === 1 && card.state === "review" && card.stability >= 21 && rNow >= 0.9;
     sfx.answer(g);
     try { await store.answer(card.id, g, ms); } finally { busy.current = false; }
     if (before < store.settings.dailyGoal && before + 1 >= store.settings.dailyGoal) { setTimeout(() => sfx.goal(), 180); flash("Daily goal reached ★"); }
-    setResults((r) => [...r, { id: card.id, g, ms }]);
+    setResults((r) => [...r, { id: card.id, g, ms, sure }]);
+    if (store.lastMatured === card.id) { flash("Matured ★ — next review 3+ weeks away"); setTimeout(() => sfx.goal(), 120); }
     setDoneCount((d) => d + 1);
     if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) setLeech({ cardId: card.id, lapses: store.lastAnswer.lapses });
     setIdx((i) => i + 1);
-    if (navigator.vibrate) navigator.vibrate(g === 1 ? [30, 40, 30] : 12);
+    buzz(g === 1 ? [30, 40, 30] : g === 4 ? [8, 30, 8] : 12); // a pattern per rating (switch off in Settings)
   }
   async function undo() {
     const del = lastDel.current;
@@ -271,15 +308,39 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const lastDel = useRef<{ card: Card; at: number; removed: Card[] } | null>(null);
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 1400); }
 
-  // Swipe to answer (only once the answer is visible).
-  const onTouchStart = (e: React.TouchEvent) => { const t = e.touches[0]; touch.current = { x: t.clientX, y: t.clientY, t: Date.now() }; };
-  const onTouchMove = (e: React.TouchEvent) => { if (!touch.current || !showAnswer || !store.settings.swipe) return; const dx = e.touches[0].clientX - touch.current.x; const dy = e.touches[0].clientY - touch.current.y; if (Math.abs(dx) > Math.abs(dy)) setDrag(dx); };
-  const onTouchEnd = () => {
-    const d = drag; setDrag(0);
-    if (!touch.current || !showAnswer || !store.settings.swipe) { touch.current = null; return; }
-    touch.current = null;
-    if (d < -90) answer(1); else if (d > 90) answer(3);
+  // Swipe to rate (← Again · ↓ Hard · → Good · ↑ Easy); a swipe on the question shows the answer. A label follows the
+  // finger and the card flies off. Vertical swipes only count when the card isn't scrolling that way.
+  const SW = 90;
+  const dirOf = (d: { dx: number; dy: number }): Rating | null => {
+    const ax = Math.abs(d.dx), ay = Math.abs(d.dy);
+    if (ax >= ay) return d.dx <= -SW ? 1 : d.dx >= SW ? 3 : null;
+    return d.dy >= SW * 0.9 ? 2 : d.dy <= -SW * 0.9 ? 4 : null;
   };
+  const onTouchStart = (e: React.TouchEvent) => { const t = e.touches[0]; const el = e.currentTarget as HTMLElement; touch.current = { x: t.clientX, y: t.clientY, t: Date.now(), top: el.scrollTop <= 0, bottom: el.scrollTop + el.clientHeight >= el.scrollHeight - 2 } as any; };
+  const onTouchMove = (e: React.TouchEvent) => {
+    const t0 = touch.current as any; if (!t0 || !store.settings.swipe || busy.current) return;
+    const p = e.touches[0]; const dx = p.clientX - t0.x, dy = p.clientY - t0.y;
+    if (Math.hypot(dx, dy) < 14) return; // a tap or a small scroll
+    const vertical = Math.abs(dy) > Math.abs(dx);
+    if (vertical && !((dy > 0 && t0.top) || (dy < 0 && t0.bottom))) { if (drag) setDrag(null); return; } // the card is scrolling: leave it alone
+    setDrag({ dx, dy: vertical ? dy : 0, x: p.clientX, y: p.clientY });
+  };
+  const onTouchEnd = () => {
+    const d = drag; setDrag(null); touch.current = null;
+    if (!d || !store.settings.swipe) return;
+    if (!showAnswer) { if (Math.hypot(d.dx, d.dy) > 60) setShowAnswer(true); return; } // swiping the question flips it
+    const g = dirOf(d); if (!g) return;
+    setSwipes((n) => { const m = n + 1; try { localStorage.setItem("yuzu-swipes", String(m)); } catch { /* fine */ } return m; });
+    setFlying(g); setTimeout(() => { setFlying(null); answer(g); }, 200);
+  };
+  const SWIPE_LABEL: Record<number, [string, string]> = { 1: ["Again", "var(--again)"], 2: ["Hard", "var(--hard)"], 3: ["Good", "var(--good)"], 4: ["Easy", "var(--easy)"] };
+  const flyTo: Record<number, string> = { 1: "translate(-120%, 0) rotate(0deg)", 2: "translate(0, 110%)", 3: "translate(120%, 0)", 4: "translate(0, -110%)" };
+  // Hold shortcuts on the rating buttons (the plain tap still rates): Good → also skip this note's other cards today;
+  // Again → also mark the card "needs improving".
+  const holdGood = useHold(() => { if (!card) return; const nid = card.nid; answer(3).then(() => { setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== nid)); flash("Good — its sibling cards wait for another day"); }); });
+  const holdAgain = useHold(() => { if (!card) return; const c = card; answer(1).then(() => setImproveFor(c.nid)); });
+  const holdPaper = useHold(() => setMenu(true), 550);
+  const [improveFor, setImproveFor] = useState<string | null>(null);
 
   if (plan === null) {
     const mins = (n: number) => Math.max(1, Math.round((n * secs) / 60));
@@ -293,8 +354,12 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             <div className="big">{fullQueue.length}</div>
             <div>cards ready · about {mins(fullQueue.length)} min</div>
             <p className="muted small">Based on your usual {secs}s per card. Pick how much to do now:</p>
-            <div style={{ display: "grid", gap: 8, marginTop: 16 }}>
-              {[10, 25].map((m) => <button key={m} className={"btn block" + (m === 25 ? " primary" : "")} onClick={() => { const n = byMin(m); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{m} minutes <span className="muted small">· {byMin(m)} cards</span></button>)}
+            <div style={{ textAlign: "left", marginTop: 12 }}>
+              <Slider label="Session length" value={planMin} min={5} max={Math.max(10, Math.min(180, Math.ceil(mins(fullQueue.length) / 5) * 5))} step={5} format={(v) => `${v} min`} onChange={setPlanMin} below={(v) => <div className="small muted">{byMin(v).toLocaleString()} cards</div>} />
+              <button className="btn primary block" onClick={() => { try { localStorage.setItem("yuzu-plan-min", String(planMin)); } catch { /* fine */ } const n = byMin(planMin); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>Start · {byMin(planMin).toLocaleString()} cards</button>
+            </div>
+            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+              {[10, 25].map((m) => <button key={m} className="btn block" onClick={() => { const n = byMin(m); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{m} minutes <span className="muted small">· {byMin(m)} cards</span></button>)}
               {options.map((n) => <button key={n} className="btn block" onClick={() => { setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{n === fullQueue.length ? `All ${n.toLocaleString()} cards` : `${n} cards`} <span className="muted small">· {mins(n)} min</span></button>)}
             </div>
           </div>
@@ -307,6 +372,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     const ahead = preset ? [] : store.learningAhead(path, Date.now(), view);
     const left = preset ? 0 : store.queue(path, Date.now(), view, only).length;
     const missed = [...new Set(results.filter((r) => r.g === 1).map((r) => r.id))].map((id) => store.cards.get(id)!).filter(Boolean);
+    const surprises = [...new Set(results.filter((r) => r.sure).map((r) => r.id))].map((id) => store.cards.get(id)!).filter(Boolean);
+    const missedPlain = missed.filter((c) => !surprises.some((x) => x.id === c.id)); // each card listed once
     const graded = results.filter((r) => store.cards.get(r.id)); const ok = results.filter((r) => r.g > 1).length;
     const mins = Math.max(1, Math.round((Date.now() - startedAt.current) / 60000));
     const slow = [...graded].sort((a, b) => b.ms - a.ms).slice(0, 3).filter((r) => r.ms > 15000);
@@ -318,11 +385,22 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             <div className="big">{doneCount}</div>
             <div>cards in {mins} min{results.length ? ` · ${Math.round((ok / results.length) * 100)}% recalled` : ""}</div>
             <p className="small muted tip">{TIPS[(doneCount + new Date().getDate()) % TIPS.length]}</p>
-            {missed.length > 0 && (
+            {surprises.length > 0 && (
+              <div className="card-box surprise" style={{ textAlign: "left", marginTop: 18 }} data-hint="Confident errors|Cards the scheduler was ≥90% sure you knew. Errors you were sure about are the ones you correct best — if you look again now (the hypercorrection effect).">
+                <b>You were sure — but {surprises.length === 1 ? "this one" : `these ${surprises.length}`} slipped</b>
+                <div className="small muted" style={{ margin: "4px 0 10px" }}>Mature cards you'd normally know. A second look now fixes them best.</div>
+                {surprises.slice(0, 5).map((c) => { const n = store.noteFor(c); return <div key={c.id} className="small" style={{ padding: "4px 0", borderTop: "1px solid var(--line-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n ? noteTitle(n, store.notetypeFor(n)) : ""}</div>; })}
+                <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                  <button className="btn primary grow" onClick={() => { setQueue(surprises); setIdx(0); setPlan(surprises.length); setResults([]); setDoneCount(0); startedAt.current = Date.now(); }}>Look again now</button>
+                  <button className="btn grow" onClick={async () => { await store.markImprove([...new Set(surprises.map((c) => c.nid))], ["unclear"], "I was sure but got it wrong — add a short 'why' and a contrast with what I confused it with."); flash("Sent to Cards to improve"); }}>Ask Claude why</button>
+                </div>
+              </div>
+            )}
+            {missedPlain.length > 0 && (
               <div className="card-box" style={{ textAlign: "left", marginTop: 18 }}>
-                <b>{missed.length} missed</b>
+                <b>{missedPlain.length} {surprises.length ? "more " : ""}missed</b>
                 <div className="small muted" style={{ margin: "4px 0 10px" }}>Going through them once more now, while they are fresh, is the cheapest review you will ever do.</div>
-                {missed.slice(0, 5).map((c) => { const n = store.noteFor(c); return <div key={c.id} className="small" style={{ padding: "4px 0", borderTop: "1px solid var(--line-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n ? noteTitle(n) : ""}</div>; })}
+                {missedPlain.slice(0, 5).map((c) => { const n = store.noteFor(c); return <div key={c.id} className="small" style={{ padding: "4px 0", borderTop: "1px solid var(--line-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n ? noteTitle(n) : ""}</div>; })}
                 <button className="btn primary block" style={{ marginTop: 10 }} onClick={() => { setQueue(missed); setIdx(0); setPlan(missed.length); setResults([]); setDoneCount(0); startedAt.current = Date.now(); }}>Redo the missed ones</button>
               </div>
             )}
@@ -362,10 +440,9 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <span className="where">{title ?? card.source.split("::").slice(-2).join(" › ")}</span>
         {card.flag ? <span className="chip orange" style={{ minHeight: 24, padding: "2px 8px" }}>flagged</span> : null}
       </div>
-      <div className="study-body" onClick={() => !showAnswer && setShowAnswer(true)} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
-        style={{ transform: drag ? `translateX(${drag * 0.4}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
-        {drag < -40 && <div className="swipe-hint again">Again</div>}
-        {drag > 40 && <div className="swipe-hint good">Good</div>}
+      <div className={"study-body" + (flying ? " fly-off" : "")} {...holdPaper.bind} onClick={() => { if (holdPaper.wasHeld()) return; if (!showAnswer) setShowAnswer(true); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+        style={flying ? { transform: flyTo[flying] } : { transform: drag ? `translate(${drag.dx * 0.45}px, ${drag.dy * 0.35}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
+        {drag && showAnswer && (() => { const g = dirOf(drag); const near = g ?? dirOf({ dx: drag.dx * 1.6, dy: drag.dy * 1.6 }); if (!near) return null; const [t, col] = SWIPE_LABEL[near]; return <div className="swipe-label" style={{ color: col, opacity: g ? 1 : 0.55, left: Math.max(8, Math.min(window.innerWidth - 110, drag.x - 50)), top: Math.max(60, drag.y - 120), position: "fixed" }}>{t}</div>; })()}
         {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>
           {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
           {!showAnswer && hint && hintText && <div className="hint-line" onClick={(e) => e.stopPropagation()}>{hintText}</div>}
@@ -382,16 +459,18 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
           {typing && showAnswer && typed && <div style={{ marginTop: 10 }}><span className="chip" style={{ background: typedOk ? "rgba(127,163,74,.2)" : "rgba(214,90,60,.18)", color: typedOk ? "#4e6e2a" : "#a33a22" }}>{typedOk ? "✓ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span></div>}
         </Paper>}
       </div>
+      {store.settings.swipe && swipes < 5 && <div className="swipe-tip">{showAnswer ? "Swipe: ← Again · ↓ Hard · → Good · ↑ Easy" : "Tap or swipe the card to see the answer · hold it for more"}</div>}
       {!showAnswer ? (
         <div className="show-bar row">{hintText && !hint && <button className="btn" onClick={() => setHint(true)} title="First letters (h)">Hint</button>}<button className="btn primary grow" onClick={() => setShowAnswer(true)}>Show answer</button></div>
       ) : (
         <div className="answer-bar">
-          <button className="again" onClick={() => answer(1)}>Again<small>{intervals?.[1]}</small></button>
-          <button className="hard" onClick={() => answer(2)}>Hard<small>{intervals?.[2]}</small></button>
-          <button className="good" onClick={() => answer(3)}>Good<small>{intervals?.[3]}</small></button>
-          <button className="easy" onClick={() => answer(4)}>Easy<small>{intervals?.[4]}</small></button>
+          <button className="again" {...holdAgain.bind} data-hint={`Again|Forgot it. Back in ${intervals?.[1] ?? "a minute"}. Swipe ←. Hold: Again and mark it "needs improving". Key 1.`} onClick={() => { if (holdAgain.wasHeld()) return; answer(1); }}>Again<small>{intervals?.[1]}</small></button>
+          <button className="hard" data-hint={`Hard|Recalled with real effort. Next in ${intervals?.[2] ?? "…"}. Swipe ↓. Key 2.`} onClick={() => answer(2)}>Hard<small>{intervals?.[2]}</small></button>
+          <button className="good" {...holdGood.bind} data-hint={`Good|Recalled. Next in ${intervals?.[3] ?? "…"}. Swipe →. Hold: Good, and this note's other cards wait for another day. Key 3 or space.`} onClick={() => { if (holdGood.wasHeld()) return; answer(3); }}>Good<small>{intervals?.[3]}</small></button>
+          <button className="easy" data-hint={`Easy|Instant and certain. Next in ${intervals?.[4] ?? "…"}. Swipe ↑. Key 4.`} onClick={() => answer(4)}>Easy<small>{intervals?.[4]}</small></button>
         </div>
       )}
+      {improveFor && <ImproveSheet nids={[improveFor]} onClose={() => setImproveFor(null)} />}
       {info && <CardInfo card={card} onClose={() => setInfo(false)} onSaved={() => { setRev((r) => r + 1); flash("Saved"); }} onTag={onBrowseTag ? (t) => { setInfo(false); onBrowseTag(t); } : undefined} />}
       {leech && (
         <div className="sheet-backdrop" onClick={() => setLeech(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -403,7 +482,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "confusion"); setLeech(null); flash("Added to the list for Claude"); }}>I mix it up with something similar</button>
             <button className="btn danger block" onClick={async () => { await store.leechReason(leech.cardId, "suspend"); setLeech(null); flash("Suspended"); }}>Suspend it for now</button>
           </div>
-          <p className="small muted" style={{ marginBottom: 0 }}>Mix-ups are collected under Settings → "Cards to ask Claude about"; send me that list and I'll make contrast cards.</p>
+          <p className="small muted" style={{ marginBottom: 0 }}>Mix-ups are collected under Settings → Cards to improve; send them to Claude from there and you get contrast cards back.</p>
         </div></div>
       )}
       {toast && <div className="toast">{toast}</div>}

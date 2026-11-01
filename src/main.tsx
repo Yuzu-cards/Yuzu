@@ -5,6 +5,7 @@ import { store } from "./lib/store";
 
 import { applyTheme } from "./ui/sfx";
 store.load().then(() => { applyTheme(store.settings.theme); setHiddenFields(store.settings.hiddenFields ?? []); }).catch(() => { /* shown by the recovery screen */ });
+try { document.documentElement.dataset.effects = localStorage.getItem("yuzu-effects") === "off" ? "off" : "on"; } catch { /* fine */ }
 store.subscribe(() => { if (store.loaded) setHiddenFields(store.settings.hiddenFields ?? []); if (store.loaded && document.documentElement.dataset.theme !== store.settings.theme) applyTheme(store.settings.theme); });
 createRoot(document.getElementById("root")!).render(<App />);
 (window as any).yuzu = store; // for debugging from the console
@@ -39,3 +40,13 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
     } catch (e) { console.warn("sw", e); }
   });
 }
+
+// App-icon badge (Badging API, where the system supports it): how many cards are due right now.
+function updateBadge() {
+  const nav = navigator as Navigator & { setAppBadge?: (n?: number) => Promise<void>; clearAppBadge?: () => Promise<void> };
+  if (!store.loaded || !nav.setAppBadge) return;
+  const now = Date.now(); let n = 0; for (const c of store.cards.values()) if (!c.suspended && c.state !== "new" && c.due <= now) n++;
+  (n ? nav.setAppBadge(n) : nav.clearAppBadge?.())?.catch(() => {});
+}
+setInterval(updateBadge, 5 * 60000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") updateBadge(); });

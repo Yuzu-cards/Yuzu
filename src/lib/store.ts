@@ -18,7 +18,7 @@ export interface Settings {
   /** 0 = no limit. With a backlog, caps the due cards offered per day so sessions stay sane. */
   maxReviewsPerDay: number;
   /** Order of due cards: by due date, most-forgotten first (lowest recall probability), or shuffled within the day. */
-  dueOrder: "due" | "forgotten" | "shuffle";
+  dueOrder: "due" | "forgotten" | "shuffle" | "rescue";
   rollover: number;       // hour of day when a new day starts
   scheduler: SchedulerConfig;
   deviceName: string;
@@ -26,6 +26,10 @@ export interface Settings {
   swipe: boolean;
   burySiblings: boolean;
   restDays: number;       // streak-protected days per week
+  /** Load per weekday (0 = Sunday … 6 = Saturday): 1 normal, 0.5 light, 0 off. The load balancer steers reviews away from light days. */
+  easyDays: number[];
+  /** A break (e.g. a night-shift week or travel): reviews are kept off these dates where the scheduler's spread allows. dd/mm via ISO yyyy-mm-dd strings. */
+  breakFrom: string; breakTo: string;
   pins: { view: View; path: string }[];
   /** Scheduler fit: when it last ran, on how many predictions, and the log-loss before/after. */
   fit: { at: number; n: number; before: number; after: number } | null;
@@ -59,7 +63,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -217,7 +221,7 @@ export class Store {
           if (got.improve) { let changed = false; const merged = { ...this.improve }; for (const [k, v] of Object.entries(got.improve)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.improve = merged; await db.setMeta("improve", merged); } }
           if (got.hooks) { let changed = false; const merged = { ...this.hooks }; for (const [k, v] of Object.entries(got.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.hooks = merged; await db.setMeta("hooks", merged); } }
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
-          if (pulledN + pulledC + pulledR) this.treeCache.clear();
+          if (pulledN + pulledC + pulledR) { this.treeCache.clear(); this.dueByDay = null; }
         }
         await this.checkInbox(gh);
         // Shared images: merge the repository's index, pick what to upload from here (bounded per sync).
@@ -451,6 +455,7 @@ export class Store {
 
   /** Merge an import. Existing cards keep their Yuzu review state unless they had none. */
   async applyImport(res: ImportResult, onProgress?: (msg: string, frac: number) => void) {
+    this.dueByDay = null; // due dates are about to change wholesale
     for (const nt of res.notetypes) this.notetypes.set(nt.id, nt);
     let newNotes = 0, newCards = 0, updated = 0, organized = 0;
     const notesOut: Note[] = []; const cardsOut: Card[] = [];
@@ -1143,6 +1148,7 @@ export class Store {
     let review = only === "new" ? [] : cards.filter((c) => c.state === "review" && c.due <= now);
     const order = this.settings.dueOrder;
     if (order === "forgotten") review.sort((a, b) => retrievability((now - a.lastReview) / DAY, a.stability) - retrievability((now - b.lastReview) / DAY, b.stability));
+    else if (order === "rescue") review.sort((a, b) => retrievability((now - b.lastReview) / DAY, b.stability) - retrievability((now - a.lastReview) / DAY, a.stability)); // backlog: save the most memory per minute
     else if (order === "shuffle") { for (let i = review.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [review[i], review[j]] = [review[j], review[i]]; } }
     else review.sort((a, b) => a.due - b.due);
     if (this.settings.maxReviewsPerDay > 0) review = review.slice(0, Math.max(0, this.settings.maxReviewsPerDay - this.reviewedToday(now).reviews));
@@ -1181,10 +1187,76 @@ export class Store {
     return this.cardsIn(path, view).filter((c) => !c.suspended && (c.state === "learning" || c.state === "relearning") && c.due > now && c.due < end).sort((a, b) => a.due - b.due);
   }
 
+  lastMatured: string | null = null; // the card just answered crossed a 21-day interval (a small celebration)
+  // ---- load balancer (Anki 24.11 idea): within the scheduler's normal ±spread, pick the quietest day --------------
+  private dueByDay: Map<number, number> | null = null; private dueByDayAt = -1;
+  private dayIndex(ts: number) { return Math.floor((ts - this.settings.rollover * 3600000 - new Date(ts).getTimezoneOffset() * 60000) / DAY); }
+  /** How many review cards fall due each day (built once per data version; kept up to date by balance()). */
+  private loadMap() {
+    if (!this.dueByDay || this.dueByDayAt !== this.cards.size) { const m = new Map<number, number>(); for (const c of this.cards.values()) if (!c.suspended && c.state === "review") { const d = this.dayIndex(c.due); m.set(d, (m.get(d) ?? 0) + 1); } this.dueByDay = m; this.dueByDayAt = this.cards.size; }
+    return this.dueByDay;
+  }
+  /** A day's weight for the balancer: light weekdays and break days look "fuller". */
+  dayWeight(ts: number) {
+    const dt = new Date(ts); const iso = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`; const s = this.settings;
+    if (s.breakFrom && s.breakTo && iso >= s.breakFrom && iso <= s.breakTo) return 0;
+    return s.easyDays?.[new Date(ts).getDay()] ?? 1;
+  }
+  private balance(next: Card, review: Review, now: number): Card {
+    if (next.state !== "review") return next;
+    const ivl = Math.round((next.due - now) / DAY); if (ivl < 3) return next;
+    // Fuzz range as Anki uses it: ±15% up to a week, ±10% up to 20 days, ±5% beyond (at least ±1 day).
+    const spread = Math.max(1, Math.round(ivl * (ivl <= 7 ? 0.15 : ivl <= 20 ? 0.1 : 0.05)));
+    const lo = Math.max(2, ivl - spread), hi = Math.min(this.settings.scheduler.maximumInterval, ivl + spread);
+    const m = this.loadMap(); let best = ivl, bestScore = Infinity;
+    for (let d = lo; d <= hi; d++) {
+      const ts = now + d * DAY; const w = this.dayWeight(ts); const load = (m.get(this.dayIndex(ts)) ?? 0) + 1;
+      const score = (w <= 0 ? 1e9 : load / w) * (1 + Math.abs(d - ivl) * 0.02); // a little preference for the exact day
+      if (score < bestScore) { bestScore = score; best = d; }
+    }
+    const out = { ...next, due: now + best * DAY };
+    const day = this.dayIndex(out.due); m.set(day, (m.get(day) ?? 0) + 1);
+    review.scheduledDays = best;
+    return out;
+  }
+  /**
+   * Spread overdue cards over the next `days` days (FSRS Helper's "postpone", simplified): the cards that lose least by
+   * waiting (high stability) go furthest. Returns an undo function.
+   */
+  async postponeOverdue(days: number) {
+    const now = stamp(); const day0 = this.dayStart(now); const due = [...this.cards.values()].filter((c) => !c.suspended && c.state === "review" && c.due < day0);
+    if (!due.length) return null;
+    due.sort((a, b) => a.stability - b.stability); // most fragile first: they stay soonest
+    const before = due.map((c) => ({ ...c })); const per = Math.ceil(due.length / days); const out: Card[] = [];
+    due.forEach((c, i) => { const k = Math.floor(i / per); out.push({ ...c, due: day0 + k * DAY + 60000, mod: now }); });
+    for (const c of out) this.cards.set(c.id, c); this.dueByDay = null;
+    await this.persist("postponing", db.putMany("cards", out)); this.bump(); this.touch();
+    return { moved: out.length, undo: async () => { const t = stamp(); const back = before.map((c) => ({ ...c, mod: t })); for (const c of back) this.cards.set(c.id, c); this.dueByDay = null; await this.persist("undoing", db.putMany("cards", back)); this.bump(); this.touch(); } };
+  }
+  /** Overdue review cards (due before today began). */
+  overdueCount() { const day0 = this.dayStart(Date.now()); let n = 0; for (const c of this.cards.values()) if (!c.suspended && c.state === "review" && c.due < day0) n++; return n; }
+  /** "You know about N cards right now": the sum of every learned card's current recall probability (Anki 24.11's estimated total knowledge). */
+  knowledgeNow(now = Date.now()) { let k = 0, n = 0; for (const c of this.cards.values()) if (!c.suspended && c.lastReview && c.state !== "new") { k += retrievability((now - c.lastReview) / DAY, c.stability); n++; } return { known: Math.round(k), of: n }; }
+  // ---- card-quality check (Wozniak's minimum-information rule): cards that cram too much ----------------------
+  private overCache: { key: string; ids: string[] } | null = null;
+  overfilled(): string[] {
+    const key = this.refsKey(); if (this.overCache?.key === key) return this.overCache.ids;
+    const ids: string[] = [];
+    const plain = (h: string) => h.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<img[^>]*>/gi, "").replace(/\[sound:[^\]]+\]/g, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+    for (const n of this.notes.values()) {
+      const nt = this.notetypes.get(n.ntid); if (!nt || nt.kind === "cloze" || n.fields.length < 2) continue;
+      const back = n.fields[1] ?? ""; const items = (back.match(/<li\b/gi)?.length ?? 0) + (back.match(/<br\s*\/?>\s*[-•·*]|(^|>)\s*[-•·*]\s/gi)?.length ?? 0);
+      if (plain(back).length > 700 || items >= 8) ids.push(n.id); // clearly crammed only — a long explanation alone isn't a problem
+    }
+    this.overCache = { key, ids }; return ids;
+  }
   async answer(cardId: string, g: Rating, durationMs = 0, now = stamp()) {
     const card = this.cards.get(cardId);
     if (!card) return;
-    const { card: next, review } = rate(card, g, now, this.settings.scheduler, durationMs);
+    const { card: next0, review } = rate(card, g, now, this.settings.scheduler, durationMs);
+    const next = this.balance(next0, review, now);
+    const matured = card.state === "review" && (card.due - card.lastReview) / DAY < 21 && next.state === "review" && (next.due - now) / DAY >= 21;
+    this.lastMatured = matured ? cardId : null;
     this.cards.set(cardId, next);
     this.reviews.push(review);
     // Leech: every `leechThreshold` lapses, mark the note and let the UI ask what went wrong.
@@ -1437,6 +1509,51 @@ export class Store {
       break;
     }
     return { today, goal: this.settings.dailyGoal, streak };
+  }
+
+  /**
+   * Recap for a period (a month or a year): totals, insights and a persona, all from real reviews.
+   * Shown in Progress and offered on Today in the first days of a month.
+   */
+  recap(from: number, to: number) {
+    const rs = this.reviews.filter((r) => r.ts >= from && r.ts < to);
+    const dayOf = (ts: number) => this.dayIndex(ts);
+    const days = new Map<number, number>(); const hours = new Array(24).fill(0); const bySys = new Map<string, { n: number; ok: number }>();
+    let ms = 0, rv = 0, ok = 0, fresh = 0, matured = 0; const lapsesBy = new Map<string, number>();
+    const sysOf = (cid: string) => { const c = this.cards.get(cid); const n = c && this.notes.get(c.nid); return n?.tags.find((t) => t.startsWith("auto::System::"))?.slice(14) ?? (c ? c.source.split("::")[0] : "Other"); };
+    for (const r of rs) {
+      days.set(dayOf(r.ts), (days.get(dayOf(r.ts)) ?? 0) + 1); hours[new Date(r.ts).getHours()]++; ms += Math.min(r.durationMs || 0, 120000);
+      if (r.state === "new") fresh++;
+      if (r.state === "review") { rv++; if (r.rating > 1) ok++; else lapsesBy.set(r.cid, (lapsesBy.get(r.cid) ?? 0) + 1); }
+      if (r.state === "review" && r.rating > 1 && r.scheduledDays >= 21 && (r.elapsedDays ?? 0) < 21) matured++;
+      const sy = sysOf(r.cid); const e = bySys.get(sy) ?? bySys.set(sy, { n: 0, ok: 0 }).get(sy)!; e.n++; if (r.rating > 1) e.ok++;
+    }
+    const spanDays = Math.max(1, Math.round((Math.min(to, Date.now()) - from) / DAY));
+    const best = [...days].sort((a, b) => b[1] - a[1])[0];
+    let streak = 0, run = 0; const keys = [...days.keys()].sort((a, b) => a - b); for (let i = 0; i < keys.length; i++) { run = i && keys[i] === keys[i - 1] + 1 ? run + 1 : 1; streak = Math.max(streak, run); }
+    const topSys = [...bySys].filter(([k]) => k !== "Other").sort((a, b) => b[1].n - a[1].n).slice(0, 3).map(([name, e]) => ({ name, n: e.n, recall: e.n ? e.ok / e.n : 0 }));
+    const nemesisId = [...lapsesBy].sort((a, b) => b[1] - a[1])[0]; const nem = nemesisId && this.cards.get(nemesisId[0]); const nemNote = nem && this.notes.get(nem.nid);
+    const night = hours.slice(22).concat(hours.slice(0, 5)).reduce((a, b) => a + b, 0), morning = hours.slice(5, 10).reduce((a, b) => a + b, 0);
+    const retired = this.mastery.log.filter((e) => e.at >= from && e.at < to).length;
+    const recall = rv ? ok / rv : null; const minutes = Math.round(ms / 60000);
+    // Persona: the most distinctive thing about this period.
+    const personas: [boolean, string, string][] = [
+      [rs.length > 0 && night / rs.length > 0.4, "The Night-Shift Scholar", "Most of your reviews happened between 22:00 and 05:00. Cards don't care what time it is — and neither do you."],
+      [rs.length > 0 && morning / rs.length > 0.45, "The Dawn Reviewer", "Most of your reviews came before 10:00. Memory loves a fresh morning."],
+      [days.size / spanDays >= 0.85 && spanDays >= 7, "The Metronome", `You studied on ${days.size} of ${spanDays} days. Spaced repetition rewards exactly this.`],
+      [recall !== null && recall >= 0.92 && rv >= 100, "The Surgeon", `${Math.round((recall ?? 0) * 100)}% recalled on mature reviews. Precise.`],
+      [retired >= 20, "The Graduate", `${retired} cards retired as mastered — known for years.`],
+      [fresh >= 300, "The Explorer", `${fresh.toLocaleString()} new cards started. A lot of new ground.`],
+      [best && best[1] >= 400, "The Marathoner", `${best?.[1].toLocaleString()} reviews in a single day.`],
+      [true, "The Steady Climber", "Review by review, the curve bends your way."],
+    ];
+    const [, persona, personaWhy] = personas.find((p) => p[0])!;
+    return {
+      reviews: rs.length, minutes, daysStudied: days.size, spanDays, recall, fresh, matured, retired, longestRun: streak,
+      bestDay: best ? { day: (best[0] + 0.5) * DAY, n: best[1] } : null, topSys, peakHour: hours.indexOf(Math.max(...hours)),
+      nemesis: nemNote ? { title: nemNote.fields[0].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 80), misses: nemesisId![1] } : null,
+      knowledge: this.knowledgeNow().known, persona, personaWhy,
+    };
   }
 
   /** Cards rated Again today (unique), oldest first: a short re-drill before bed is one of the cheapest wins in spaced repetition. */

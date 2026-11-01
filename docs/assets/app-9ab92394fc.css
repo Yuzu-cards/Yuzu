@@ -239,3 +239,63 @@ details.how[open] > summary::before { content: "- "; }
 details.how ol { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 6px; }
 details.how code { font-size: 12px; background: var(--ink-2); padding: 0 4px; }
 .stat b small { font-size: 10px; color: var(--muted); }
+
+/* ---------- Hand kit (ported from Orange 8.1.0): sheets, hints, sliders, drag handles, pull to sync, snackbars ---------- */
+.kit-backdrop { z-index: 60; }
+.kit-sheet { display: grid; gap: 6px; transition: transform .18s; }
+.kit-sheet-head { display: grid; gap: 2px; padding: 0 2px 6px; }
+.kit-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; text-align: left; padding: 10px 12px; background: var(--ink); border: 2px solid var(--line-soft); color: var(--text); font: inherit; font-weight: 600; font-size: 15px; }
+.kit-item:active { transform: translateY(1px); }
+.kit-item.danger { color: var(--clay); }
+.kit-item:disabled { opacity: .35; }
+.kit-item svg { width: 18px; height: 18px; }
+.kit-cancel { min-height: 46px; background: none; border: 0; color: var(--muted); font: inherit; font-weight: 700; }
+.kit-hint { position: fixed; z-index: 80; max-width: 250px; background: var(--paper); color: var(--paper-ink); font-size: 12.5px; line-height: 1.35; font-weight: 600; padding: 7px 10px; border: 2px solid var(--paper-edge); box-shadow: 3px 3px 0 #000; pointer-events: none; }
+.kit-hint b { display: block; font-family: var(--px); font-size: 10px; line-height: 10px; margin-bottom: 5px; text-transform: uppercase; letter-spacing: .5px; color: var(--orange-dark); }
+.kit-holdable { transition: transform .12s; }
+.kit-holdable[data-holding] { transform: scale(.98); }
+.kit-slider { display: grid; gap: 2px; margin: 10px 0; }
+.kit-slider-label { font-size: 14px; }
+.kit-num { font-family: var(--px); font-size: 20px; line-height: 20px; color: var(--orange-2); font-variant-numeric: tabular-nums; }
+.px-range { -webkit-appearance: none; appearance: none; width: 100%; height: 32px; background: transparent; touch-action: pan-y; cursor: pointer; margin: 0; }
+.px-range:focus { outline: none; }
+.px-range::-webkit-slider-runnable-track { height: 10px; border: 2px solid var(--line); background: linear-gradient(to right, var(--orange) 0 var(--pct, 0%), var(--ink) var(--pct, 0%) 100%); }
+.px-range::-moz-range-track { height: 6px; border: 2px solid var(--line); background: linear-gradient(to right, var(--orange) 0 var(--pct, 0%), var(--ink) var(--pct, 0%) 100%); }
+.px-range::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; margin-top: -8px; background: var(--paper); border: 2px solid var(--ink); box-shadow: inset -2px -2px 0 var(--paper-2), 0 0 0 2px var(--orange); }
+.px-range::-moz-range-thumb { width: 18px; height: 18px; background: var(--paper); border: 2px solid var(--ink); box-shadow: 0 0 0 2px var(--orange); }
+.px-range:focus-visible::-webkit-slider-thumb { box-shadow: inset -2px -2px 0 var(--paper-2), 0 0 0 4px var(--orange-2); }
+.drag-handle { flex: 0 0 auto; width: 40px; align-self: stretch; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: grab; touch-action: none; user-select: none; }
+.drag-handle:active { color: var(--orange); }
+.kit-pull { position: fixed; left: 50%; transform: translateX(-50%); z-index: 65; pointer-events: none; padding: 6px 12px; font-family: var(--px); font-size: 10px; line-height: 10px; background: var(--ink-3); color: var(--text); border: 2px solid var(--line); box-shadow: 3px 3px 0 #000; }
+.kit-pull.ready { background: var(--orange); color: var(--on-accent); border-color: var(--orange-2); }
+.kit-snack { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(84px + var(--safe-b)); z-index: 75; width: min(520px, calc(100% - 24px)); display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; background: var(--paper); color: var(--paper-ink); border: 2px solid var(--paper-edge); box-shadow: 3px 3px 0 #000; font-size: 14px; font-weight: 600; }
+.kit-snack .btn { min-height: 36px; padding: 4px 12px; background: var(--orange); color: var(--on-accent); border-color: var(--paper-edge); }
+/* Swipe to rate: a label that follows the finger, the card flies off */
+.swipe-label { position: absolute; z-index: 3; font-family: var(--px); font-size: 20px; line-height: 20px; padding: 10px 14px; background: var(--ink-2); border: 2px solid currentColor; pointer-events: none; }
+.swipe-tip { text-align: center; font-size: 12px; color: var(--muted); padding: 2px 0 6px; }
+.fly-off { transition: transform .22s ease-in, opacity .22s ease-in !important; opacity: 0; }
+:root[data-effects="off"] .fly-off, :root[data-effects="off"] .kit-sheet, :root[data-effects="off"] .kit-holdable { transition: none !important; }
+@media (prefers-reduced-motion: reduce) { .fly-off, .kit-sheet, .kit-holdable { transition: none !important; } }
+.spine-hit { position: absolute; left: -6px; top: 0; bottom: 0; width: 18px; z-index: 1; }
+.kit-cost { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 8px; background: var(--ink); border: 2px solid var(--line-soft); margin-top: 2px; }
+.kit-cost b { font-family: var(--px); font-size: 10px; line-height: 10px; color: var(--orange-2); }
+/* ---------- Recap ---------- */
+.recap { position: fixed; inset: 0; z-index: 55; background: var(--ink); display: flex; flex-direction: column; padding-top: var(--safe-t); }
+.recap-top { padding: 12px 16px; }
+.recap-top .px { font-family: var(--px); font-size: 20px; line-height: 20px; color: var(--orange); }
+.recap-cards { flex: 1; overflow-y: auto; padding: 4px 16px 16px; display: grid; gap: 12px; align-content: start; scroll-snap-type: y proximity; }
+.recap-card { scroll-snap-align: start; background: var(--ink-2); border: 2px solid var(--line); padding: 18px 16px; box-shadow: 4px 4px 0 #000; }
+.recap-card p { margin: 6px 0 0; line-height: 1.45; }
+.recap-card .px { font-family: var(--px); font-size: 10px; line-height: 10px; color: var(--orange-2); text-transform: uppercase; }
+.recap-card.hero-card { background: color-mix(in srgb, var(--orange) 14%, var(--ink-2)); border-color: var(--orange); }
+.recap-persona { font-family: var(--px); font-size: 20px; line-height: 28px; color: var(--yuzu); margin-top: 12px; }
+.recap-big { font-family: var(--px); font-size: 40px; line-height: 44px; color: var(--text); margin-top: 6px; }
+.recap-trio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; }
+.recap-trio span { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
+.recap-trio b { font-family: var(--px); font-size: 20px; line-height: 20px; color: var(--text); }
+.recap-row { display: flex; gap: 10px; padding: 8px 0; border-top: 1px dashed var(--line-soft); }
+.recap-row b { font-family: var(--px); font-size: 10px; color: var(--orange-2); padding-top: 3px; }
+.recap-quote { font-size: 17px; font-weight: 600; }
+.recap-actions { padding: 10px 16px calc(12px + var(--safe-b)); gap: 8px; border-top: 2px solid var(--line-soft); }
+.coach-x { flex: 0 0 auto; width: 40px; margin-bottom: 8px; background: none; border: 0; color: var(--muted); font-size: 14px; }
+.card-box.surprise { border-color: var(--yuzu); }

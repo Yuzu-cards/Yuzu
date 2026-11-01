@@ -21,6 +21,7 @@ export function Boss({ path, view, name, onExit }: { path: string; view: View; n
   const [idx, setIdx] = useState(0);
   const [show, setShow] = useState(false);
   const [hits, setHits] = useState(0);
+  const ghost = useRef(store.settings.bosses[key]?.best ?? null); // your own best on this boss, raced card by card
   useBack(true, onExit);
   const shownAt = useRef(Date.now());
   const card = cards[idx];
@@ -56,7 +57,8 @@ export function Boss({ path, view, name, onExit }: { path: string; view: View; n
         <div className="study-body"><div className="done">
           <YuzuMark size={56} />
           <div className="boss-score">{Math.round(score * 100)}%</div>
-          <div className="px" style={{ fontSize: 20, lineHeight: "20px", color: passed ? "var(--yuzu)" : "var(--clay)" }}>{passed ? "★ Boss defeated ★" : "Not this time"}</div><div className="small muted" style={{ marginTop: 6 }}>{name}</div>
+          <div className="px" style={{ fontSize: 20, lineHeight: "20px", color: passed ? "var(--yuzu)" : "var(--clay)" }}>{passed ? "★ Boss defeated ★" : "Not this time"}</div>
+          {ghost.current !== null && <div className="small" style={{ marginTop: 8, color: score > ghost.current ? "var(--yuzu)" : "var(--muted)" }}>{score > ghost.current ? `New record — your ghost had ${Math.round(ghost.current * 100)}%` : score === ghost.current ? `Tied with your ghost (${Math.round(ghost.current * 100)}%)` : `Your ghost still leads: ${Math.round(ghost.current * 100)}%`}</div>}<div className="small muted" style={{ marginTop: 6 }}>{name}</div>
           <p className="muted small">{hits} of {cards.length} recalled without hints. {passed ? "This counts toward the system level." : `You need ${Math.round(BOSS_PASS * 100)}%. The misses are scheduled sooner; try again in a few days.`}</p>
           <button className="btn primary" onClick={onExit}>Done</button>
         </div></div></div>
@@ -69,7 +71,9 @@ export function Boss({ path, view, name, onExit }: { path: string; view: View; n
         <div className="progress"><i style={{ width: `${(idx / cards.length) * 100}%`, background: "var(--yuzu)" }} /></div>
         <span className="small muted" style={{ minWidth: 56, textAlign: "right" }}>{idx}/{cards.length}</span>
       </div>
-      <div className="row small muted" style={{ padding: "0 14px 6px" }}><span className="chip yuzu">boss fight · {name}</span><span className="grow" /><span>{hits} right</span></div>
+      <div className="row small muted" style={{ padding: "0 14px 6px" }}><span className="chip yuzu">boss fight · {name}</span><span className="grow" />
+        {ghost.current !== null && idx > 0 && (() => { const pace = ghost.current * idx; const diff = hits - pace; return <span className={"chip" + (diff >= 0 ? " yuzu" : "")} data-hint={`Ghost|Your best on this boss was ${Math.round(ghost.current * 100)}%. The ghost's pace after ${idx} cards: ${pace.toFixed(1)} right.`}>{diff >= 0 ? "▲ ahead of" : "▼ behind"} ghost</span>; })()}
+        <span>{hits} right</span></div>
       <div className="study-body" onClick={() => !show && setShow(true)}>
         {rendered && <Paper card={card} html={show ? rendered.back : rendered.front} side={show ? "back" : "front"} css={rendered.css} dark={store.settings.nightCards} />}
       </div>
