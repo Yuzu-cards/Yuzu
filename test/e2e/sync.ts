@@ -61,7 +61,7 @@ try {
   await A.click("text=Review"); await A.waitForTimeout(300); await A.click("text=Test pack"); await A.waitForTimeout(300);
   await A.click("text=Q3"); await A.waitForTimeout(200); await A.click("text=Add 2 cards"); await A.waitForTimeout(1500);
   const n1 = await A.evaluate(() => (window as any).yuzu.notes.size); console.log("notes after add:", n1, "| inbox left:", await A.evaluate(() => (window as any).yuzu.inbox.length), "| repo inbox files:", Object.keys(gh.files()).filter((k) => k.startsWith("inbox/")).length);
-  await A.click("text=Remove"); await A.waitForTimeout(800);
+  await A.click("text=Remove"); await A.waitForTimeout(300); await A.click(".kit-sheet .kit-item.danger"); await A.waitForTimeout(800); // the 8-bit confirm sheet
   console.log("notes after remove:", await A.evaluate(() => (window as any).yuzu.notes.size));
   await syncOf(B); console.log("B inbox after sync:", await B.evaluate(() => (window as any).yuzu.inbox.length), "B notes:", await B.evaluate(() => (window as any).yuzu.notes.size));
   // Undo survives sync: B reviews one card, syncs, undoes it, syncs; A must end up without that review.

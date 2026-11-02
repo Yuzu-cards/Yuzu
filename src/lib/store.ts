@@ -1686,6 +1686,19 @@ export class Store {
     return out.reverse();
   }
   /** The system with the lowest recall over the last 7 days (at least 10 review-state reviews), for a targeted session. */
+  /**
+   * What to learn next, like a teacher would say it: finish the system you have started before opening another, and when
+   * nothing is half-done, start the biggest one left. Returns null when every system has been started or is nearly done.
+   */
+  learnNext(now = Date.now()): { name: string; seen: number; total: number; started: boolean } | null {
+    let best: { name: string; seen: number; total: number; started: boolean; score: number } | null = null;
+    for (const [name, m] of this.masteryBySystem(now)) {
+      if (m.total < 20 || m.unseen < 10) continue; const seen = m.total - m.unseen; const started = seen >= 10 && seen < m.total * 0.9;
+      const score = (started ? 2 : 1) * (started ? seen / m.total : m.total / 10000); // half-done first (the more done, the sooner finished), else the biggest
+      if (!best || score > best.score) best = { name, seen, total: m.total, started, score };
+    }
+    return best ? { name: best.name, seen: best.seen, total: best.total, started: best.started } : null;
+  }
   weakestSystem(now = Date.now()): { name: string; retention: number; n: number } | null {
     const by = new Map<string, { ok: number; n: number }>();
     for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts >= now - 7 * DAY; i--) {
