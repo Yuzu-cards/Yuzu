@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
 import { ImproveSection } from "./Improve";
+import { HubSection } from "./Hub";
 import { Slider, snackbar } from "./kit";
 import { retentionTradeoff } from "../scheduler/optimize";
 import { importAnki } from "../import/anki";
@@ -207,6 +208,9 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </details>}
       <details className="section"><summary>Cards to improve <span className="small muted">send to Claude</span></summary>
       <ImproveSection />
+      </details>
+      <details className="section"><summary>Citrus Maxima <span className="small muted">hub · Google Drive</span></summary>
+      <HubSection />
       </details>
       <details className="section"><summary>Import from Anki <span className="small muted">collection, packs, curation</span></summary>
       <div className="card-box">
