@@ -8,7 +8,7 @@
 import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, listFiles, downloadBytes, putFile, deleteFile, gjson, type DriveFile } from "./google";
 import { SyncError, gzip, gunzip, GZIP_ABOVE, type Manifest, type SyncSnapshot, type Progress } from "./sync";
 
-export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], rotas: [HUB_ROOT, "Rotas"] };
+export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"] };
 export interface DriveIndex { media: string; files: Record<string, { id: string; s: number }>; changes: string; at: number; complete: boolean; nextPage?: string }
 
 // ---------------------------------------------------------------- media
@@ -136,15 +136,18 @@ export class DriveSync {
 }
 
 // ---------------------------------------------------------------- the hub: status.json, plan.json, Rotas/
-export interface HubStatus { app: "yuzu"; version: string; device: string; updatedAt: string; summary: string; today: { date: string; done: boolean; items: { title: string; minutes: number | null; cards: number }[] }; week: { start: string; end: string; done: number; target: number; need: number; days: { date: string; shift: string; studied: boolean; planned: boolean; slot: string }[] } | null; next: { title: string; minutes: number } | null; asks: { date: string | null; title: string; minutes: number; slot: string }[]; pending: string[]; extra: Record<string, unknown> }
+export interface HubStatus { app: "yuzu"; title: string; icon: string; color: string; url: string; version: string; device: string; updatedAt: string; summary: string; estimatedMinutes: number; due: number; streak: number; nextDue: string; today: { date: string; done: boolean; items: { title: string; minutes: number | null; cards: number }[] }; week: { start: string; end: string; done: number; target: number; need: number; days: { date: string; shift: string; studied: boolean; planned: boolean; slot: string }[] } | null; next: { title: string; minutes: number } | null; asks: { date: string | null; title: string; minutes: number; slot: string }[]; pending: string[]; extra: Record<string, unknown> }
 export function statusFingerprint(status: HubStatus): string { const { updatedAt, ...rest } = status; const s = JSON.stringify(rest); let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return (h >>> 0).toString(16); }
 export async function writeStatus(status: HubStatus, cache: Record<string, string>): Promise<string> {
   const parent = await ensureFolders(PATHS.hub, cache); const id = await putFile({ parent, name: "status.json", body: JSON.stringify(status, null, 1), id: cache.statusId || null }); cache.statusId = id; return id;
 }
-/** The scheduler's plan (hub/scheduler/plan.json), whatever shape Citrus writes; null when there is none yet. */
+/** The scheduler's plan: hub/citrus/plan.json (where Citrus Maxima writes it) or hub/scheduler/plan.json (the contract's name); null when there is none yet. */
 export async function readPlan(cache: Record<string, string>): Promise<any | null> {
-  const parent = await ensureFolders(PATHS.plan, cache); const f = (await listFiles({ parent, name: "plan.json" }))[0]; if (!f) return null;
-  const b = await downloadBytes(f); if (!b) return null; try { return JSON.parse(toText(b)); } catch { return null; }
+  for (const path of [PATHS.planCitrus, PATHS.plan]) {
+    const parent = await ensureFolders(path, cache); const f = (await listFiles({ parent, name: "plan.json" }))[0]; if (!f) continue;
+    const b = await downloadBytes(f); if (!b) continue; try { return JSON.parse(toText(b)); } catch { /* try the other */ }
+  }
+  return null;
 }
 /** Schedule files in My Apps/Rotas this device hasn't read (seen: id → modifiedTime). */
 export async function newRotaFiles(seen: Record<string, string>, cache: Record<string, string>): Promise<{ files: DriveFile[]; seen: Record<string, string> }> {

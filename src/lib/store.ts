@@ -275,18 +275,20 @@ export class Store {
     const streak = st.streak ?? 0; let ok = 0, all = 0; for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts > now - 30 * DAY; i--) { const r = this.reviews[i]; if (r.state === "review") { all++; if (r.rating > 1) ok++; } }
     const summary = due === 0 ? `All caught up: nothing due${todayRevs.length ? `, ${todayRevs.length} reviews done today` : ""}.` : `${due.toLocaleString()} cards due (about ${needMin} min); ${todayRevs.length} done today${streak ? `; ${streak}-day streak` : ""}.`;
     return {
-      app: "yuzu", version: (typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev"), device: this.settings.deviceName || "device", updatedAt: new Date(now).toISOString(), summary,
+      app: "yuzu", title: "Yuzu", icon: "🍋", color: "#f2d34b", url: typeof location !== "undefined" ? location.origin + location.pathname : "", version: (typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev"), device: this.settings.deviceName || "device", updatedAt: new Date(now).toISOString(), summary,
+      estimatedMinutes: needMin, due, streak, nextDue: due ? "now" : "",
       today: { date: today, done: todayRevs.length >= Math.min(this.settings.dailyGoal, Math.max(10, due + todayRevs.length)), items: todayRevs.length ? [{ title: "Reviews", minutes, cards: todayRevs.length }] : [] },
       week: { start: (days as any[])[0].date, end: (days as any[])[6].date, done, target, need: Math.max(0, target - done), days: days as any },
       next: due ? { title: `Yuzu: ${due.toLocaleString()} cards`, minutes: needMin } : null,
       asks, pending,
-      extra: { due, overdue: this.overdueCount(), newPerDay: this.settings.newPerDay, goal: this.settings.dailyGoal, knownNow: Math.round(this.knowledgeNow(now).known), retention30: all ? Math.round((ok / all) * 100) : null, cards: this.cards.size, rota: Object.keys(this.rota).sort().slice(-1)[0] ?? null },
+      extra: { due, overdue: this.overdueCount(), newPerDay: this.settings.newPerDay, goal: this.settings.dailyGoal, reviewedToday: todayRevs.length, totalCards: this.cards.size, streak, knownNow: Math.round(this.knowledgeNow(now).known), retention30: all ? Math.round((ok / all) * 100) : null, cards: this.cards.size, rota: Object.keys(this.rota).sort().slice(-1)[0] ?? null },
     };
   }
   async writeHubStatus(force = false): Promise<boolean> {
     if (!tokenValid()) return false;
     try {
       const status = this.hubStatus(); const fp = statusFingerprint(status);
+      try { localStorage.setItem("citrus.status.yuzu", JSON.stringify(status)); } catch { /* same-origin readers only */ }
       if (!force && (fp === this.lastStatusFp || Date.now() - this.lastStatusAt < 5 * 60000)) return false;
       await writeStatus(status, this.gcache); this.lastStatusFp = fp; this.lastStatusAt = Date.now(); await db.setMeta("gcache", this.gcache); return true;
     } catch (e: any) { this.log(false, `status.json: ${e?.message ?? e}`, 0); return false; }

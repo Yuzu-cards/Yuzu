@@ -13,7 +13,7 @@
 
 export const HUB_ROOT = "My Apps";
 /** The shared web client of the "My Apps" Cloud project (a public id; the app's address must be among its redirect URIs). */
-export const DEFAULT_CLIENT_ID = "753489712404-m8600u5f3osnsieeu63ci05ik70rv49p.apps.googleusercontent.com";
+export const DEFAULT_CLIENT_ID = "753489712404-ra7ahu34gjl305b4ss1765idmqg7am5s.apps.googleusercontent.com"; // the "Citrus web" client (Orange's own is …m8600u5f3osnsieeu63ci05ik70rv49p)
 export const SCOPE = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.events";
 const AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_KEY = "yuzu-google", PENDING_KEY = "yuzu-gauth";
