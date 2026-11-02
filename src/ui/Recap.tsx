@@ -6,7 +6,7 @@ import { store } from "../lib/store";
 import { fmtDate } from "../lib/dates";
 import { useBack } from "./useBack";
 import { IconClose } from "./icons";
-import { snackbar } from "./kit";
+import { snackbar, tellSheet } from "./kit";
 
 type Period = "month" | "last-month" | "year";
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -50,7 +50,7 @@ export function Recap({ onClose, initial = "month" }: { onClose: () => void; ini
       {!empty && <div className="row recap-actions">
         <button className="btn primary grow" onClick={() => share("story")}>Share story</button>
         <button className="btn grow" onClick={() => share("square")}>Square</button>
-        <button className="btn grow" onClick={async () => { try { await navigator.clipboard.writeText(text()); snackbar("Copied as text"); } catch { prompt("Copy:", text()); } }}>Text</button>
+        <button className="btn grow" onClick={async () => { try { await navigator.clipboard.writeText(text()); snackbar("Copied as text"); } catch { tellSheet("Couldn’t copy", "Your browser blocked the clipboard. Use Share story instead."); } }}>Text</button>
       </div>}
     </div>, document.body);
 }

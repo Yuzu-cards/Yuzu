@@ -8,7 +8,7 @@ import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./
 import { Progress } from "./Progress";
 import { Boss } from "./Boss";
 import { Inbox } from "./Inbox";
-import { HintLayer, SnackbarHost } from "./kit";
+import { ConfirmHost, HintLayer, SnackbarHost, confirmSheet, tellSheet } from "./kit";
 
 type Tab = "today" | "library" | "progress" | "settings";
 const TAB_HINTS: Record<Tab, string> = {
@@ -29,7 +29,7 @@ function downloadBackup() {
   try {
     const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click();
-  } catch (e) { alert("Backup failed: " + (e as any)?.message); }
+  } catch (e) { tellSheet("Backup failed", (e as any)?.message); }
 }
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -66,13 +66,13 @@ function Recovery({ error }: { error: string }) {
         <p className="small muted">Usual causes: another Yuzu tab is open with an older version (close it), the browser is in a private window, or storage is full.</p>
         <button className="btn primary block" disabled={busy} onClick={() => location.reload()}>Try again</button>
         <button className="btn block" style={{ marginTop: 10 }} onClick={repairApp}>Repair app (clear cached version and reload)</button>
-        <button className="btn danger block" style={{ marginTop: 10 }} disabled={busy} onClick={async () => { if (confirm("Delete the database on this device and start empty? You can then restore a backup or sync from your repository.")) { setBusy(true); try { await indexedDB.deleteDatabase("yuzu"); } finally { location.reload(); } } }}>Reset this device</button>
+        <button className="btn danger block" style={{ marginTop: 10 }} disabled={busy} onClick={async () => { if (await confirmSheet({ title: "Reset this device?", sub: "The database here is deleted and the app starts empty. You can then restore a backup or sync from your repository.", yes: "Delete and start empty" })) { setBusy(true); try { await indexedDB.deleteDatabase("yuzu"); } finally { location.reload(); } } }}>Reset this device</button>
       </div>
     </div>
   );
 }
 
-export function App() { return <ErrorBoundary><AppInner /><HintLayer /><SnackbarHost /></ErrorBoundary>; }
+export function App() { return <ErrorBoundary><AppInner /><HintLayer /><SnackbarHost /><ConfirmHost /></ErrorBoundary>; }
 
 function AppInner() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
@@ -105,7 +105,7 @@ function AppInner() {
     return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={64} /><div className="px muted" style={{ fontSize: 10, lineHeight: "10px" }}>loading…</div>{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
   }
   if (study !== null && study.boss !== undefined) return <Boss path={study.path} view={study.view ?? "decks"} name={study.boss} onExit={() => setStudy(null)} />;
-  if (study !== null) return <Study {...study} onExit={() => setStudy(null)} onBrowseTag={browseTag} />;
+  if (study !== null) return <Study {...study} onExit={() => setStudy(null)} onBrowseTag={browseTag} onSearch={(q) => browse("decks", "", q)} />;
 
   return (
     <div className="app">
@@ -119,7 +119,7 @@ function AppInner() {
       {update && <div className="toast row">New version ready <button className="btn primary" style={{ minHeight: 32, padding: "4px 12px" }} onClick={update}>Update</button></div>}
       <nav className="tabs">
         {([["today", "Today", <IconToday />], ["library", "Library", <IconLibrary />], ["progress", "Progress", <IconProgress />], ["settings", "Settings", <IconSettings />]] as const).map(([k, label, icon]) => (
-          <button key={k} className={"tab" + (tab === k ? " active" : "")} data-hint={TAB_HINTS[k]} onClick={() => { setTab(k); setInbox(false); }}>{icon}{label}</button>
+          <button key={k} className={"tab" + (tab === k ? " active" : "")} data-hint={TAB_HINTS[k]} onClick={() => { if (tab !== k) window.scrollTo(0, 0); setTab(k); setInbox(false); }}>{icon}{label}</button>
         ))}
       </nav>
     </div>

@@ -1,4 +1,5 @@
 import { store } from "../lib/store";
+import { confirmSheet } from "./kit";
 import { fmtDate } from "../lib/dates";
 import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
@@ -172,7 +173,7 @@ function Mastered() {
             {cands.length > 500 && <li className="small muted">… and {(cands.length - 500).toLocaleString()} more (“All” includes them)</li>}
           </ul>
           <div className="row" style={{ gap: 8, marginTop: 10, position: "sticky", bottom: 0, background: "var(--ink-2)", paddingTop: 8 }}>
-            <button className="btn primary grow" disabled={!sel.size} onClick={async () => { if (!confirm(`Retire ${sel.size.toLocaleString()} card${sel.size === 1 ? "" : "s"} as mastered? They are deleted; the log keeps what they said.`)) return; await store.masterCards([...sel], "you"); setSel(new Set()); setOpen(null); }}>Mark mastered ({sel.size.toLocaleString()})</button>
+            <button className="btn primary grow" disabled={!sel.size} onClick={async () => { if (!(await confirmSheet({ title: `Retire ${sel.size.toLocaleString()} card${sel.size === 1 ? "" : "s"} as mastered?`, sub: "They are deleted; the Mastered log keeps what they said.", yes: "Mark mastered" }))) return; await store.masterCards([...sel], "you"); setSel(new Set()); setOpen(null); }}>Mark mastered ({sel.size.toLocaleString()})</button>
             <button className="btn grow" disabled={!sel.size} onClick={async () => { await store.keepCards([...sel]); setSel(new Set()); setOpen(null); }}>Keep studying</button>
           </div>
         </div></div>, document.body

@@ -17,7 +17,7 @@ export function useDialog(onClose: () => void) {
     const el = ref.current; const prevFocus = document.activeElement as HTMLElement | null; const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden"; el?.focus({ preventScroll: true });
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.stopPropagation(); closeRef.current?.(); }
+      if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); closeRef.current?.(); }
       else if (e.key === "Tab" && el) {
         const items = [...el.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')];
         if (!items.length) return; const first = items[0], last = items[items.length - 1];
@@ -98,7 +98,8 @@ export function HintLayer() {
 
 // ---------------------------------------------------------------- hold for a menu
 /** Hold (≈0.5 s) to run onHold instead of the tap. Spread `bind`; check wasHeld() at the start of onClick. Scrolling cancels it. */
-export function useHold(onHold: (() => void) | null, ms = 500) {
+export interface HoldPoint { x: number; y: number; target: Element }
+export function useHold(onHold: ((p: HoldPoint) => void) | null, ms = 500) {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined); const held = useRef(false); const start = useRef<{ x: number; y: number } | null>(null);
   const [pressing, setPressing] = useState(false);
   const cancel = () => { clearTimeout(timer.current); start.current = null; setPressing(false); };
@@ -106,8 +107,10 @@ export function useHold(onHold: (() => void) | null, ms = 500) {
     onPointerDown: (e: React.PointerEvent) => {
       if (e.button != null && e.button !== 0) return;
       held.current = false;
-      const h = (e.target as Element).closest?.("[data-hint]"); if (h && h !== e.currentTarget && (e.currentTarget as Element).contains(h)) return; // a hint inside wins start.current = { x: e.clientX, y: e.clientY }; clearTimeout(timer.current); setPressing(true);
-      timer.current = setTimeout(() => { held.current = true; setPressing(false); buzz(12); onHold(); }, ms);
+      const h = (e.target as Element).closest?.("[data-hint]"); if (h && h !== e.currentTarget && (e.currentTarget as Element).contains(h)) return; // a hint inside wins
+      start.current = { x: e.clientX, y: e.clientY }; const p: HoldPoint = { x: e.clientX, y: e.clientY, target: e.target as Element };
+      clearTimeout(timer.current); setPressing(true);
+      timer.current = setTimeout(() => { held.current = true; setPressing(false); buzz(12); onHold(p); }, ms);
     },
     onPointerMove: (e: React.PointerEvent) => { if (start.current && Math.hypot(e.clientX - start.current.x, e.clientY - start.current.y) > 10) cancel(); },
     onPointerUp: cancel, onPointerLeave: cancel, onPointerCancel: cancel,
@@ -228,4 +231,40 @@ export function SnackbarHost() {
   if (!s) return null;
   return createPortal(
     <div className="kit-snack" role="status"><span className="grow">{s.text}</span>{s.undo && <button className="btn" onClick={async () => { const u = s.undo!; setS(null); await u(); }}>Undo</button>}</div>, document.body);
+}
+
+// ---------------------------------------------------------------- dd/mm/yyyy date field
+const dmyOf = (iso: string) => (/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : "");
+const isoOf = (t: string) => { const m = /^(\d{1,2})[\/.\-\s]?(\d{1,2})[\/.\-\s]?(\d{4})$/.exec(t.trim()) || /^(\d{2})(\d{2})(\d{4})$/.exec(t.trim()); if (!m) return null; const d = new Date(+m[3], +m[2] - 1, +m[1]); return d.getDate() === +m[1] && d.getMonth() === +m[2] - 1 ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : null; };
+/** A date typed as dd/mm/yyyy (or 03112026), with the phone's own calendar behind the 📅 button. Value is ISO yyyy-mm-dd or "". */
+export function DateField({ value, onChange, min, label, placeholder = "dd/mm/yyyy" }: { value: string; onChange: (iso: string) => void; min?: string; label?: string; placeholder?: string }) {
+  const [text, setText] = useState(dmyOf(value)); const [bad, setBad] = useState(false);
+  useEffect(() => { setText(dmyOf(value)); setBad(false); }, [value]);
+  const native = useRef<HTMLInputElement>(null);
+  const commit = () => { if (!text.trim()) { setBad(false); onChange(""); return; } const iso = isoOf(text); if (iso) { setBad(false); onChange(iso); } else setBad(true); };
+  return (
+    <span className="kit-date" aria-label={label}>
+      <input type="text" inputMode="numeric" placeholder={placeholder} maxLength={10} value={text} aria-invalid={bad || undefined} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
+      <button type="button" className="chip" aria-label="Choose from a calendar" onClick={() => { const n = native.current; if (!n) return; if ((n as any).showPicker) try { (n as any).showPicker(); return; } catch { /* falls through */ } n.click(); }}>📅</button>
+      <input ref={native} type="date" tabIndex={-1} aria-hidden="true" value={value} min={min} onChange={(e) => onChange(e.target.value)} style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
+      {bad && <span className="small" style={{ color: "var(--again)" }}>Use dd/mm/yyyy</span>}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------- 8-bit confirm (replaces window.confirm / alert)
+export interface ConfirmReq { title: string; sub?: string; yes?: string; danger?: boolean; /** alert-style: one "OK", always true */ ok?: boolean }
+let pushConfirm: ((r: ConfirmReq & { resolve: (v: boolean) => void }) => void) | null = null;
+/** `if (!(await confirmSheet({ title, sub, yes }))) return;` — Cancel, the scrim, Escape and Android back all answer false. */
+export function confirmSheet(r: ConfirmReq): Promise<boolean> { return new Promise((resolve) => { if (pushConfirm) pushConfirm({ ...r, resolve }); else resolve(window.confirm(r.title + (r.sub ? "\n" + r.sub : ""))); }); }
+/** A sheet with a single OK, for things that only need telling. */
+export function tellSheet(title: string, sub?: string) { return confirmSheet({ title, sub, ok: true, danger: false }); }
+export function ConfirmHost() {
+  const [req, setReq] = useState<(ConfirmReq & { resolve: (v: boolean) => void }) | null>(null);
+  useEffect(() => { pushConfirm = (r) => setReq(r); return () => { pushConfirm = null; }; }, []);
+  if (!req) return null;
+  // The sheet closes first and then runs the item, so a "no" is only settled after a "yes" had its turn.
+  const no = () => { const r = req; setReq(null); queueMicrotask(() => r.resolve(!!r.ok)); };
+  const yes = () => { req.resolve(true); };
+  return <ActionSheet title={req.title} sub={req.sub} onClose={no} items={[{ label: req.ok ? "OK" : req.yes || "Yes", danger: !req.ok && req.danger !== false, onClick: yes }]} />;
 }

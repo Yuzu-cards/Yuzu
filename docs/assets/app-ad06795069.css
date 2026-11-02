@@ -299,3 +299,17 @@ details.how code { font-size: 12px; background: var(--ink-2); padding: 0 4px; }
 .recap-actions { padding: 10px 16px calc(12px + var(--safe-b)); gap: 8px; border-top: 2px solid var(--line-soft); }
 .coach-x { flex: 0 0 auto; width: 40px; margin-bottom: 8px; background: none; border: 0; color: var(--muted); font-size: 14px; }
 .card-box.surprise { border-color: var(--yuzu); }
+
+/* ---- PC: full-screen overlays read as a column, not a 1280px-wide sheet */
+@media (min-width: 900px) {
+  .study-top, .study-meta, .study-body, .answer-bar, .study .plan, .study > .screen, .study-foot { width: 100%; max-width: 900px; margin-left: auto; margin-right: auto; }
+  .answer-bar { border-left: 2px solid var(--line); border-right: 2px solid var(--line); }
+  .recap-top, .recap-cards, .recap-actions, .recap .seg { width: 100%; max-width: 760px; margin-left: auto; margin-right: auto; box-sizing: border-box; }
+  .recap .seg { margin: 0 auto 10px !important; }
+}
+.kit-date { display: inline-flex; align-items: center; gap: 6px; position: relative; }
+.kit-date input[type=text] { width: 118px; min-height: 40px; font-family: var(--sans); font-size: 15px; background: var(--ink-2); border: 2px solid var(--line); color: var(--text); padding: 0 8px; }
+.kit-date input[aria-invalid] { border-color: var(--again); }
+/* hold-a-word: in Yuzu mode the card text is not natively selectable (a hold is ours); in System mode it is */
+.study-body[data-hold-mode="yuzu"] .card-host { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.study-body[data-hold-mode="system"] .card-host { user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }

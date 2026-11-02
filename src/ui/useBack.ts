@@ -18,9 +18,13 @@ export function useBack(open: boolean, onClose: () => void) {
       if (id !== depth) return;
       popped = true; closeRef.current();
     };
+    // Escape on a keyboard closes the topmost overlay too (PC). A sheet on top handles its own Escape and stops it here.
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && id === depth && !e.defaultPrevented) { e.preventDefault(); closeRef.current(); } };
     window.addEventListener("popstate", onPop);
+    window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("popstate", onPop);
+      window.removeEventListener("keydown", onKey);
       depth = Math.max(0, depth - 1);
       if (!popped && history.state?.yuzu === id) { ignorePops++; history.back(); }
     };

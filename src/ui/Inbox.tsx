@@ -1,5 +1,6 @@
 // Inbox: packs (and curation files) that arrived in the sync repository's inbox/ folder.
 // Nothing is added until the user reviews the cards and taps Add. A whole pack can be removed later.
+import { confirmSheet } from "./kit";
 import { useState } from "react";
 import { fmtDate } from "../lib/dates";
 import { store } from "../lib/store";
@@ -70,7 +71,7 @@ export function Inbox({ onClose }: { onClose: () => void }) {
         <>
           <h2>Added packs</h2>
           {store.packLog.map((p) => (
-            <div key={p.id + p.at} className="list-row"><span className="t">{p.name} · {p.noteIds.length} cards · {fmtDate(p.at)}</span><button className="chip" onClick={async () => { if (confirm(`Remove all ${p.noteIds.length} cards of “${p.name}”? Their review history goes with them.`)) setMsg(`Removed ${await store.removePack(p.id)} cards.`); }}>Remove</button></div>
+            <div key={p.id + p.at} className="list-row"><span className="t">{p.name} · {p.noteIds.length} cards · {fmtDate(p.at)}</span><button className="chip" onClick={async () => { if (await confirmSheet({ title: `Remove “${p.name}”?`, sub: `All ${p.noteIds.length} cards and their review history go with it.`, yes: "Remove pack" })) setMsg(`Removed ${await store.removePack(p.id)} cards.`); }}>Remove</button></div>
           ))}
         </>
       )}

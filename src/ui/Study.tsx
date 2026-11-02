@@ -8,7 +8,8 @@ import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit 
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
-import { useHold, Slider, buzz } from "./kit";
+import { useHold, Slider, buzz, confirmSheet } from "./kit";
+import { WordSheet, wordAt, type WordHit } from "./Word";
 import { sfx } from "./sfx";
 import { SKIN_CSS, isShortCard } from "./cardskin";
 import { wireSounds, playSounds, stopSounds, cardSounds } from "./sound";
@@ -186,7 +187,7 @@ export function loadSession(): SavedSession | null {
 }
 function saveSession(s: SavedSession | null) { try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch { /* storage unavailable: sessions just don't survive a reload */ } }
 
-export function Study({ path, view = "decks", only = "all", preset, title, resume, onExit: exit, onBrowseTag }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void }) {
+export function Study({ path, view = "decks", only = "all", preset, title, resume, onExit: exit, onBrowseTag, onSearch }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void; onSearch?: (q: string) => void }) {
   // Resuming: the same cards in the same order, minus any deleted meanwhile (cards are re-read, so their schedule is current).
   const resumed = useMemo(() => (resume ? resume.ids.map((id) => store.cards.get(id)).filter((c): c is Card => !!c) : null), []);
   const fullQueue = useMemo(() => resumed ?? preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
@@ -220,6 +221,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [hookText, setHookText] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
   const [menu, setMenu] = useState(false);
+  const [word, setWord] = useState<WordHit | null>(null);
+  const holdMode = (() => { try { return localStorage.getItem("yuzu-hold") === "system" ? "system" : "yuzu"; } catch { return "yuzu"; } })();
   const total = queue.length;
   useBack(true, onExit);
   const card = queue[idx] ? (store.cards.get(queue[idx].id) ?? queue[idx]) : undefined;
@@ -248,7 +251,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       if (e.key === "h" && !showAnswer) setHint(true);
       if (e.key === "r") playSounds(cardSounds(document.querySelector(".study .card-host")?.shadowRoot));
       if (e.key === "z" && (e.ctrlKey || e.metaKey)) undo();
-      if (e.key === "Escape") onExit();
+      // Escape is handled by useBack (topmost overlay only), so an info sheet on top closes first.
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -339,7 +342,12 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   // Again → also mark the card "needs improving".
   const holdGood = useHold(() => { if (!card) return; const nid = card.nid; answer(3).then(() => { setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== nid)); flash("Good — its sibling cards wait for another day"); }); });
   const holdAgain = useHold(() => { if (!card) return; const c = card; answer(1).then(() => setImproveFor(c.nid)); });
-  const holdPaper = useHold(() => setMenu(true), 550);
+  // Hold the paper: a word under the finger opens the word sheet; anywhere else, the card menu. In "System" hold mode the
+  // phone's own text selection takes the gesture instead (Settings → Look and sound).
+  const holdPaper = useHold(holdMode === "system" ? null : (p) => {
+    const root = (p.target as Element).closest?.(".card-host")?.shadowRoot; const hit = root ? wordAt(root, p.x, p.y) : null;
+    if (hit) setWord(hit); else setMenu(true);
+  }, 550);
   const [improveFor, setImproveFor] = useState<string | null>(null);
 
   if (plan === null) {
@@ -424,6 +432,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
       </div>
       {improveOpen && <ImproveSheet nids={[card.nid]} onClose={() => setImproveOpen(false)} />}
+      {word && <WordSheet hit={word} deckPath={card.source} noteId={card.nid} onClose={() => setWord(null)} onSearch={onSearch} onMenu={() => setMenu(true)} />}
       {menu && (<>
         <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
         <div className="menu">
@@ -432,15 +441,15 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
           <button onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
           <button onClick={() => { setMenu(false); setImproveOpen(true); }}><IconEdit /> {store.improveFor(card.nid) ? "Marked to improve — change" : "Needs improving…"}</button>
           <button className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
-          <button onClick={async () => { setMenu(false); if (!confirm("Retire this card as mastered? It is deleted and kept in the Mastered log (Progress).")) return; await store.masterCards([card.id], "you"); setQueue((q) => q.filter((c, i) => i <= idx || c.id !== card.id)); flash("Retired as mastered"); setIdx((i) => i + 1); }}><IconFlag /> I've mastered this</button>
-          <button className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!confirm(sibs > 1 ? `Delete this note and its ${sibs} cards? Their review history goes too.` : "Delete this card? Its review history goes too.")) return; await store.deleteNotes([card.nid]); lastDel.current = { card, at: idx + 1, removed: queue.filter((c, i) => i > idx && c.nid === card.nid) }; setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>
+          <button onClick={async () => { setMenu(false); if (!(await confirmSheet({ title: "Retire this card as mastered?", sub: "It is deleted and kept in the Mastered log (Progress).", yes: "I’ve mastered it", danger: false }))) return; await store.masterCards([card.id], "you"); setQueue((q) => q.filter((c, i) => i <= idx || c.id !== card.id)); flash("Retired as mastered"); setIdx((i) => i + 1); }}><IconFlag /> I've mastered this</button>
+          <button className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!(await confirmSheet({ title: sibs > 1 ? `Delete this note and its ${sibs} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([card.nid]); lastDel.current = { card, at: idx + 1, removed: queue.filter((c, i) => i > idx && c.nid === card.nid) }; setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>
         </div>
       </>)}
       <div className="study-meta">
         <span className="where">{title ?? card.source.split("::").slice(-2).join(" › ")}</span>
         {card.flag ? <span className="chip orange" style={{ minHeight: 24, padding: "2px 8px" }}>flagged</span> : null}
       </div>
-      <div className={"study-body" + (flying ? " fly-off" : "")} {...holdPaper.bind} onClick={() => { if (holdPaper.wasHeld()) return; if (!showAnswer) setShowAnswer(true); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+      <div className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onClick={() => { if (holdPaper.wasHeld()) return; if (!showAnswer) setShowAnswer(true); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         style={flying ? { transform: flyTo[flying] } : { transform: drag ? `translate(${drag.dx * 0.45}px, ${drag.dy * 0.35}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag && showAnswer && (() => { const g = dirOf(drag); const near = g ?? dirOf({ dx: drag.dx * 1.6, dy: drag.dy * 1.6 }); if (!near) return null; const [t, col] = SWIPE_LABEL[near]; return <div className="swipe-label" style={{ color: col, opacity: g ? 1 : 0.55, left: Math.max(8, Math.min(window.innerWidth - 110, drag.x - 50)), top: Math.max(60, drag.y - 120), position: "fixed" }}>{t}</div>; })()}
         {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>

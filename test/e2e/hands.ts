@@ -91,10 +91,16 @@ try {
   ok("swipe ↓ = Hard", await page.evaluate(() => { const y = (window as any).yuzu; return y.reviews[y.reviews.length - 1]?.rating; }) === 2);
   await swipe(page, ".study-body", 140, 0); await swipe(page, ".study-body", 170, 0);
   ok("swipe → = Good", await page.evaluate(() => { const y = (window as any).yuzu; return y.reviews[y.reviews.length - 1]?.rating; }) === 3);
-  await hold(page, ".study-body .paper", 800); ok("hold the card → its menu", await page.locator("text=Card info and edit").count() === 1);
+  // hold a word → the word sheet (look up, find in my cards, copy, select); hold blank paper → the card menu
+  { const b = (await page.locator(".study-body .paper").first().boundingBox())!; await page.mouse.move(b.x + 70, b.y + 40); await page.mouse.down(); await page.waitForTimeout(800); await page.mouse.up(); await page.waitForTimeout(300); } // the first word
+  const wordSheet = await page.locator(".kit-sheet:has-text('other card')").count();
+  ok("hold a word on the card → word sheet", wordSheet === 1, await page.locator(".kit-sheet").innerText().catch(() => "no sheet"));
+  await page.screenshot({ path: `${shots}/h-word.png` });
+  await page.click(".kit-sheet >> text=Card menu"); await page.waitForTimeout(300);
+  ok("word sheet → card menu", await page.locator("text=Card info and edit").count() === 1);
   await page.click("text=Card info and edit"); await page.waitForTimeout(300);
   ok("card info opens (memory curve for reviewed cards)", await page.locator(".stat:has-text('stability')").count() >= 1);
-  await page.keyboard.press("Escape"); await page.goBack().catch(() => {}); await page.waitForTimeout(300);
+  await page.keyboard.press("Escape"); await page.waitForTimeout(300); ok("Escape closes card info (PC)", (await page.locator(".stat:has-text('stability')").count()) === 0);
   if (await page.locator("text=Show answer").count()) { await page.click("text=Show answer"); await hold(page, ".answer-bar .again", 700); await page.waitForTimeout(300); ok("hold Again → Again + improve sheet", await page.locator("text=What's wrong with this card?").count() === 1); await page.keyboard.press("Escape"); await page.goBack().catch(() => {}); }
   await page.screenshot({ path: `${shots}/h-study.png` });
   await page.click('[aria-label="Close"]').catch(() => {}); await page.waitForTimeout(300);
@@ -122,7 +128,17 @@ try {
   await page.keyboard.press("Escape"); await page.waitForTimeout(200);
   await page.click("text=/Show cards in/"); await page.waitForTimeout(300);
   await hold(page, ".list-row"); ok("hold a card → preview/edit/improve/delete", await page.locator(".kit-sheet:has-text('Preview'):has-text('Delete')").count() === 1);
-  await page.keyboard.press("Escape");
+  // 8-bit confirm sheet instead of a browser pop-up: Cancel and Escape change nothing; Delete deletes with undo
+  const notesBefore = await page.evaluate(() => (window as any).yuzu.notes.size);
+  await page.click(".kit-sheet >> text=Preview"); await page.waitForTimeout(300); await page.click("button.btn.danger:has-text('Delete')"); await page.waitForTimeout(250);
+  ok("delete asks in an 8-bit sheet", await page.locator(".kit-sheet:has-text('Delete this')").count() === 1);
+  await page.click(".kit-sheet >> text=Cancel"); await page.waitForTimeout(250);
+  ok("Cancel keeps the note", (await page.evaluate(() => (window as any).yuzu.notes.size)) === notesBefore && (await page.locator(".kit-sheet").count()) === 0);
+  await page.click("button.btn.danger:has-text('Delete')"); await page.waitForTimeout(250); await page.keyboard.press("Escape"); await page.waitForTimeout(250);
+  ok("Escape answers no", (await page.evaluate(() => (window as any).yuzu.notes.size)) === notesBefore);
+  await page.click("button.btn.danger:has-text('Delete')"); await page.waitForTimeout(250); await page.click(".kit-sheet .kit-item.danger"); await page.waitForTimeout(400);
+  ok("confirming deletes", (await page.evaluate(() => (window as any).yuzu.notes.size)) === notesBefore - 1);
+  await page.keyboard.press("Escape").catch(() => {});
 
   // ---- Progress: recap
   await page.click("nav.tabs >> text=Progress"); await page.waitForTimeout(300);

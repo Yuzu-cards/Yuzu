@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
 import { ImproveSection } from "./Improve";
-import { Slider, snackbar } from "./kit";
+import { Slider, snackbar, DateField, confirmSheet } from "./kit";
 import { retentionTradeoff } from "../scheduler/optimize";
 import { importAnki } from "../import/anki";
 import { inflateRaw, zstd } from "../lib/decompress";
@@ -73,7 +73,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       if (!r.unreadable.length) { setMediaMsg(`All ${r.checked.toLocaleString()} stored files read fine.`); return; }
       const why = Object.entries(r.errors).map(([k, v]) => `${k} ×${v.toLocaleString()}`).join(", ");
       const msg = `${r.unreadable.length.toLocaleString()} of ${r.checked.toLocaleString()} stored files can no longer be read by the browser (${why}). They show as broken on cards. Forget them so “Choose media folder” (or “Choose file”) adds them again?`;
-      if (confirm(msg)) { await store.dropMedia(r.unreadable); setMediaMsg(`Forgot ${r.unreadable.length.toLocaleString()} unreadable file${r.unreadable.length === 1 ? "" : "s"}. Now press “Choose media folder” and pick Anki's collection.media to add them again.`); }
+      if (await confirmSheet({ title: "Forget unreadable files?", sub: msg, yes: "Forget them" })) { await store.dropMedia(r.unreadable); setMediaMsg(`Forgot ${r.unreadable.length.toLocaleString()} unreadable file${r.unreadable.length === 1 ? "" : "s"}. Now press “Choose media folder” and pick Anki's collection.media to add them again.`); }
       else setMediaMsg(`${r.unreadable.length.toLocaleString()} stored files can't be read (${why}). Nothing was changed.`);
     } catch (e: any) { setMediaMsg("Failed: " + (e?.message ?? e)); }
     finally { setBusy(false); setMediaBusy(false); }
@@ -182,7 +182,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <Slider label="Retire automatically when the next review is more than" value={s.retireAutoYears ?? 20} min={0} max={30} step={5} format={(v) => (v ? `${v} y` : "never")} sub={`Must be above the offer line (${s.retireAskYears ?? 5} y). Retired cards are deleted and kept in the Mastered log.`}
           onCommit={async (v) => {
             if (v && v <= (s.retireAskYears ?? 5)) { snackbar(`Has to be above ${s.retireAskYears ?? 5} years`); return false; }
-            if (v) { const n = store.countBeyond(v); if (n && !confirm(`${n.toLocaleString()} card${n === 1 ? " is" : "s are"} already past ${v} years and would be retired now (deleted, kept in the Mastered log). Go ahead?`)) return false; }
+            if (v) { const n = store.countBeyond(v); if (n && !(await confirmSheet({ title: `Retire ${n.toLocaleString()} card${n === 1 ? "" : "s"} now?`, sub: `${n === 1 ? "It is" : "They are"} already past ${v} years: deleted, kept in the Mastered log.`, yes: "Retire them" }))) return false; }
             await store.saveSettings({ retireAutoYears: v }); if (v) store.autoMaster();
           }} />
         <div className="field"><label>Streak rest days per week</label>
@@ -264,7 +264,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           </details>
           <div className="row" style={{ marginTop: 8 }}>
             <button className="btn grow" disabled={busy || !mediaStat.stored} onClick={onExportMedia}>Save media file</button>
-            <button className="btn" disabled={busy || !mediaStat.bytes} onClick={async () => { if (confirm("Remove all deck images and sounds from this device? Cards keep working; media shows as placeholders until added again.")) { setMediaMsg(`Removed ${(await store.clearMedia()).toLocaleString()} files.`); } }}>Remove</button>
+            <button className="btn" disabled={busy || !mediaStat.bytes} onClick={async () => { if (await confirmSheet({ title: "Remove all media from this device?", sub: "Cards keep working; images and sounds show as placeholders until added again.", yes: "Remove media" })) { setMediaMsg(`Removed ${(await store.clearMedia()).toLocaleString()} files.`); } }}>Remove</button>
           </div>
           {mediaStat.missing.length > 0 && <MissingMedia key={mediaStat.stored} />}
           <button className="btn" style={{ marginTop: 8, width: "100%" }} disabled={busy || !mediaStat.stored} onClick={onCheckMedia}>Check stored files</button>
@@ -311,7 +311,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
               {store.syncLog.map((l) => <li key={l.at} className={l.ok ? "" : "muted"}>{fmtDateTime(l.at)} · {l.ok ? "✓" : "✗"} {l.message} ({(l.ms / 1000).toFixed(1)} s)</li>)}
             </ul>
             <div className="row" style={{ marginTop: 8 }}>
-              <button className="btn" onClick={async () => { if (confirm("Forget what has been synced and compare everything with the repository again? Nothing is deleted; the next sync re-downloads and re-uploads changed files.")) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
+              <button className="btn" onClick={async () => { if (await confirmSheet({ title: "Re-check everything?", sub: "Nothing is deleted. The next sync compares every file with the repository and re-sends what differs.", yes: "Re-check on next sync", danger: false })) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
               <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>
             </div>
             <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>
@@ -329,7 +329,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <button className="btn grow" onClick={() => restoreRef.current?.click()}>Restore backup</button>
           <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const r = await store.restore(JSON.parse(await f.text())); setResult(`Restored: ${r.cards} cards, ${r.notes} notes and ${r.reviews} reviews merged.`); } catch (err: any) { setResult("Restore failed: " + err.message); } e.target.value = ""; }} />
         </div>
-        <button className="btn danger block" style={{ marginTop: 10 }} onClick={async () => { if (confirm("Delete all cards and reviews from this device?")) await store.wipe(); }}>Delete everything on this device</button>
+        <button className="btn danger block" style={{ marginTop: 10 }} onClick={async () => { if (await confirmSheet({ title: "Delete everything on this device?", sub: "All cards and reviews here are deleted. A backup or a sync can bring them back.", yes: "Delete everything" })) await store.wipe(); }}>Delete everything on this device</button>
       </div>
       </details>
       <details className="section"><summary>Diagnostics <span className="small muted">storage, errors, repair</span></summary>
@@ -442,9 +442,14 @@ function downloadBlob(blob: Blob, name: string) { const a = document.createEleme
 function DeviceToggles() {
   const get = (k: string) => { try { return localStorage.getItem(k) !== "off"; } catch { return true; } };
   const [h, setH] = useState(() => get("yuzu-haptics")); const [fx, setFx] = useState(() => get("yuzu-effects"));
+  const [hold, setHold] = useState<"yuzu" | "system">(() => { try { return localStorage.getItem("yuzu-hold") === "system" ? "system" : "yuzu"; } catch { return "yuzu"; } });
   const set = (k: string, on: boolean) => { try { localStorage.setItem(k, on ? "on" : "off"); } catch { /* fine */ } };
   return (<>
     <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={h} onChange={(e) => { setH(e.target.checked); set("yuzu-haptics", e.target.checked); if (e.target.checked) navigator.vibrate?.(12); }} /> Vibration (Android): ratings, holds, drags</label>
+    <div className="field" style={{ marginTop: 12 }}><label>Holding a word on a card</label>
+      <div className="seg">{(["yuzu", "system"] as const).map((k) => <button key={k} className={hold === k ? "on" : ""} onClick={() => { setHold(k); try { localStorage.setItem("yuzu-hold", k); } catch { /* fine */ } }}>{k === "yuzu" ? "Yuzu" : "System"}</button>)}</div>
+      <span className="small muted">{hold === "yuzu" ? "Yuzu looks the word up: find it in your other cards, translate or define it, copy, share, or hand it to the phone's own menu." : "The phone's own selection and translator take over, like in any app. The ⋯ button at the top has the card menu."}</span>
+    </div>
     <label className="row small" style={{ margin: "8px 0 0" }}><input type="checkbox" checked={fx} onChange={(e) => { setFx(e.target.checked); set("yuzu-effects", e.target.checked); document.documentElement.dataset.effects = e.target.checked ? "on" : "off"; }} /> Animations and effects (card fly-off, sheets sliding)</label>
   </>);
 }
@@ -461,8 +466,8 @@ function EasyDays() {
         {order.map((d) => <button key={d} className={"chip" + (days[d] < 1 ? " orange" : "")} data-hint={`${names[d]}|Tap to cycle: normal → light (about half the reviews) → off (as few as the schedule allows).`} onClick={() => { const e = [...days]; e[d] = next(e[d]); store.saveSettings({ easyDays: e }); }}>{names[d]} · {days[d] >= 1 ? "normal" : days[d] > 0 ? "light" : "off"}</button>)}
       </div>
       <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-        <span className="small">Break from</span><input type="date" value={s.breakFrom} onChange={(e) => store.saveSettings({ breakFrom: e.target.value })} style={{ width: 150 }} />
-        <span className="small">to</span><input type="date" value={s.breakTo} min={s.breakFrom || undefined} onChange={(e) => store.saveSettings({ breakTo: e.target.value })} style={{ width: 150 }} />
+        <span className="small">Break from</span><DateField label="Break from" value={s.breakFrom} onChange={(v) => store.saveSettings({ breakFrom: v })} />
+        <span className="small">to</span><DateField label="Break to" value={s.breakTo} min={s.breakFrom || undefined} onChange={(v) => store.saveSettings({ breakTo: v })} />
         {(s.breakFrom || s.breakTo) && <button className="chip" onClick={() => store.saveSettings({ breakFrom: "", breakTo: "" })}>Clear</button>}
       </div>
       <span className="small muted">Each answer's next date moves by a day or two within the scheduler's normal spread to the quietest day — so reviews avoid light days, off days and your break (e.g. a night-shift week). No card is pushed past what the spread allows.</span>

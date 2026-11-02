@@ -10,7 +10,7 @@ import { Duplicates } from "./Duplicates";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
-import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, type SheetItem } from "./kit";
+import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, type SheetItem } from "./kit";
 import { systemColor } from "./theme";
 
 let overMemo: { ids: string[]; set: Set<string> } | null = null;
@@ -60,7 +60,7 @@ function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () =>
       <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 6 }}>
         <button className="btn grow" onClick={() => store.setFlag(card.id, card.flag ? 0 : 1)}>{card.flag ? "Unflag" : "Flag"}</button>
         <button className="btn grow" onClick={() => store.setSuspended(card.id, !card.suspended)}>{card.suspended ? "Unpause" : "Pause"}</button>
-        <button className="btn danger grow" onClick={async () => { const n = store.cardsOfNote(note.id).length; if (!confirm(n > 1 ? `Delete this note and its ${n} cards? Review history goes too.` : "Delete this card? Review history goes too.")) return; await store.deleteNotes([note.id]); onClose(); }}>Delete</button>
+        <button className="btn danger grow" onClick={async () => { const n = store.cardsOfNote(note.id).length; if (!(await confirmSheet({ title: n > 1 ? `Delete this note and its ${n} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([note.id]); onClose(); snackbar("Deleted", () => { store.undoDelete(); }); }}>Delete</button>
       </div>
     </div></div>
   );
@@ -287,7 +287,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
           <button className="btn primary" onClick={() => { const cards = [...selected].map((id) => store.cards.get(id)!).filter(Boolean); setSelecting(false); setSelected(new Set()); onStudy(path, view, { preset: cards, title: `${cards.length} selected` }); }}>Study</button>
           <button className="btn" onClick={() => setImproveFor([...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])])}>Needs improving</button>
-          <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!confirm(`Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards? Review history goes too.`)) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); }}>Delete</button>
+          <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!(await confirmSheet({ title: `Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards?`, sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); }}>Delete</button>
         </div>
       )}
       {deleted && deleted.n > 0 && store.lastDeleted === deleted.token && (
