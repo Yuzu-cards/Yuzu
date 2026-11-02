@@ -10,8 +10,10 @@ import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { savedToken, tokenValid, connectGoogle, forgetToken, GoogleError } from "./google";
-import { DriveMedia, type DriveIndex } from "./drive";
+import { savedToken, tokenValid, forgetToken, startConnect, captureRedirect, whoAmI, downloadBytes, DEFAULT_CLIENT_ID, GoogleError } from "./google";
+import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, type DriveIndex, type HubStatus } from "./drive";
+import { rotaFromXlsx, shiftInfo } from "./rota.js";
+declare const __VERSION__: string;
 import { GoogleCalendar, weightsFromShifts, DEFAULT_RULES, type ShiftDay, type ShiftRules, type CalendarInfo } from "./calendar";
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
@@ -61,14 +63,14 @@ export interface Settings {
   /** Anki deck path → Yuzu category, learned from curation files; applied to new cards on every later Anki import (synced). */
   deckMap: Record<string, string>;
   smart: SmartDeck[];
-  sync: { owner: string; repo: string; token: string; auto: boolean };
+  sync: { owner: string; repo: string; token: string; auto: boolean; /** where the collection syncs: Google Drive (the hub) or a GitHub repository (the old way) */ backend?: "drive" | "github" };
   /** Google (synced): the shared Cloud project's client ID, the shift rules, and what to do with Drive and Calendar. */
-  google: { clientId: string; rules: ShiftRules; shiftDays: boolean; driveMedia: boolean; blockTime: string; blockMinutes: number };
+  google: { clientId: string; rules: ShiftRules; shiftDays: boolean; driveMedia: boolean; blockTime: string; blockMinutes: number; /** your name as written in the department schedule */ rotaName: string; /** also read a Google Calendar for shifts (the rota files are the main source) */ calendar: boolean; /** months read from My Apps/Rotas: "2026-11" → day → code */ rota: Record<string, Record<string, string>> };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  google: { clientId: "", rules: DEFAULT_RULES, shiftDays: true, driveMedia: true, blockTime: "19:00", blockMinutes: 25 },
+  google: { clientId: "", rules: DEFAULT_RULES, shiftDays: true, driveMedia: true, blockTime: "19:00", blockMinutes: 25, rotaName: "Amro", calendar: false, rota: {} },
   fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
@@ -148,57 +150,160 @@ export class Store {
   private edits = 0; // bumps on every local change, so a sync can tell whether something happened while it uploaded
   private touch() { this.edits++; if (!this.dirty) { this.dirty = true; db.setMeta("syncDirty", true).catch(() => {}); } this.scheduleSync(); }
 
-  // ---- Google: Drive as the media master copy, Calendar for the rota -------------
+  // ---- Google: Drive as Yuzu's home (collection + media), the hub for Citrus, the rota from Drive -------------
   driveIndex: DriveIndex | null = null; syncOwnerMoved = false;
+  gcache: Record<string, string> = {}; // Drive folder ids by path (+ statusId), per device
   shifts: ShiftDay[] = []; shiftWeights: Record<string, number> = {}; shiftsAt = 0;
+  rota: Record<string, Record<string, string>> = {}; // "2026-11" → { "1": "D2", … } from My Apps/Rotas (synced in settings.google.rota)
+  rotaSeen: Record<string, string> = {}; rotaCheckedOn = "";
+  plan: any = null; planAt = 0; // hub/scheduler/plan.json, as Citrus writes it
   calendars: CalendarInfo[] = [];
   googleStatus: { state: "off" | "working" | "ok" | "error"; message: string; at: number } = { state: "off", message: "Not connected", at: 0 };
   mediaVersion = 0;
-  private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false; private driveDone = false;
+  private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false;
+  private lastStatusFp = ""; private lastStatusAt = 0;
   googleConnected(): boolean { return tokenValid(); }
+  googleSignedIn(): boolean { return !!savedToken(); }
   googleEmail(): string { return savedToken()?.email ?? ""; }
   private setGoogle(state: typeof this.googleStatus.state, message: string) { this.googleStatus = { state, message, at: Date.now() }; this.bump(); }
-  /** Connect (a tap: Google opens its sign-in), then bring Drive and the calendar up to date. */
-  async googleConnect(): Promise<void> {
-    const t = await connectGoogle(this.settings.google.clientId); this.setGoogle("ok", `Connected as ${t.email ?? "you"}`);
-    this.driveDone = false; await this.googleRefresh("connect");
+  private clientId() { return this.settings.google.clientId || DEFAULT_CLIENT_ID; }
+  /** A tap: leave for Google's sign-in; it sends us back with a token and `googleBoot()` takes it from there. */
+  googleConnect(silent = false): void { startConnect(this.clientId(), { silent, hint: this.googleEmail() }); }
+  async googleDisconnect(): Promise<void> { forgetToken(); this.driveIndex = null; this.gcache = {}; await db.setMeta("driveMedia", null); await db.setMeta("gcache", {}); if (this.settings.sync.backend === "drive") await this.saveSettings({ sync: { ...this.settings.sync, backend: "github" } }); this.setGoogle("off", "Not connected"); }
+  /**
+   * At boot: Google's answer from the URL (after a connect or a quiet renewal), and the decision to use Drive for sync.
+   * The first successful connect switches sync to Drive; GitHub stays available in Settings as the fallback.
+   */
+  async googleBoot(): Promise<void> {
+    const r = captureRedirect();
+    if (r?.error) { if (!r.silent) this.setGoogle("error", `Google sign-in didn't finish (${r.error.replace(/_/g, " ")}).`); else { this.silentFailedAt = Date.now(); this.setGoogle("error", "Google needs a tap to reconnect (Settings → Google)"); } return; }
+    if (r?.token) {
+      const email = await whoAmI(); this.setGoogle("ok", `Connected as ${email || "you"}`);
+      if (this.settings.sync.backend !== "drive") { await this.saveSettings({ sync: { ...this.settings.sync, backend: "drive" } }); this.log(true, "Sync now goes through Google Drive (My Apps/Yuzu)", 0); }
+      await this.googleRefresh("connect"); this.scheduleSync(500);
+      return;
+    }
+    if (savedToken()) this.googleStatus = { state: tokenValid() ? "ok" : "error", message: tokenValid() ? `Connected as ${this.googleEmail() || "you"}` : "Google needs a tap to reconnect (Settings → Google)", at: 0 };
   }
-  async googleDisconnect(): Promise<void> { forgetToken(); this.driveIndex = null; await db.setMeta("driveMedia", null); this.setGoogle("off", "Not connected"); }
-  /** Silently renew the token while Google's session is alive (no prompt); false when a tap is needed. */
-  private async googleRenew(): Promise<boolean> {
-    if (tokenValid()) return true; if (!savedToken() || !this.settings.google.clientId) return false;
-    try { await connectGoogle(this.settings.google.clientId, { silent: true }); return true; } catch { return false; }
+  private silentAt = 0; private silentFailedAt = 0;
+  /** A quiet renewal when the token lapsed: at most one bounce through Google a day, never mid-session, and not for a week after one failed. */
+  maybeRenew(hasSession: boolean): boolean {
+    if (!savedToken() || tokenValid() || hasSession || typeof location === "undefined") return false;
+    if (Date.now() - this.silentAt < 20 * 3600000 || Date.now() - this.silentFailedAt < 7 * 86400000) return false;
+    this.silentAt = Date.now(); try { localStorage.setItem("yuzu-gsilent", String(this.silentAt)); } catch { /* fine */ }
+    this.googleConnect(true); return true;
   }
-  /** Refresh the Drive index and the shift calendar, then start the media work. Bounded; continues in the background. */
+  /** Bring the rota, the plan and the media index up to date, write status.json, then the media work in the background. */
   async googleRefresh(reason = "auto"): Promise<void> {
-    if (!savedToken()) return; if (!(await this.googleRenew())) { this.setGoogle("error", "Google needs a tap to reconnect (Settings → Google)"); return; }
+    if (!tokenValid()) { if (savedToken()) this.setGoogle("error", "Google needs a tap to reconnect (Settings → Google)"); return; }
     if (this.driveBusy) return; this.driveBusy = true;
     try {
-      const g = this.settings.google; const progress = (m: string) => this.setGoogle("working", m);
-      if (g.shiftDays) {
+      const g = this.settings.google; const progress = (m: string) => this.setGoogle("working", m); const today = this.isoToday();
+      if (!Object.keys(this.gcache).length) this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
+      // The rota: schedule files in My Apps/Rotas this device hasn't read (once a day, or on a tap).
+      if (g.shiftDays && (this.rotaCheckedOn !== today || reason === "manual" || reason === "connect")) {
         try {
-          const cal = new GoogleCalendar(); const from = new Date(); from.setDate(from.getDate() - 1); const to = new Date(); to.setDate(to.getDate() + 28);
-          if (!this.calendars.length) this.calendars = await cal.calendars();
-          this.shifts = await cal.shifts(g.rules, from, to); this.shiftWeights = weightsFromShifts(this.shifts); this.shiftsAt = Date.now(); this.dueByDay = null;
-          await db.setMeta("shifts", { list: this.shifts, at: this.shiftsAt, calendars: this.calendars });
-        } catch (e: any) { this.log(false, `Calendar: ${e?.message ?? e}`, 0); if (e instanceof GoogleError && e.status === 401) { this.setGoogle("error", e.message); return; } }
+          const { files, seen } = await newRotaFiles(this.rotaSeen, this.gcache); let found = 0;
+          for (const f of files) {
+            try { const b = await downloadBytes(f); if (!b) continue; const r = await rotaFromXlsx(b, g.rotaName || "Amro", today); if (r.month) { this.rota = { ...this.rota, [r.month]: r.days }; found++; } } catch { /* not a schedule, or not one with your row */ }
+          }
+          this.rotaSeen = seen; this.rotaCheckedOn = today; await db.setMeta("rotaSeen", { seen, on: today });
+          if (found) { await this.saveSettings({ google: { ...this.settings.google, rota: this.rota } }); this.log(true, `Rota: ${found} month${found === 1 ? "" : "s"} read from Drive`, 0); }
+        } catch (e: any) { this.log(false, `Rotas folder: ${e?.message ?? e}`, 0); if (e instanceof GoogleError && e.auth) { this.setGoogle("error", e.message); return; } }
       }
+      // The calendar, when the rota doesn't cover a day (and for "Add study blocks").
+      if (g.shiftDays && g.calendar) {
+        try { const cal = new GoogleCalendar(); const from = new Date(); from.setDate(from.getDate() - 1); const to = new Date(); to.setDate(to.getDate() + 28); if (!this.calendars.length) this.calendars = await cal.calendars(); this.shifts = await cal.shifts(g.rules, from, to); this.shiftsAt = Date.now(); await db.setMeta("shifts", { list: this.shifts, at: this.shiftsAt, calendars: this.calendars }); }
+        catch (e: any) { this.log(false, `Calendar: ${e?.message ?? e}`, 0); }
+      }
+      this.rebuildShiftWeights();
+      // Citrus's plan for today.
+      try { const plan = await readPlan(this.gcache); if (plan) { this.plan = plan; this.planAt = Date.now(); await db.setMeta("plan", { plan, at: this.planAt }); } } catch { /* next time */ }
+      await db.setMeta("gcache", this.gcache);
+      await this.writeHubStatus(reason === "connect" || reason === "manual");
       if (g.driveMedia) {
-        const drive = new DriveMedia();
+        const drive = new DriveMedia(this.gcache);
         let idx = this.driveIndex ?? (await db.getMeta<DriveIndex | null>("driveMedia", null));
         idx = await drive.ensure(idx); idx = await drive.refresh(idx, 20000, progress);
-        this.driveIndex = idx; await db.setMeta("driveMedia", idx);
+        this.driveIndex = idx; await db.setMeta("driveMedia", idx); await db.setMeta("gcache", this.gcache);
         if (!idx.complete) { this.scheduleDrive(1500); this.setGoogle("working", `Reading Drive: ${Object.keys(idx.files).length.toLocaleString()} files so far`); return; }
         const r = await this.driveWork(drive, progress);
         if (r.more) { this.scheduleDrive(2500); return; }
       }
-      const n = this.driveIndex ? Object.keys(this.driveIndex.files).length : 0;
-      this.setGoogle("ok", `${this.googleEmail() || "Connected"} · ${n.toLocaleString()} files on Drive${this.shiftsAt ? ` · ${this.shifts.length} shift days` : ""}`);
-      this.bump();
+      const n = this.driveIndex ? Object.keys(this.driveIndex.files).length : 0; const months = Object.keys(this.rota).length;
+      this.setGoogle("ok", `${this.googleEmail() || "Connected"} · ${n.toLocaleString()} media files on Drive${months ? ` · rota for ${months} month${months === 1 ? "" : "s"}` : ""}${this.plan ? " · Citrus plan read" : ""}`);
     } catch (e: any) { this.setGoogle("error", e?.message ?? String(e)); this.log(false, `Google: ${e?.message ?? e}`, 0); }
-    finally { this.driveBusy = false; void reason; }
+    finally { this.driveBusy = false; }
   }
   private scheduleDrive(ms: number) { if (this.driveTimer) clearTimeout(this.driveTimer); this.driveTimer = setTimeout(() => { this.driveTimer = null; this.googleRefresh("more").catch(() => {}); }, ms); }
+  isoToday(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+  /** Your shift on a date from the rota (null when no rota covers it): kind, label, hours, and whether you're coming off a night. */
+  shiftOn(iso: string): { code: string; kind: string; label: string; hours: string; afterNight: boolean; start?: number } | null {
+    const days = this.rota[iso.slice(0, 7)]; if (!days) return null;
+    const info = shiftInfo(days[String(Number(iso.slice(8)))] ?? "");
+    const prev = new Date(iso + "T12:00:00"); prev.setDate(prev.getDate() - 1); const pIso = this.isoToday(prev); const pDays = this.rota[pIso.slice(0, 7)];
+    const afterNight = !!pDays && shiftInfo(pDays[String(Number(pIso.slice(8)))] ?? "").kind === "night";
+    return { code: info.code, kind: info.kind, label: info.label, hours: info.hours, afterNight, start: info.start };
+  }
+  /** Fit of a day for study, as the hub names it: free · before (a shift) · early · postnight · tough. */
+  slotOn(iso: string): string {
+    const s = this.shiftOn(iso); if (!s) { const w = this.shiftWeights[iso]; return w === undefined ? "free" : w < 1 ? "postnight" : "free"; }
+    if (s.kind === "off" || s.kind === "leave") return s.afterNight ? "postnight" : "free";
+    if (s.afterNight && s.kind === "night") return "tough"; if (s.afterNight) return "postnight"; if (s.kind === "night") return "before";
+    return s.start !== undefined && s.start <= 8 ? "early" : "before";
+  }
+  /** Day weights for the balancer: the rota first (night → that day and the next light; between nights off), then the calendar. */
+  private rebuildShiftWeights() {
+    const w: Record<string, number> = { ...weightsFromShifts(this.shifts) };
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    for (let i = 0; i < 45; i++) { const iso = this.isoToday(d); const s = this.shiftOn(iso); if (s) { if (s.kind === "night" && s.afterNight) w[iso] = 0.25; else if (s.kind === "night" || s.afterNight) w[iso] = Math.min(w[iso] ?? 1, 0.5); } d.setDate(d.getDate() + 1); }
+    this.shiftWeights = w; this.dueByDay = null;
+  }
+  /** Yuzu's status.json for the scheduler (the hub contract): written when its content changed, at most every 5 min unless forced. */
+  hubStatus(): HubStatus {
+    const now = Date.now(); const today = this.isoToday(); const st = this.stats(now); const q = this.queue("", now, "decks", "all"); const due = q.length;
+    const todayRevs = this.reviews.filter((r) => r.ts >= this.dayStart(now)); const minutes = Math.round(todayRevs.reduce((a, r) => a + Math.min(r.durationMs ?? 0, 120000), 0) / 60000);
+    const planMin = (() => { try { return Number(localStorage.getItem("yuzu-plan-min") ?? 25) || 25; } catch { return 25; } })();
+    const rs = this.reviews.slice(-200).map((r) => r.durationMs).filter((d) => d > 500 && d < 120000).sort((a, b) => a - b); const secs = rs.length >= 10 ? rs[Math.floor(rs.length / 2)] / 1000 : 9; const needMin = Math.max(5, Math.min(90, Math.round((due * secs) / 60 / 5) * 5));
+    // the week Fri → Thu, as Orange and Citrus count it
+    const d0 = new Date(); const back = (d0.getDay() + 2) % 7; d0.setDate(d0.getDate() - back); const days = [] as HubStatus["week"] extends infer W ? W extends { days: infer D } ? D : never : never;
+    const byDay = new Map<string, number>(); for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts > now - 9 * DAY; i--) { const k = this.isoToday(new Date(this.reviews[i].ts)); byDay.set(k, (byDay.get(k) ?? 0) + 1); }
+    for (let i = 0; i < 7; i++) { const iso = this.isoToday(d0); const s = this.shiftOn(iso); (days as any[]).push({ date: iso, shift: s?.code ?? "", studied: (byDay.get(iso) ?? 0) >= 10, planned: iso >= today && (this.shiftWeights[iso] ?? 1) > 0.3, slot: this.slotOn(iso) }); d0.setDate(d0.getDate() + 1); }
+    const done = (days as any[]).filter((x) => x.studied).length; const target = 7 - (this.settings.restDays ?? 1);
+    const asks = (days as any[]).filter((x) => x.date >= today && !x.studied && x.planned).map((x) => ({ date: x.date, title: `Yuzu: ${x.date === today ? `${due.toLocaleString()} cards` : "cards"}`, minutes: x.date === today ? needMin : Math.max(10, Math.min(60, planMin)), slot: x.slot }));
+    const pending: string[] = []; const imp = this.improveList().length; if (imp) pending.push(`${imp} cards marked for Claude to improve`); const offer = this.countBeyond(this.settings.retireAskYears ?? 5); if (offer) pending.push(`${offer} cards ready to retire as mastered`); if (this.hasUnsynced()) pending.push("Unsynced changes");
+    const streak = st.streak ?? 0; let ok = 0, all = 0; for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts > now - 30 * DAY; i--) { const r = this.reviews[i]; if (r.state === "review") { all++; if (r.rating > 1) ok++; } }
+    const summary = due === 0 ? `All caught up: nothing due${todayRevs.length ? `, ${todayRevs.length} reviews done today` : ""}.` : `${due.toLocaleString()} cards due (about ${needMin} min); ${todayRevs.length} done today${streak ? `; ${streak}-day streak` : ""}.`;
+    return {
+      app: "yuzu", version: (typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev"), device: this.settings.deviceName || "device", updatedAt: new Date(now).toISOString(), summary,
+      today: { date: today, done: todayRevs.length >= Math.min(this.settings.dailyGoal, Math.max(10, due + todayRevs.length)), items: todayRevs.length ? [{ title: "Reviews", minutes, cards: todayRevs.length }] : [] },
+      week: { start: (days as any[])[0].date, end: (days as any[])[6].date, done, target, need: Math.max(0, target - done), days: days as any },
+      next: due ? { title: `Yuzu: ${due.toLocaleString()} cards`, minutes: needMin } : null,
+      asks, pending,
+      extra: { due, overdue: this.overdueCount(), newPerDay: this.settings.newPerDay, goal: this.settings.dailyGoal, knownNow: Math.round(this.knowledgeNow(now).known), retention30: all ? Math.round((ok / all) * 100) : null, cards: this.cards.size, rota: Object.keys(this.rota).sort().slice(-1)[0] ?? null },
+    };
+  }
+  async writeHubStatus(force = false): Promise<boolean> {
+    if (!tokenValid()) return false;
+    try {
+      const status = this.hubStatus(); const fp = statusFingerprint(status);
+      if (!force && (fp === this.lastStatusFp || Date.now() - this.lastStatusAt < 5 * 60000)) return false;
+      await writeStatus(status, this.gcache); this.lastStatusFp = fp; this.lastStatusAt = Date.now(); await db.setMeta("gcache", this.gcache); return true;
+    } catch (e: any) { this.log(false, `status.json: ${e?.message ?? e}`, 0); return false; }
+  }
+  /** Citrus's blocks for Yuzu today, from plan.json, whatever shape it uses (title/app + start/time + minutes). */
+  planToday(): { start: string; minutes: number; title: string }[] {
+    const p = this.plan; if (!p) return []; const today = this.isoToday(); const out: { start: string; minutes: number; title: string }[] = [];
+    const walk = (x: any, date: string | null) => {
+      if (!x || typeof x !== "object") return;
+      if (Array.isArray(x)) { for (const y of x) walk(y, date); return; }
+      const d = typeof x.date === "string" ? x.date : date;
+      const isYuzu = /yuzu/i.test(String(x.app ?? x.title ?? x.name ?? ""));
+      if (isYuzu && (d === today || !d)) { const start = String(x.start ?? x.time ?? x.at ?? "").match(/\d{1,2}:\d{2}/)?.[0] ?? ""; const minutes = Number(x.minutes ?? x.min ?? x.duration) || 0; if (start || minutes) out.push({ start, minutes, title: String(x.title ?? x.name ?? "Yuzu") }); }
+      for (const k of Object.keys(x)) if (typeof x[k] === "object") walk(x[k], d);
+    };
+    walk(p, null); return out;
+  }
   /** What Drive still lacks from here, and what the cards here still lack from Drive. */
   driveState() {
     const idx = this.driveIndex; if (!idx) return null;
@@ -210,22 +315,20 @@ export class Store {
   /** One bounded round: upload media Drive lacks (this device as the master copy), then fetch what the cards here need. */
   private async driveWork(drive: DriveMedia, progress: (m: string) => void): Promise<{ more: boolean }> {
     const idx = this.driveIndex!; let budget = MEDIA_BATCH_BYTES, n = 0; const t0 = Date.now();
-    // Uploads: the device whose library has the file. Anki's linked folder (PC) counts too.
     const dir = await this.ankiFolder();
     const candidates: [string, () => Promise<Blob | null>][] = [];
     for (const [name, blob] of this.media) if (!idx.files[name] && !name.startsWith("pack-")) candidates.push([name, async () => blob]);
     if (dir) for (const r of this.mediaRefs()) if (!idx.files[r] && !this.media.has(r)) candidates.push([r, async () => { try { const h = await dir.getFileHandle(r); return await h.getFile(); } catch { return null; } }]);
+    const skipped = new Set<string>();
     for (const [name, get] of candidates) {
       if (budget <= 0 || Date.now() - t0 > 40000) return { more: true };
-      const blob = await get(); if (!blob) { idx.files[name] = { id: "", s: 0 }; continue; } // not here after all: don't retry this run
+      const blob = await get(); if (!blob) { skipped.add(name); continue; }
       try { const id = await drive.upload(idx, name, blob); idx.files[name] = { id, s: blob.size }; budget -= blob.size; n++; }
-      catch (e: any) { if (e instanceof GoogleError && (e.status === 401 || e.status === 403)) throw e; this.log(false, `Drive upload ${name}: ${e?.message ?? e}`, 0); idx.files[name] = { id: "", s: 0 }; }
+      catch (e: any) { if (e instanceof GoogleError && (e.auth || e.status === 403)) throw e; this.log(false, `Drive upload ${name}: ${e?.message ?? e}`, 0); skipped.add(name); }
       if (n % 10 === 0) { progress(`Sending to Drive: ${n} files`); await db.setMeta("driveMedia", idx); }
     }
-    for (const [name, f] of Object.entries(idx.files)) if (!f.id) delete idx.files[name]; // placeholders from this run are not kept
     await db.setMeta("driveMedia", idx);
     if (n) this.log(true, `${n} media files sent to Drive`, Date.now() - t0);
-    // Downloads: everything the cards here use and Drive has, a batch per round.
     const refs = this.mediaRefs(); const want: [string, { id: string; s: number }][] = [];
     for (const r of refs) if (!this.media.has(r)) { const f = idx.files[r]; if (f?.id) want.push([r, f]); }
     let got = 0, bytes = 0; const q = want.slice(); const saved: { name: string; blob: Blob }[] = [];
@@ -233,31 +336,32 @@ export class Store {
       while (q.length && bytes < MEDIA_BATCH_BYTES && Date.now() - t0 < 50000) {
         const [name, f] = q.shift()!;
         try { const blob = await drive.download(f.id); if (blob) { this.media.set(name, blob); saved.push({ name, blob }); got++; bytes += blob.size; } }
-        catch (e: any) { if (e instanceof GoogleError && e.status === 401) throw e; }
+        catch (e: any) { if (e instanceof GoogleError && e.auth) throw e; }
         if (saved.length >= 25) { const b = saved.splice(0); await db.putMany("media", b); this.mediaUrls.clear(); this.mediaVersion++; progress(`From Drive: ${got} of ${want.length} files`); this.bump(); }
       }
     }));
     if (saved.length) { await db.putMany("media", saved); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }
     if (got) this.log(true, `${got} media files fetched from Drive`, Date.now() - t0);
-    return { more: q.length > 0 };
+    return { more: q.length > 0 || candidates.length > n + skipped.size };
   }
   /** A card shows a file this device lacks: fetch it from Drive right now (once), then the card re-renders. */
   private driveFetchOne(name: string) {
     const f = this.driveIndex?.files[name]; if (!f?.id || this.driveFetching.has(name) || !tokenValid()) return;
     this.driveFetching.add(name);
-    new DriveMedia().download(f.id).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
+    new DriveMedia(this.gcache).download(f.id).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
   }
-  /** Study blocks for the next week in Google Calendar, on days without a night shift. */
+  /** Study blocks for the next week in Google Calendar, on days that are not nights or the morning after. */
   async addStudyBlocks(days = 7): Promise<number> {
-    if (!(await this.googleRenew())) throw new Error("Connect Google first (Settings → Google).");
+    if (!tokenValid()) throw new Error("Connect Google first (Settings → Google).");
     const cal = new GoogleCalendar(); const g = this.settings.google; let n = 0; const d = new Date();
-    for (let i = 1; i <= days; i++) { d.setDate(d.getDate() + 1); const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; if ((this.shiftWeights[iso] ?? 1) < 1 || this.dayWeight(d.getTime()) <= 0) continue; await cal.addBlock(g.rules.calendarId, iso, g.blockTime, g.blockMinutes); n++; }
+    for (let i = 1; i <= days; i++) { d.setDate(d.getDate() + 1); const iso = this.isoToday(d); if ((this.shiftWeights[iso] ?? 1) < 1 || this.dayWeight(d.getTime()) <= 0) continue; await cal.addBlock(g.rules.calendarId, iso, g.blockTime, g.blockMinutes); n++; }
     return n;
   }
 
   // ---- sync ---------------------------------------------------------------
   hasUnsynced(): boolean { return this.dirty; }
-  syncConfigured(): boolean { const s = this.settings.sync; return !!(s.owner && s.repo && s.token); }
+  syncBackend(): "drive" | "github" { return this.settings.sync.backend === "drive" ? "drive" : "github"; }
+  syncConfigured(): boolean { const s = this.settings.sync; return this.syncBackend() === "drive" ? !!savedToken() : !!(s.owner && s.repo && s.token); }
   scheduleSync(delay = 8000) {
     if (!this.syncConfigured() || !this.settings.sync.auto) return;
     if (this.syncTimer) clearTimeout(this.syncTimer);
@@ -277,8 +381,11 @@ export class Store {
     if (!this.syncConfigured()) { this.setSync("off", "Not set up"); return; }
     if (this.syncStatus.state === "syncing") { this.syncAgain = true; return; }
     if (typeof navigator !== "undefined" && !navigator.onLine) { this.setSync("error", "Offline — will sync when back online"); return; }
+    const drive = this.syncBackend() === "drive";
+    if (drive && !tokenValid()) { this.setSync("error", "Google needs a tap to reconnect (Settings → Google)"); return; }
+    if (drive && !Object.keys(this.gcache).length) this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
     const cfg: SyncConfig = { owner: this.settings.sync.owner, repo: this.settings.sync.repo, token: this.settings.sync.token };
-    const gh = new GitHubSync(cfg);
+    const gh: GitHubSync | DriveSync = drive ? new DriveSync(this.gcache, this.settings.deviceName || "device") : new GitHubSync(cfg);
     const t0 = Date.now();
     this.setSync("syncing", "Syncing…");
     let lastBump = 0;
@@ -298,7 +405,7 @@ export class Store {
         const lock = await gh.acquireLock(this.settings.deviceName || "device");
         if (!lock.held) { this.scheduleSync(60000); throw new SyncError(`${lock.by} is syncing right now; this device will retry in a minute.`, "busy"); }
         const remote = await gh.pullManifest();
-        let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | null = null;
+        let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | Awaited<ReturnType<DriveSync["pullChanged"]>> | null = null;
         if (remote) {
           got = await gh.pullChanged(remote, known, progress);
           progress("Merging");
@@ -340,7 +447,7 @@ export class Store {
         // Shared images: merge the repository's index, pick what to upload from here (bounded per sync).
         let mediaIndex: MediaIndex = { ...(await db.getMeta<MediaIndex>("mediaIndex", {})), ...(got?.mediaIndex ?? {}) };
         const mediaBlobs: { path: string; bytes: Uint8Array }[] = [];
-        if (this.settings.mediaSync) {
+        if (this.settings.mediaSync && !drive) {
           let budget = MEDIA_BATCH_BYTES; let total = Object.values(mediaIndex).reduce((a, v) => a + v.s, 0);
           for (const [name, blob] of this.media) {
             if (budget <= 0) break;
@@ -358,9 +465,10 @@ export class Store {
         const inRepo = new Set(Object.keys(remote?.files ?? {}));
         const wants: Record<string, MediaWant> = { ...(await db.getMeta<Record<string, MediaWant>>("mediaWants", {})), ...(got?.mediaWants ?? {}) };
         for (const [k, w] of Object.entries(wants)) if (!w.id || (k !== me && !inRepo.has(wantPath(k)))) delete wants[k]; // (lists from the first version had no id)
-        const dir = await this.ankiFolder();
+        const dir = drive ? null : await this.ankiFolder();
         const wantsKey = this.settings.mediaDownload && !dir ? `${this.refsKey()}|${this.media.size}|${Object.keys(mediaIndex).length}|${myName}` : "";
-        if (this.settings.mediaDownload && !dir && wants[me] && wantsKey === this.lastWantsKey) { /* nothing changed: keep the list as it is */ }
+        if (drive) { for (const k of Object.keys(wants)) delete wants[k]; /* media goes through Drive, nobody needs a wants list */ }
+        else if (this.settings.mediaDownload && !dir && wants[me] && wantsKey === this.lastWantsKey) { /* nothing changed: keep the list as it is */ }
         else if (this.settings.mediaDownload && !dir) {
           this.lastWantsKey = wantsKey;
           const miss: string[] = []; let total = 0;
@@ -368,7 +476,7 @@ export class Store {
           const prev = wants[me]; if (!prev || prev.total !== total || prev.device !== myName) wants[me] = { id: me, device: myName, at: Date.now(), total, missing: miss };
         } else delete wants[me];
         // Senders: Anki's folder (PC, linked) or this device's own library (the phone as the master copy).
-        if (dir || this.media.size) { const more = await this.sendWanted(dir, wants, me, mediaIndex, mediaBlobs, progress); mediaIndex = more.index; if (more.left) this.scheduleSync(4000); }
+        if (!drive && (dir || this.media.size)) { const more = await this.sendWanted(dir, wants, me, mediaIndex, mediaBlobs, progress); mediaIndex = more.index; if (more.left) this.scheduleSync(4000); }
         this.mediaWants = wants;
         progress("Preparing upload"); const editsAtSnapshot = this.edits;
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
@@ -388,7 +496,7 @@ export class Store {
           if (!res.commit) await gh.releaseLock(); // nothing to push: the push did not make a commit, so remove the lock separately
           await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); await db.setMeta("mediaIndex", mediaIndex); await db.setMeta("mediaWants", wants);
           // Shared images missing here: fetch a batch now; the rest on the next sync.
-          if (this.settings.mediaDownload) {
+          if (this.settings.mediaDownload && !drive) {
             const waiting = Object.entries(mediaIndex).filter(([name, v]) => v.p && !this.media.has(name)); const used = waiting.length ? this.mediaRefs() : null; const missing = waiting.filter(([name]) => used!.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
             const q = missing.filter(([, v]) => { if (budget - v.s < 0) return false; budget -= v.s; return true; });
             await Promise.all(Array.from({ length: 4 }, async () => { while (q.length) { const [name, v] = q.shift()!; try { const bytes = await gh.readBinary(v.p); if (bytes) { const blob = new Blob([bytes as BlobPart], { type: v.p.endsWith(".webp") ? "image/webp" : mimeFor(name) }); this.media.set(name, blob); got2.push({ name, blob }); } } catch { /* next time */ } progress(`Downloading images ${++done}/${q.length + done}`); } }));
@@ -405,7 +513,7 @@ export class Store {
             throw new SyncError(`This device differs from the repository (${counts.cards.toLocaleString()} vs ${rc.cards.toLocaleString()} cards); the next sync re-checks every file.`, "other");
           }
           // Keep the repository from growing forever: every COMPACT_EVERY commits, fold the history into one commit.
-          if ((res.manifest.commits ?? 0) >= COMPACT_EVERY) { progress("Compacting history"); try { if (await gh.compact(this.settings.deviceName)) this.log(true, "History compacted", 0); } catch { /* next time */ } }
+          if (!drive && (res.manifest.commits ?? 0) >= COMPACT_EVERY) { progress("Compacting history"); try { if (await (gh as GitHubSync).compact(this.settings.deviceName)) this.log(true, "History compacted", 0); } catch { /* next time */ } }
           const parts = [];
           if (pulledN + pulledC + pulledR) parts.push(`pulled ${pulledC.toLocaleString()} cards, ${pulledR.toLocaleString()} reviews`);
           if (res.pushed) parts.push(`pushed ${res.pushed} files (${res.bytes > 1048576 ? (res.bytes / 1048576).toFixed(1) + " MB" : Math.round(res.bytes / 1024) + " KB"})`);
@@ -420,6 +528,9 @@ export class Store {
       }
       this.log(true, summary, Date.now() - t0);
       this.setSync("ok", summary);
+      // The rota may have arrived from another device with the settings; Citrus gets a fresh status after every sync that changed something.
+      const rota = this.settings.google?.rota ?? {}; if (JSON.stringify(rota) !== JSON.stringify(this.rota)) { this.rota = rota; this.rebuildShiftWeights(); }
+      if (tokenValid()) this.writeHubStatus(false).catch(() => {});
       this.autoMaster().catch(() => {});
       this.bump();
     } catch (e: any) {
@@ -524,7 +635,10 @@ export class Store {
     this.driveIndex = await db.getMeta<DriveIndex | null>("driveMedia", null);
     const sh = await db.getMeta<{ list: ShiftDay[]; at: number; calendars: CalendarInfo[] } | null>("shifts", null);
     if (sh) { this.shifts = sh.list; this.shiftWeights = weightsFromShifts(sh.list); this.shiftsAt = sh.at; this.calendars = sh.calendars ?? []; }
-    if (savedToken()) this.googleStatus = { state: tokenValid() ? "ok" : "error", message: tokenValid() ? `Connected as ${this.googleEmail() || "you"}` : "Google needs a tap to reconnect", at: 0 };
+    const rs = await db.getMeta<{ seen: Record<string, string>; on: string } | null>("rotaSeen", null); if (rs) { this.rotaSeen = rs.seen; this.rotaCheckedOn = rs.on; }
+    const pl = await db.getMeta<{ plan: any; at: number } | null>("plan", null); if (pl) { this.plan = pl.plan; this.planAt = pl.at; }
+    this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
+    try { this.silentAt = Number(localStorage.getItem("yuzu-gsilent") ?? 0); } catch { /* fine */ }
     this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
     this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
     this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
@@ -539,6 +653,7 @@ export class Store {
     // FSRS-6 (28/10/2026): 19 saved weights → 21; re-tune on the user's history under FSRS-6 shortly after start.
     if ((this.settings.scheduler.w?.length ?? 0) < 21) { this.settings = { ...this.settings, scheduler: { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }, fit: null }; await db.setMeta("settings", this.settings); }
     setActiveWeights(this.settings.scheduler.w);
+    this.rota = this.settings.google?.rota ?? {}; this.rebuildShiftWeights();
     await this.migrations();
     this.loaded = true;
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
@@ -550,8 +665,9 @@ export class Store {
       const since = this.settings.fit ? this.reviews.filter((r) => r.ts > this.settings.fit!.at).length : this.reviews.length;
       if (since >= 1000) setTimeout(() => { this.optimizeScheduler().catch(() => {}); }, 15000);
       this.scheduleSync(1500);
-      if (savedToken()) setTimeout(() => { this.googleRefresh("start").catch(() => {}); }, 6000);
-      setInterval(() => { if (document.visibilityState === "visible" && savedToken() && Date.now() - this.shiftsAt > 30 * 60000) this.googleRefresh("poll").catch(() => {}); }, 10 * 60000);
+      // Google: the answer to a sign-in (or a quiet renewal), then the daily look round Drive; status.json after syncs.
+      this.googleBoot().then(() => { if (tokenValid()) setTimeout(() => { this.googleRefresh("start").catch(() => {}); }, 5000); else this.maybeRenew(false); }).catch(() => {});
+      setInterval(() => { if (document.visibilityState !== "visible") return; if (tokenValid()) { if (Date.now() - this.lastStatusAt > 30 * 60000) this.googleRefresh("poll").catch(() => {}); } else this.maybeRenew(false); }, 10 * 60000);
       window.addEventListener("online", () => this.scheduleSync(2000));
       // While the app is open, look for changes from other devices every 5 minutes (one or two requests when nothing changed).
       setInterval(() => { if (document.visibilityState === "visible" && this.syncConfigured() && this.settings.sync.auto && this.syncStatus.state !== "syncing") this.sync("poll").catch(() => {}); }, 5 * 60000);
@@ -784,7 +900,7 @@ export class Store {
   // ---- inbox ---------------------------------------------------------------
   inbox: { file: string; sha: string; at: number; pack: any }[] = [];
   packLog: { id: string; name: string; at: number; noteIds: string[] }[] = [];
-  private async checkInbox(gh: GitHubSync) {
+  private async checkInbox(gh: GitHubSync | DriveSync) {
     let files: { name: string; sha: string; size: number }[] = [];
     try { files = await gh.listInbox(); } catch { return; }
     const seen = new Set(await db.getMeta<string[]>("inboxSeen", []));

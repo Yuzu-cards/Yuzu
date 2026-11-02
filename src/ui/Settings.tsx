@@ -478,44 +478,53 @@ function EasyDays() {
 }
 
 
-/** Google: one shared Cloud project for all the Citrus apps. Drive holds the media master copy; Calendar gives the rota. */
+/** Google: Yuzu's home on Drive (collection + media), the rota from My Apps/Rotas and the hub for Citrus Maxima. */
 function GoogleSection() {
-  const s = store.settings; const g = s.google; const st = store.googleStatus; const on = store.googleConnected(); const ds = store.driveState();
+  const s = store.settings; const g = s.google; const st = store.googleStatus; const on = store.googleConnected(); const signed = store.googleSignedIn(); const ds = store.driveState();
   const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
   const setG = (patch: Partial<typeof g>) => store.saveSettings({ google: { ...g, ...patch } });
   const act = async (f: () => Promise<string | void>) => { setBusy(true); setMsg(""); try { const m = await f(); if (m) setMsg(m); } catch (e: any) { setMsg(e?.message ?? String(e)); } finally { setBusy(false); } };
-  const next = store.shifts.filter((d) => d.iso >= new Date().toISOString().slice(0, 10)).slice(0, 8);
+  const today = store.isoToday(); const coming: string[] = []; const d = new Date();
+  for (let i = 0; i < 10; i++) { const iso = store.isoToday(d); const sh = store.shiftOn(iso); if (sh && sh.kind !== "off") coming.push(`${iso.slice(8, 10)}/${iso.slice(5, 7)} ${sh.kind === "night" ? "🌙" : sh.kind === "leave" ? "✈" : "☀️"} ${sh.code}`); d.setDate(d.getDate() + 1); }
+  const plan = store.planToday(); const months = Object.keys(g.rota ?? {}).sort();
   return (
-    <details className="section" open><summary>Google <span className="small muted">Drive media, shift calendar</span></summary>
+    <details className="section" open><summary>Google <span className="small muted">Drive home, rota, Citrus</span></summary>
       <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared by your apps (Yuzu, Orange, Pomelo, Sinus, Mephisto). <b>Drive</b> keeps the master copy of every image and sound in <b>Yuzu/media</b>; each device sends what it has and fetches what its cards need. <b>Calendar</b> gives Yuzu your shifts: a night shift makes that day and the next light.</p>
-        {!g.clientId && <div className="field"><label>Client ID <span className="muted">from the shared Google Cloud project</span></label><input autoCapitalize="none" placeholder="….apps.googleusercontent.com" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /><span className="small muted">Pasted once; it syncs to your other devices. The setup guide is in the project notes (google-cloud-setup).</span></div>}
+        <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared by your apps. <b>Drive</b> holds the collection and the master copy of every image and sound (<b>My Apps/Yuzu</b>), the department's schedule files in <b>My Apps/Rotas</b> become light days, and <b>Citrus Maxima</b> reads Yuzu's status and plans your day.</p>
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-          {!on ? <button className="btn primary" disabled={busy || !g.clientId} onClick={() => act(() => store.googleConnect())}>{st.state === "error" ? "Reconnect Google" : "Connect Google"}</button>
+          {!on ? <button className="btn primary" disabled={busy} onClick={() => act(async () => { store.googleConnect(false); })}>{signed ? "Reconnect Google" : "Connect Google"}</button>
                : <button className="btn" disabled={busy} onClick={() => act(async () => { await store.googleDisconnect(); return "Disconnected"; })}>Disconnect</button>}
           {on && <button className="btn" disabled={busy || st.state === "working"} onClick={() => act(() => store.googleRefresh("manual"))}>Refresh now</button>}
           <span className={"small " + (st.state === "error" ? "" : "muted")} style={st.state === "error" ? { color: "var(--again)" } : undefined}>{st.message}</span>
         </div>
         {msg && <p className="small" style={{ marginBottom: 0 }}>{msg}</p>}
+        {on && <p className="small muted" style={{ margin: "8px 0 0" }}>Sync goes through <b>{store.syncBackend() === "drive" ? "Google Drive" : "GitHub"}</b>.{store.syncBackend() === "drive" ? <> <button className="chip" onClick={() => store.saveSettings({ sync: { ...s.sync, backend: "github" } })}>Use GitHub instead</button></> : <> <button className="chip orange" onClick={() => { store.saveSettings({ sync: { ...s.sync, backend: "drive" } }); store.scheduleSync(500); }}>Use Drive</button></>}</p>}
         <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.driveMedia} onChange={(e) => setG({ driveMedia: e.target.checked })} /> Drive is the master copy of my media</label>
         {ds && g.driveMedia && <p className="small muted" style={{ margin: "4px 0 0 24px" }}>{ds.onDrive.toLocaleString()} files on Drive{ds.complete ? "" : " (still listing)"} · {ds.toUpload.toLocaleString()} here that Drive lacks · {ds.toDownload.toLocaleString()} this device's cards need{ds.downBytes ? ` (${(ds.downBytes / 1048576).toFixed(0)} MB)` : ""}. Both move in the background; a card that needs a missing file fetches it on the spot.</p>}
-        {g.clientId && <div className="field" style={{ marginTop: 10 }}><label>Google Cloud client ID</label><input defaultValue={g.clientId} autoCapitalize="none" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /></div>}
-        <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.shiftDays} onChange={(e) => setG({ shiftDays: e.target.checked })} /> Shifts from my calendar make light days</label>
+        <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.shiftDays} onChange={(e) => setG({ shiftDays: e.target.checked })} /> My shifts make light days</label>
         {g.shiftDays && <div style={{ marginLeft: 24 }}>
-          <div className="field"><label>Calendar</label>
-            {store.calendars.length ? <select value={g.rules.calendarId} onChange={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value } })}>{store.calendars.map((c) => <option key={c.id} value={c.primary ? "primary" : c.id}>{c.name}</option>)}</select>
-                                    : <input defaultValue={g.rules.calendarId} onBlur={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value.trim() || "primary" } })} placeholder="primary" />}
-          </div>
-          <div className="field"><label>Events that are shifts <span className="muted">(words, any of)</span></label><input defaultValue={g.rules.match} onBlur={(e) => setG({ rules: { ...g.rules, match: e.target.value.trim() } })} /></div>
-          <div className="field"><label>…and which of those are nights</label><input defaultValue={g.rules.night} onBlur={(e) => setG({ rules: { ...g.rules, night: e.target.value.trim() } })} /><span className="small muted">Evening starts (18:00 or later) count as nights too.</span></div>
-          {next.length > 0 && <p className="small muted" style={{ margin: "6px 0 0" }}>Coming up: {next.map((d) => `${d.iso.slice(8, 10)}/${d.iso.slice(5, 7)} ${d.night ? "🌙" : "☀️"} ${d.title}`).join(" · ")}</p>}
-          {on && store.shiftsAt > 0 && next.length === 0 && <p className="small muted" style={{ margin: "6px 0 0" }}>No shift-like events in the next 4 weeks. Check the words above match how your rota is written.</p>}
+          <div className="field"><label>My name as written in the schedule</label><input defaultValue={g.rotaName} onBlur={(e) => setG({ rotaName: e.target.value.trim() || "Amro" })} placeholder="Amro" /></div>
+          <p className="small muted" style={{ margin: "4px 0 0" }}>{months.length ? `Rota read from Drive for ${months.map((m) => m.slice(5, 7) + "/" + m.slice(0, 4)).join(", ")}.` : "No schedule file read yet: save the month's .xlsx files into My Apps/Rotas on Drive (Orange and Citrus use the same folder)."}{coming.length ? ` Coming up: ${coming.join(" · ")}` : ""}</p>
+          <label className="row small" style={{ margin: "8px 0 0" }}><input type="checkbox" checked={g.calendar} onChange={(e) => setG({ calendar: e.target.checked })} /> Also read shifts from Google Calendar</label>
+          {g.calendar && <div style={{ marginLeft: 24 }}>
+            <div className="field"><label>Calendar</label>
+              {store.calendars.length ? <select value={g.rules.calendarId} onChange={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value } })}>{store.calendars.map((c) => <option key={c.id} value={c.primary ? "primary" : c.id}>{c.name}</option>)}</select>
+                                      : <input defaultValue={g.rules.calendarId} onBlur={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value.trim() || "primary" } })} placeholder="primary" />}
+            </div>
+            <div className="field"><label>Events that are shifts <span className="muted">(words, any of)</span></label><input defaultValue={g.rules.match} onBlur={(e) => setG({ rules: { ...g.rules, match: e.target.value.trim() } })} /></div>
+            <div className="field"><label>…and which of those are nights</label><input defaultValue={g.rules.night} onBlur={(e) => setG({ rules: { ...g.rules, night: e.target.value.trim() } })} /></div>
+          </div>}
         </div>}
+        {plan.length > 0 && <p className="small" style={{ margin: "10px 0 0" }}>Citrus planned for today: {plan.map((b) => `${b.start || "any time"} · ${b.minutes || "?"} min`).join(", ")}</p>}
         <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
           <button className="btn" disabled={busy || !on} onClick={() => act(async () => `${await store.addStudyBlocks(7)} study blocks added to your calendar`)}>Add study blocks for the week</button>
           <span className="small muted">at</span><input style={{ width: 90 }} defaultValue={g.blockTime} onBlur={(e) => { if (/^\d{2}:\d{2}$/.test(e.target.value)) setG({ blockTime: e.target.value }); }} />
-          <span className="small muted">for</span><input style={{ width: 70 }} type="number" min={10} max={120} step={5} defaultValue={g.blockMinutes} onBlur={(e) => setG({ blockMinutes: Math.max(10, Math.min(120, Number(e.target.value) || 25)) })} /><span className="small muted">min, skipping night-shift days</span>
+          <span className="small muted">for</span><input style={{ width: 70 }} type="number" min={10} max={120} step={5} defaultValue={g.blockMinutes} onBlur={(e) => setG({ blockMinutes: Math.max(10, Math.min(120, Number(e.target.value) || 25)) })} /><span className="small muted">min, skipping nights</span>
+          <button className="btn" disabled={busy || !on} onClick={() => act(async () => ((await store.writeHubStatus(true)) ? "status.json written for Citrus" : "Nothing new to tell Citrus"))}>Tell Citrus now</button>
         </div>
+        <details className="how" style={{ marginTop: 10 }}><summary className="small">Client ID (advanced)</summary>
+          <div className="field"><label>Google Cloud web client</label><input defaultValue={g.clientId} autoCapitalize="none" placeholder="shared My Apps client" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /><span className="small muted">Empty = the shared My Apps client. This app's address must be among that client's redirect URIs in the Cloud console (see the project note google-cloud-setup).</span></div>
+        </details>
       </div>
     </details>
   );
