@@ -4,7 +4,8 @@ import { App } from "./ui/App";
 import { store } from "./lib/store";
 
 import { applyTheme } from "./ui/sfx";
-store.load().then(() => { applyTheme(store.settings.theme); setHiddenFields(store.settings.hiddenFields ?? []); }).catch(() => { /* shown by the recovery screen */ });
+import { startCitrusBridge } from "./lib/citrus";
+store.load().then(() => { applyTheme(store.settings.theme); setHiddenFields(store.settings.hiddenFields ?? []); startCitrusBridge(); }).catch(() => { /* shown by the recovery screen */ });
 try { document.documentElement.dataset.effects = localStorage.getItem("yuzu-effects") === "off" ? "off" : "on"; } catch { /* fine */ }
 store.subscribe(() => { if (store.loaded) setHiddenFields(store.settings.hiddenFields ?? []); if (store.loaded && document.documentElement.dataset.theme !== store.settings.theme) applyTheme(store.settings.theme); });
 createRoot(document.getElementById("root")!).render(<App />);
