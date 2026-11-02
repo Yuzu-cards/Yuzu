@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
@@ -177,7 +177,7 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
   );
 }
 
-export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string; resume?: SavedSession };
+export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string; resume?: SavedSession; /** a suggested session length (the plan screen starts there) */ minutes?: number };
 
 /** A study session saved as it goes, so a refresh (or Android reloading the app in the background) picks it up again. */
 export interface SavedSession { scope: { path: string; view?: View; only?: "all" | "due" | "new"; title?: string }; ids: string[]; idx: number; plan: number | null; done: number; results: { id: string; g: Rating; ms: number; sure?: boolean }[]; startedAt: number; savedAt: number }
@@ -187,7 +187,7 @@ export function loadSession(): SavedSession | null {
 }
 function saveSession(s: SavedSession | null) { try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch { /* storage unavailable: sessions just don't survive a reload */ } }
 
-export function Study({ path, view = "decks", only = "all", preset, title, resume, onExit: exit, onBrowseTag, onSearch }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void; onSearch?: (q: string) => void }) {
+export function Study({ path, view = "decks", only = "all", preset, title, resume, minutes, onExit: exit, onBrowseTag, onSearch }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void; onSearch?: (q: string) => void }) {
   // Resuming: the same cards in the same order, minus any deleted meanwhile (cards are re-read, so their schedule is current).
   const resumed = useMemo(() => (resume ? resume.ids.map((id) => store.cards.get(id)).filter((c): c is Card => !!c) : null), []);
   const fullQueue = useMemo(() => resumed ?? preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
@@ -217,7 +217,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [hint, setHint] = useState(false);
   const [hookOpen, setHookOpen] = useState(false);
   const [improveOpen, setImproveOpen] = useState(false);
-  const [planMin, setPlanMin] = useState(() => { try { return Number(localStorage.getItem("yuzu-plan-min") ?? 25); } catch { return 25; } });
+  const [planMin, setPlanMin] = useState(() => { if (minutes) return minutes; try { return Number(localStorage.getItem("yuzu-plan-min") ?? 25); } catch { return 25; } });
   const [hookText, setHookText] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
   const [menu, setMenu] = useState(false);
@@ -259,7 +259,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
 
   const note = card && store.noteFor(card);
   const nt = note && store.notetypeFor(note);
-  const rendered = useMemo(() => (card && note && nt ? renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl }) : null), [card?.id, rev]);
+  const mediaRev = useSyncExternalStore(store.subscribe, () => store.mediaVersion, () => store.mediaVersion); // a file fetched from Drive re-renders the card
+  const rendered = useMemo(() => (card && note && nt ? renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl }) : null), [card?.id, rev, mediaRev]);
   const intervals = useMemo(() => (card ? previewIntervals(card, Date.now(), store.settings.scheduler) : null), [card?.id, rev]);
   // Typed answers for language cards: the answer is whatever the back shows that the front did not.
   const typing = !!card && store.settings.typeAnswers && card.source.startsWith("Languages") && !!nt && nt.kind === "standard";

@@ -10,6 +10,9 @@ import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
+import { savedToken, tokenValid, connectGoogle, forgetToken, GoogleError } from "./google";
+import { DriveMedia, type DriveIndex } from "./drive";
+import { GoogleCalendar, weightsFromShifts, DEFAULT_RULES, type ShiftDay, type ShiftRules, type CalendarInfo } from "./calendar";
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
@@ -59,10 +62,13 @@ export interface Settings {
   deckMap: Record<string, string>;
   smart: SmartDeck[];
   sync: { owner: string; repo: string; token: string; auto: boolean };
+  /** Google (synced): the shared Cloud project's client ID, the shift rules, and what to do with Drive and Calendar. */
+  google: { clientId: string; rules: ShiftRules; shiftDays: boolean; driveMedia: boolean; blockTime: string; blockMinutes: number };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
+  google: { clientId: "", rules: DEFAULT_RULES, shiftDays: true, driveMedia: true, blockTime: "19:00", blockMinutes: 25 },
   fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
@@ -141,6 +147,113 @@ export class Store {
   private bump() { this.version++; this.treeCache.clear(); for (const l of this.listeners) l(); }
   private edits = 0; // bumps on every local change, so a sync can tell whether something happened while it uploaded
   private touch() { this.edits++; if (!this.dirty) { this.dirty = true; db.setMeta("syncDirty", true).catch(() => {}); } this.scheduleSync(); }
+
+  // ---- Google: Drive as the media master copy, Calendar for the rota -------------
+  driveIndex: DriveIndex | null = null; syncOwnerMoved = false;
+  shifts: ShiftDay[] = []; shiftWeights: Record<string, number> = {}; shiftsAt = 0;
+  calendars: CalendarInfo[] = [];
+  googleStatus: { state: "off" | "working" | "ok" | "error"; message: string; at: number } = { state: "off", message: "Not connected", at: 0 };
+  mediaVersion = 0;
+  private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false; private driveDone = false;
+  googleConnected(): boolean { return tokenValid(); }
+  googleEmail(): string { return savedToken()?.email ?? ""; }
+  private setGoogle(state: typeof this.googleStatus.state, message: string) { this.googleStatus = { state, message, at: Date.now() }; this.bump(); }
+  /** Connect (a tap: Google opens its sign-in), then bring Drive and the calendar up to date. */
+  async googleConnect(): Promise<void> {
+    const t = await connectGoogle(this.settings.google.clientId); this.setGoogle("ok", `Connected as ${t.email ?? "you"}`);
+    this.driveDone = false; await this.googleRefresh("connect");
+  }
+  async googleDisconnect(): Promise<void> { forgetToken(); this.driveIndex = null; await db.setMeta("driveMedia", null); this.setGoogle("off", "Not connected"); }
+  /** Silently renew the token while Google's session is alive (no prompt); false when a tap is needed. */
+  private async googleRenew(): Promise<boolean> {
+    if (tokenValid()) return true; if (!savedToken() || !this.settings.google.clientId) return false;
+    try { await connectGoogle(this.settings.google.clientId, { silent: true }); return true; } catch { return false; }
+  }
+  /** Refresh the Drive index and the shift calendar, then start the media work. Bounded; continues in the background. */
+  async googleRefresh(reason = "auto"): Promise<void> {
+    if (!savedToken()) return; if (!(await this.googleRenew())) { this.setGoogle("error", "Google needs a tap to reconnect (Settings → Google)"); return; }
+    if (this.driveBusy) return; this.driveBusy = true;
+    try {
+      const g = this.settings.google; const progress = (m: string) => this.setGoogle("working", m);
+      if (g.shiftDays) {
+        try {
+          const cal = new GoogleCalendar(); const from = new Date(); from.setDate(from.getDate() - 1); const to = new Date(); to.setDate(to.getDate() + 28);
+          if (!this.calendars.length) this.calendars = await cal.calendars();
+          this.shifts = await cal.shifts(g.rules, from, to); this.shiftWeights = weightsFromShifts(this.shifts); this.shiftsAt = Date.now(); this.dueByDay = null;
+          await db.setMeta("shifts", { list: this.shifts, at: this.shiftsAt, calendars: this.calendars });
+        } catch (e: any) { this.log(false, `Calendar: ${e?.message ?? e}`, 0); if (e instanceof GoogleError && e.status === 401) { this.setGoogle("error", e.message); return; } }
+      }
+      if (g.driveMedia) {
+        const drive = new DriveMedia();
+        let idx = this.driveIndex ?? (await db.getMeta<DriveIndex | null>("driveMedia", null));
+        idx = await drive.ensure(idx); idx = await drive.refresh(idx, 20000, progress);
+        this.driveIndex = idx; await db.setMeta("driveMedia", idx);
+        if (!idx.complete) { this.scheduleDrive(1500); this.setGoogle("working", `Reading Drive: ${Object.keys(idx.files).length.toLocaleString()} files so far`); return; }
+        const r = await this.driveWork(drive, progress);
+        if (r.more) { this.scheduleDrive(2500); return; }
+      }
+      const n = this.driveIndex ? Object.keys(this.driveIndex.files).length : 0;
+      this.setGoogle("ok", `${this.googleEmail() || "Connected"} · ${n.toLocaleString()} files on Drive${this.shiftsAt ? ` · ${this.shifts.length} shift days` : ""}`);
+      this.bump();
+    } catch (e: any) { this.setGoogle("error", e?.message ?? String(e)); this.log(false, `Google: ${e?.message ?? e}`, 0); }
+    finally { this.driveBusy = false; void reason; }
+  }
+  private scheduleDrive(ms: number) { if (this.driveTimer) clearTimeout(this.driveTimer); this.driveTimer = setTimeout(() => { this.driveTimer = null; this.googleRefresh("more").catch(() => {}); }, ms); }
+  /** What Drive still lacks from here, and what the cards here still lack from Drive. */
+  driveState() {
+    const idx = this.driveIndex; if (!idx) return null;
+    const refs = this.mediaRefs(); let up = 0, down = 0, downBytes = 0;
+    for (const name of this.media.keys()) if (!idx.files[name] && !name.startsWith("pack-")) up++;
+    for (const r of refs) if (!this.media.has(r)) { const f = idx.files[r]; if (f) { down++; downBytes += f.s; } }
+    return { onDrive: Object.keys(idx.files).length, toUpload: up, toDownload: down, downBytes, complete: idx.complete };
+  }
+  /** One bounded round: upload media Drive lacks (this device as the master copy), then fetch what the cards here need. */
+  private async driveWork(drive: DriveMedia, progress: (m: string) => void): Promise<{ more: boolean }> {
+    const idx = this.driveIndex!; let budget = MEDIA_BATCH_BYTES, n = 0; const t0 = Date.now();
+    // Uploads: the device whose library has the file. Anki's linked folder (PC) counts too.
+    const dir = await this.ankiFolder();
+    const candidates: [string, () => Promise<Blob | null>][] = [];
+    for (const [name, blob] of this.media) if (!idx.files[name] && !name.startsWith("pack-")) candidates.push([name, async () => blob]);
+    if (dir) for (const r of this.mediaRefs()) if (!idx.files[r] && !this.media.has(r)) candidates.push([r, async () => { try { const h = await dir.getFileHandle(r); return await h.getFile(); } catch { return null; } }]);
+    for (const [name, get] of candidates) {
+      if (budget <= 0 || Date.now() - t0 > 40000) return { more: true };
+      const blob = await get(); if (!blob) { idx.files[name] = { id: "", s: 0 }; continue; } // not here after all: don't retry this run
+      try { const id = await drive.upload(idx, name, blob); idx.files[name] = { id, s: blob.size }; budget -= blob.size; n++; }
+      catch (e: any) { if (e instanceof GoogleError && (e.status === 401 || e.status === 403)) throw e; this.log(false, `Drive upload ${name}: ${e?.message ?? e}`, 0); idx.files[name] = { id: "", s: 0 }; }
+      if (n % 10 === 0) { progress(`Sending to Drive: ${n} files`); await db.setMeta("driveMedia", idx); }
+    }
+    for (const [name, f] of Object.entries(idx.files)) if (!f.id) delete idx.files[name]; // placeholders from this run are not kept
+    await db.setMeta("driveMedia", idx);
+    if (n) this.log(true, `${n} media files sent to Drive`, Date.now() - t0);
+    // Downloads: everything the cards here use and Drive has, a batch per round.
+    const refs = this.mediaRefs(); const want: [string, { id: string; s: number }][] = [];
+    for (const r of refs) if (!this.media.has(r)) { const f = idx.files[r]; if (f?.id) want.push([r, f]); }
+    let got = 0, bytes = 0; const q = want.slice(); const saved: { name: string; blob: Blob }[] = [];
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      while (q.length && bytes < MEDIA_BATCH_BYTES && Date.now() - t0 < 50000) {
+        const [name, f] = q.shift()!;
+        try { const blob = await drive.download(f.id); if (blob) { this.media.set(name, blob); saved.push({ name, blob }); got++; bytes += blob.size; } }
+        catch (e: any) { if (e instanceof GoogleError && e.status === 401) throw e; }
+        if (saved.length >= 25) { const b = saved.splice(0); await db.putMany("media", b); this.mediaUrls.clear(); this.mediaVersion++; progress(`From Drive: ${got} of ${want.length} files`); this.bump(); }
+      }
+    }));
+    if (saved.length) { await db.putMany("media", saved); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }
+    if (got) this.log(true, `${got} media files fetched from Drive`, Date.now() - t0);
+    return { more: q.length > 0 };
+  }
+  /** A card shows a file this device lacks: fetch it from Drive right now (once), then the card re-renders. */
+  private driveFetchOne(name: string) {
+    const f = this.driveIndex?.files[name]; if (!f?.id || this.driveFetching.has(name) || !tokenValid()) return;
+    this.driveFetching.add(name);
+    new DriveMedia().download(f.id).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
+  }
+  /** Study blocks for the next week in Google Calendar, on days without a night shift. */
+  async addStudyBlocks(days = 7): Promise<number> {
+    if (!(await this.googleRenew())) throw new Error("Connect Google first (Settings → Google).");
+    const cal = new GoogleCalendar(); const g = this.settings.google; let n = 0; const d = new Date();
+    for (let i = 1; i <= days; i++) { d.setDate(d.getDate() + 1); const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; if ((this.shiftWeights[iso] ?? 1) < 1 || this.dayWeight(d.getTime()) <= 0) continue; await cal.addBlock(g.rules.calendarId, iso, g.blockTime, g.blockMinutes); n++; }
+    return n;
+  }
 
   // ---- sync ---------------------------------------------------------------
   hasUnsynced(): boolean { return this.dirty; }
@@ -408,6 +521,10 @@ export class Store {
     this.tombstones = await db.getMeta<Record<string, number>>("tombstones", {});
     this.dirty = await db.getMeta<boolean>("syncDirty", false);
     this.syncLog = await db.getMeta<SyncLogEntry[]>("syncLog", []);
+    this.driveIndex = await db.getMeta<DriveIndex | null>("driveMedia", null);
+    const sh = await db.getMeta<{ list: ShiftDay[]; at: number; calendars: CalendarInfo[] } | null>("shifts", null);
+    if (sh) { this.shifts = sh.list; this.shiftWeights = weightsFromShifts(sh.list); this.shiftsAt = sh.at; this.calendars = sh.calendars ?? []; }
+    if (savedToken()) this.googleStatus = { state: tokenValid() ? "ok" : "error", message: tokenValid() ? `Connected as ${this.googleEmail() || "you"}` : "Google needs a tap to reconnect", at: 0 };
     this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
     this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
     this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
@@ -416,7 +533,9 @@ export class Store {
     this.mastery = await db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} });
     this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
-    this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) } };
+    this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) }, google: { ...DEFAULT_SETTINGS.google, ...(saved.google ?? {}), rules: { ...DEFAULT_RULES, ...(saved.google?.rules ?? {}) } } };
+    // 02/11/2026: the repositories moved from the Amaerys account to the Yuzu-cards organisation (a new token is needed too).
+    if (/^amaerys$/i.test(this.settings.sync.owner)) { this.settings = { ...this.settings, sync: { ...this.settings.sync, owner: "Yuzu-cards" } }; this.syncOwnerMoved = true; await db.setMeta("settings", this.settings); }
     // FSRS-6 (28/10/2026): 19 saved weights → 21; re-tune on the user's history under FSRS-6 shortly after start.
     if ((this.settings.scheduler.w?.length ?? 0) < 21) { this.settings = { ...this.settings, scheduler: { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }, fit: null }; await db.setMeta("settings", this.settings); }
     setActiveWeights(this.settings.scheduler.w);
@@ -431,6 +550,8 @@ export class Store {
       const since = this.settings.fit ? this.reviews.filter((r) => r.ts > this.settings.fit!.at).length : this.reviews.length;
       if (since >= 1000) setTimeout(() => { this.optimizeScheduler().catch(() => {}); }, 15000);
       this.scheduleSync(1500);
+      if (savedToken()) setTimeout(() => { this.googleRefresh("start").catch(() => {}); }, 6000);
+      setInterval(() => { if (document.visibilityState === "visible" && savedToken() && Date.now() - this.shiftsAt > 30 * 60000) this.googleRefresh("poll").catch(() => {}); }, 10 * 60000);
       window.addEventListener("online", () => this.scheduleSync(2000));
       // While the app is open, look for changes from other devices every 5 minutes (one or two requests when nothing changed).
       setInterval(() => { if (document.visibilityState === "visible" && this.syncConfigured() && this.settings.sync.auto && this.syncStatus.state !== "syncing") this.sync("poll").catch(() => {}); }, 5 * 60000);
@@ -506,7 +627,7 @@ export class Store {
 
   mediaUrl = (name: string): string | null => {
     const hit = this.mediaUrls.get(name); if (hit) return hit;
-    const b = this.media.get(name); if (!b) return null;
+    const b = this.media.get(name); if (!b) { this.driveFetchOne(name); return null; }
     const u = URL.createObjectURL(b); this.mediaUrls.set(name, u); return u;
   };
 
@@ -1200,7 +1321,9 @@ export class Store {
   dayWeight(ts: number) {
     const dt = new Date(ts); const iso = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`; const s = this.settings;
     if (s.breakFrom && s.breakTo && iso >= s.breakFrom && iso <= s.breakTo) return 0;
-    return s.easyDays?.[new Date(ts).getDay()] ?? 1;
+    const weekly = s.easyDays?.[new Date(ts).getDay()] ?? 1;
+    const shift = s.google?.shiftDays ? this.shiftWeights[iso] : undefined; // a night shift from the calendar makes that day and the next light
+    return shift === undefined ? weekly : Math.min(weekly, shift);
   }
   private balance(next: Card, review: Review, now: number): Card {
     if (next.state !== "review") return next;

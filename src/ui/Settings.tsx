@@ -291,10 +291,12 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
+      <GoogleSection />
       <details className="section" open><summary>Sync between devices</summary>
       <div className="card-box">
+        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
         <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
-        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Amaerys" /></div>
+        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
         <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
         <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
         <div className="field"><label>This device's name</label><input defaultValue={s.deviceName} onBlur={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
@@ -472,5 +474,49 @@ function EasyDays() {
       </div>
       <span className="small muted">Each answer's next date moves by a day or two within the scheduler's normal spread to the quietest day — so reviews avoid light days, off days and your break (e.g. a night-shift week). No card is pushed past what the spread allows.</span>
     </div>
+  );
+}
+
+
+/** Google: one shared Cloud project for all the Citrus apps. Drive holds the media master copy; Calendar gives the rota. */
+function GoogleSection() {
+  const s = store.settings; const g = s.google; const st = store.googleStatus; const on = store.googleConnected(); const ds = store.driveState();
+  const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
+  const setG = (patch: Partial<typeof g>) => store.saveSettings({ google: { ...g, ...patch } });
+  const act = async (f: () => Promise<string | void>) => { setBusy(true); setMsg(""); try { const m = await f(); if (m) setMsg(m); } catch (e: any) { setMsg(e?.message ?? String(e)); } finally { setBusy(false); } };
+  const next = store.shifts.filter((d) => d.iso >= new Date().toISOString().slice(0, 10)).slice(0, 8);
+  return (
+    <details className="section" open><summary>Google <span className="small muted">Drive media, shift calendar</span></summary>
+      <div className="card-box">
+        <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared by your apps (Yuzu, Orange, Pomelo, Sinus, Mephisto). <b>Drive</b> keeps the master copy of every image and sound in <b>Yuzu/media</b>; each device sends what it has and fetches what its cards need. <b>Calendar</b> gives Yuzu your shifts: a night shift makes that day and the next light.</p>
+        {!g.clientId && <div className="field"><label>Client ID <span className="muted">from the shared Google Cloud project</span></label><input autoCapitalize="none" placeholder="….apps.googleusercontent.com" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /><span className="small muted">Pasted once; it syncs to your other devices. The setup guide is in the project notes (google-cloud-setup).</span></div>}
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          {!on ? <button className="btn primary" disabled={busy || !g.clientId} onClick={() => act(() => store.googleConnect())}>{st.state === "error" ? "Reconnect Google" : "Connect Google"}</button>
+               : <button className="btn" disabled={busy} onClick={() => act(async () => { await store.googleDisconnect(); return "Disconnected"; })}>Disconnect</button>}
+          {on && <button className="btn" disabled={busy || st.state === "working"} onClick={() => act(() => store.googleRefresh("manual"))}>Refresh now</button>}
+          <span className={"small " + (st.state === "error" ? "" : "muted")} style={st.state === "error" ? { color: "var(--again)" } : undefined}>{st.message}</span>
+        </div>
+        {msg && <p className="small" style={{ marginBottom: 0 }}>{msg}</p>}
+        <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.driveMedia} onChange={(e) => setG({ driveMedia: e.target.checked })} /> Drive is the master copy of my media</label>
+        {ds && g.driveMedia && <p className="small muted" style={{ margin: "4px 0 0 24px" }}>{ds.onDrive.toLocaleString()} files on Drive{ds.complete ? "" : " (still listing)"} · {ds.toUpload.toLocaleString()} here that Drive lacks · {ds.toDownload.toLocaleString()} this device's cards need{ds.downBytes ? ` (${(ds.downBytes / 1048576).toFixed(0)} MB)` : ""}. Both move in the background; a card that needs a missing file fetches it on the spot.</p>}
+        {g.clientId && <div className="field" style={{ marginTop: 10 }}><label>Google Cloud client ID</label><input defaultValue={g.clientId} autoCapitalize="none" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /></div>}
+        <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.shiftDays} onChange={(e) => setG({ shiftDays: e.target.checked })} /> Shifts from my calendar make light days</label>
+        {g.shiftDays && <div style={{ marginLeft: 24 }}>
+          <div className="field"><label>Calendar</label>
+            {store.calendars.length ? <select value={g.rules.calendarId} onChange={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value } })}>{store.calendars.map((c) => <option key={c.id} value={c.primary ? "primary" : c.id}>{c.name}</option>)}</select>
+                                    : <input defaultValue={g.rules.calendarId} onBlur={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value.trim() || "primary" } })} placeholder="primary" />}
+          </div>
+          <div className="field"><label>Events that are shifts <span className="muted">(words, any of)</span></label><input defaultValue={g.rules.match} onBlur={(e) => setG({ rules: { ...g.rules, match: e.target.value.trim() } })} /></div>
+          <div className="field"><label>…and which of those are nights</label><input defaultValue={g.rules.night} onBlur={(e) => setG({ rules: { ...g.rules, night: e.target.value.trim() } })} /><span className="small muted">Evening starts (18:00 or later) count as nights too.</span></div>
+          {next.length > 0 && <p className="small muted" style={{ margin: "6px 0 0" }}>Coming up: {next.map((d) => `${d.iso.slice(8, 10)}/${d.iso.slice(5, 7)} ${d.night ? "🌙" : "☀️"} ${d.title}`).join(" · ")}</p>}
+          {on && store.shiftsAt > 0 && next.length === 0 && <p className="small muted" style={{ margin: "6px 0 0" }}>No shift-like events in the next 4 weeks. Check the words above match how your rota is written.</p>}
+        </div>}
+        <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <button className="btn" disabled={busy || !on} onClick={() => act(async () => `${await store.addStudyBlocks(7)} study blocks added to your calendar`)}>Add study blocks for the week</button>
+          <span className="small muted">at</span><input style={{ width: 90 }} defaultValue={g.blockTime} onBlur={(e) => { if (/^\d{2}:\d{2}$/.test(e.target.value)) setG({ blockTime: e.target.value }); }} />
+          <span className="small muted">for</span><input style={{ width: 70 }} type="number" min={10} max={120} step={5} defaultValue={g.blockMinutes} onBlur={(e) => setG({ blockMinutes: Math.max(10, Math.min(120, Number(e.target.value) || 25)) })} /><span className="small muted">min, skipping night-shift days</span>
+        </div>
+      </div>
+    </details>
   );
 }

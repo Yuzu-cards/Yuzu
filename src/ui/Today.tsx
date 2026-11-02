@@ -44,7 +44,7 @@ export function YuzuGoal({ value, max, size = 150, center, sub }: { value: numbe
   );
 }
 
-type OnStudy = (path: string, view?: View, extra?: { only?: "all" | "due" | "new"; preset?: import("../lib/model").Card[]; title?: string }) => void;
+type OnStudy = (path: string, view?: View, extra?: { only?: "all" | "due" | "new"; preset?: import("../lib/model").Card[]; title?: string; minutes?: number }) => void;
 type Filter = "flagged" | "improve" | "suspended" | "leech" | "overfilled";
 export function Today({ onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
   const v = store.getVersion();
@@ -123,7 +123,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
             <div className="stat" data-hint="Learned|Cards in review: past their learning steps, with a real interval."><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
           {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
-          <Coach missed={missed} weakest={weakest} bossReady={bossReady} overdue={overdue} onStudy={onStudy} onBoss={onBoss} onFilter={onFilter} onRecap={() => setRecap(true)} />
+          <Coach missed={missed} weakest={weakest} bossReady={bossReady} overdue={overdue} onStudy={onStudy} onBoss={onBoss} onFilter={onFilter} onRecap={() => setRecap(true)} onTab={onTab} />
           <h2>Next 7 days</h2>
           <p className="small muted" style={{ margin: "-4px 0 8px" }}>Reviews falling due each day, so you see heavy days coming.{overdue > 0 ? <> Plus <b style={{ color: "var(--orange)" }}>{overdue.toLocaleString()} overdue</b>: about <b>{Math.ceil(overdue / 7).toLocaleString()} extra a day</b> clears them in a week.</> : null}</p>
           <div className="card-box forecast" style={{ height: 108 }}>
@@ -163,7 +163,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
  * Coach (from Orange 8.2.0): up to four soft suggestions that wait for a tap and can be dismissed for the day.
  * Nothing changes until you choose it; anything that moves cards can be undone.
  */
-function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter, onRecap }: { missed: Card[]; weakest: { name: string; retention: number; n: number } | null; bossReady: { name: string; ready: number } | null; overdue: number; onStudy: OnStudy; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onRecap: () => void }) {
+function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter, onRecap, onTab }: { onTab?: (t: any) => void; missed: Card[]; weakest: { name: string; retention: number; n: number } | null; bossReady: { name: string; ready: number } | null; overdue: number; onStudy: OnStudy; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onRecap: () => void }) {
   const today = new Date().toDateString();
   const [gone, setGone] = useState<string[]>(() => { try { const x = JSON.parse(localStorage.getItem("yuzu-coach") ?? "{}"); return x.day === today ? x.ids : []; } catch { return []; } });
   const dismiss = (id: string) => { const ids = [...gone, id]; setGone(ids); try { localStorage.setItem("yuzu-coach", JSON.stringify({ day: today, ids })); } catch { /* fine */ } };
@@ -174,6 +174,13 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
   let lastBackup = 0; try { lastBackup = Number(localStorage.getItem("yuzu-last-backup") ?? 0); } catch { /* fine */ }
   type Tip = { id: string; spine: string; title: string; meta: string; act: () => void; why: string };
   const tips: Tip[] = [];
+  // The rota, from Google Calendar: a night shift tonight or tomorrow changes what's sensible today.
+  const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+  const tonight = store.shifts.find((d) => d.iso === iso(new Date()) && d.night), tmrw = store.shifts.find((d) => d.iso === iso(tomorrow));
+  if (tonight) tips.push({ id: "night", spine: "var(--night, #5b6cff)", title: "Night shift tonight — a short session now", meta: "Today and tomorrow are light days in the scheduler; 10 minutes keeps the streak", act: () => onStudy("", "decks", { title: "Before the shift", minutes: 10 }), why: "Rota|Read from your Google Calendar. Night shifts make the day and the morning after light, so fewer cards land there." });
+  else if (tmrw?.night) tips.push({ id: "tmrw", spine: "var(--night, #5b6cff)", title: "Night shift tomorrow — do the full session today", meta: `Tomorrow is a light day; ${overdue ? `clear the ${overdue.toLocaleString()} overdue ` : "get ahead "}now`, act: () => onStudy(""), why: "Rota|Read from your Google Calendar." });
+  if (store.googleStatus.state === "error" && /tap/i.test(store.googleStatus.message) && onTab) tips.push({ id: "google", spine: "var(--amber)", title: "Google needs a tap to reconnect", meta: "Drive media and the shift calendar pause until then", act: () => onTab("settings"), why: "Google|Google's sign-in lasts about an hour of use before it has to be renewed; usually that happens silently." });
   if (recapReady) tips.push({ id: "recap", spine: "var(--orange)", title: `Your ${new Date(lastMonth).toLocaleString(undefined, { month: "long" })} recap is ready`, meta: "Persona, best day, nemesis card — and a share card", act: onRecap, why: "Recap|A look back at last month from your real reviews." });
   if (overdue >= 50) tips.push({ id: "postpone", spine: "var(--clay)", title: `${overdue.toLocaleString()} cards overdue — spread them over a week`, meta: "The most fragile stay first; sturdy ones wait. Undo anytime.", act: async () => { const r = await store.postponeOverdue(7); if (r) snackbar(`${r.moved.toLocaleString()} cards spread over 7 days`, r.undo); }, why: "Postpone|A big backlog makes every day feel impossible. This moves overdue cards with long, stable memories later and keeps the fragile ones first (FSRS Helper's postpone, simplified)." });
   if (bossReady && onBoss) tips.push({ id: "boss", spine: "var(--yuzu)", title: `Boss fight: ${bossReady.name}`, meta: `${bossReady.ready} well-learned cards — 20 at random, no hints, 85% to pass`, act: () => onBoss(bossReady.name, "systems", bossReady.name), why: "Boss fight|Mixed, cumulative testing on cards you already know — it shows what really stuck." });

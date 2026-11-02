@@ -10,7 +10,7 @@ async function device(name: string) {
   await page.route("https://api.github.com/**", async (route) => { const req = route.request(); const res = await gh.fetchImpl(req.url(), { method: req.method(), body: req.postData() ?? undefined } as any); await route.fulfill({ status: res.status, body: Buffer.from(await res.arrayBuffer()), contentType: "application/octet-stream" }); });
   await page.goto(`http://127.0.0.1:${port}/`); await page.waitForTimeout(2500);
   await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await page.waitForTimeout(400);
-  await page.fill('input[placeholder="Amaerys"]', "o"); await page.locator(".field:has(label:has-text('Repository')) input").first().fill("r");
+  await page.fill('input[placeholder="Yuzu-cards"]', "o"); await page.locator(".field:has(label:has-text('Repository')) input").first().fill("r");
   await page.fill('input[placeholder="github_pat_…"]', "t"); await page.fill('input[placeholder="S25 Ultra"]', name);
   return page;
 }
