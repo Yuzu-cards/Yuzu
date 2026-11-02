@@ -14,7 +14,7 @@ export const HUB = {
   scopes: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email",
   drive: "https://www.googleapis.com/drive/v3", upload: "https://www.googleapis.com/upload/drive/v3",
   folder: "application/vnd.google-apps.folder",
-  defaultClientId: "", // filled in once the shared client ID is known; Settings can override
+  defaultClientId: "753489712404-ra7ahu34gjl305b4ss1765idmqg7am5s.apps.googleusercontent.com", // shared Cloud project for all the apps; Settings can override
 };
 const LS = "yuzu_hub";
 const STATUS_KEY = "citrus.status.yuzu";
