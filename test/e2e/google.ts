@@ -29,12 +29,14 @@ G.seedFile(media["0"], ["My Apps", "Yuzu", "media"], new Uint8Array(fs.readFileS
 async function device(name: string) {
   const ctx = await browser.newContext({ viewport: { width: 420, height: 860 } }); const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push(name + ": " + e.message)); page.on("dialog", (d) => d.accept());
-  page.on("console", (m) => { if (m.type() === "error" && !/ERR_TUNNEL|ERR_FAILED|favicon/.test(m.text())) errors.push(name + " console: " + m.text()); });
+  page.on("console", (m) => { if (m.type() === "error" && !/ERR_TUNNEL|ERR_FAILED|ERR_CONNECTION_RESET|favicon/.test(m.text())) errors.push(name + " console: " + m.text()); });
   // Google's sign-in script (GIS token client): the stub answers at once and records each window it was asked to open.
   await page.route("https://accounts.google.com/gsi/client", (route) => route.fulfill({ status: 200, body: G.gisScript, contentType: "text/javascript" }));
   await page.route(/https:\/\/www\.googleapis\.com\/.*/, async (route) => {
     const req = route.request(); const h = await req.allHeaders(); const buf = req.postDataBuffer();
-    const res = await G.fetchImpl(req.url(), { method: req.method(), headers: h, body: buf ? new Blob([buf as BlobPart]) : undefined } as any);
+    let res: Response;
+    try { res = await G.fetchImpl(req.url(), { method: req.method(), headers: h, body: buf ? new Blob([buf as BlobPart]) : undefined } as any); }
+    catch { await route.abort("connectionreset"); return; } // the fake's dropped connection reaches the page as one
     await route.fulfill({ status: res.status, body: Buffer.from(await res.arrayBuffer()), contentType: res.headers.get("Content-Type") ?? "application/octet-stream" });
   });
   await page.goto(`http://127.0.0.1:${port}/`); await page.waitForSelector("text=Nothing to study yet", { timeout: 15000 });
@@ -53,6 +55,8 @@ try {
   // Drop one file the device had (Drive has it) so there is something to fetch; keep one Drive lacks so there is something to send.
   await A.evaluate(async (n) => { const y = (window as any).yuzu; y.media.delete(n); await y._db.deleteMany("media", [n]); }, media["0"]);
   // ---- Connect: the page leaves for Google and comes back with a token
+  // A phone's connection: one upload in six dies mid-way during the first sync and the media upload.
+  let k = 0; G.fail = (u, m) => (m !== "GET" && /\/upload\//.test(u.pathname) && ++k % 6 === 0 ? "network" : null);
   await A.click("button:has-text('Connect Google')");
   await A.waitForFunction(() => (window as any).yuzu?.syncBackend?.() === "drive", null, { timeout: 20000 });
   await A.waitForFunction(() => /Connected as amro@example.com|media files on Drive/.test((window as any).yuzu.googleStatus.message), null, { timeout: 30000 });
@@ -67,6 +71,7 @@ try {
   const mediaOnDrive = G.at(["My Apps", "Yuzu", "media"]);
   ok("sends the files Drive lacked", mediaOnDrive.has(media["1"]) && mediaOnDrive.has(media["2"]), [...mediaOnDrive.keys()].join(", "));
   ok("fetches the file the cards need", await A.evaluate((n) => (window as any).yuzu.media.has(n), media["0"]));
+  ok("…all of it through dropped connections", G.stats.dropped > 10, `${G.stats.dropped} uploads dropped and retried`); G.fail = null;
   ok("fetched bytes intact", (await A.evaluate((n) => (window as any).yuzu.media.get(n)?.size, media["0"])) === fs.statSync(`${apkgDir}/0`).size);
   // ---- Rota from Drive → shifts → light days; Citrus's plan
   const rota = await y(A, "window.yuzu.rota"); ok("rota read from My Apps/Rotas (November 2026, your row)", rota["2026-11"]?.["3"] === "D2" && rota["2026-11"]?.["17"] === "N2", JSON.stringify(rota).slice(0, 80));
@@ -89,6 +94,8 @@ try {
   const B = await device("B");
   await B.click("button:has-text('Connect Google')"); await B.waitForFunction(() => (window as any).yuzu?.syncBackend?.() === "drive", null, { timeout: 20000 });
   const sB = await waitSync(B); ok("B pulls the whole collection from Drive", /pulled [\d,]+ cards/.test(sB.message) && (await y(B, "window.yuzu.cards.size")) === (await y(A, "window.yuzu.cards.size")), sB.message);
+  await B.waitForFunction((n) => (window as any).yuzu.media.has(n), media["1"], { timeout: 30000 }).catch(() => {});
+  ok("a new device fetches the media its cards need right after its first sync", await B.evaluate((n) => (window as any).yuzu.media.has(n), media["1"]));
   // B reviews a card; A gets the review
   await B.evaluate(async () => { const y = (window as any).yuzu; const c = [...y.cards.values()][0]; await y.answer(c, 3); });
   await B.evaluate(() => (window as any).yuzu.sync("test")); await waitSync(B);

@@ -1,11 +1,11 @@
 {
   "name": "yuzu",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Yuzu \u2014 spaced-repetition flashcards for medicine and German, offline-first PWA with GitHub sync",
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --import tsx --test test/*.test.ts",
-    "e2e": "node --import tsx test/e2e/run.ts && node --import tsx test/e2e/sync.ts && node --import tsx test/e2e/hands.ts && node --import tsx test/e2e/google.ts",
+    "e2e": "node --import tsx test/e2e/run.ts && node --import tsx test/e2e/sync.ts && node --import tsx test/e2e/hands.ts && node --import tsx test/e2e/google.ts && node --import tsx test/e2e/srs.ts",
     "check": "npx tsc --noEmit -p . && npm test && npm run build && npm run e2e",
     "probe:real": "node --import tsx tools/probes/final.e2e.ts"
   },

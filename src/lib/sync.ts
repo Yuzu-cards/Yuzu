@@ -87,6 +87,18 @@ export class SyncError extends Error {
 /** Cache of shard fingerprints: path → { fp (fingerprint of the records), hash of the JSON }. The JSON itself is not kept. */
 export type ShardCache = Map<string, { fp: string; hash: string }>;
 
+/**
+ * Run `fn` over `items`, `n` at a time. After the first failure no new item starts, the ones in flight finish, and then
+ * the error is thrown — so nothing keeps uploading in the background after a sync has given up (and released its lock).
+ */
+export async function pool<T>(items: T[], n: number, fn: (x: T) => Promise<void>): Promise<void> {
+  const q = items.slice(); let failed = false; let err: unknown;
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, q.length)) }, async () => {
+    while (q.length && !failed) { const x = q.shift()!; try { await fn(x); } catch (e) { if (!failed) { failed = true; err = e; } } }
+  }));
+  if (failed) throw err;
+}
+
 /** A lock is ours when it carries this install's id, or (older locks, no id) the same device name in any case. */
 export function sameDevice(info: { device?: string; id?: string }, device: string, id = ""): boolean {
   if (id && info.id) return info.id === id;
@@ -284,16 +296,11 @@ export class GitHubSync {
     let doneCount = 0;
     const parsed: [string, any][] = [];
     // Limit concurrency so a phone on a slow link does not open 100 connections at once; parse as files arrive so the raw text is not held.
-    const queue = [...changed];
-    const workers = Array.from({ length: 4 }, async () => {
-      while (queue.length) {
-        const [p] = queue.shift()!;
+    await pool(changed, 4, async ([p]) => {
         const t = await this.readFile(p, manifest.stored);
         if (t != null) { try { parsed.push([p, JSON.parse(t)]); } catch { throw new SyncError(`${p} in the repository is corrupt; sync stopped without changing anything`, "other"); } }
         doneCount++; progress?.(`Downloading ${doneCount} of ${changed.length} changed files`);
-      }
-    });
-    await Promise.all(workers);
+      });
     for (const [p, data] of parsed) {
       out.files[p] = manifest.files[p];
       if (p === "notetypes.json") out.notetypes = data;
@@ -374,10 +381,10 @@ export class GitHubSync {
         tree.push({ path: real, mode: "100644", type: "blob", sha });
         progress?.(label(++n));
       };
-      await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await uploadOne(queue.shift()!); }));
+      await pool(queue, 4, uploadOne);
     }
     const bq = [...blobs]; let bn = 0;
-    await Promise.all(Array.from({ length: 4 }, async () => { while (bq.length) { const b = bq.shift()!; const r = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: bytesToBase64(b.bytes), encoding: "base64" }) }, `upload ${b.path}`); tree.push({ path: b.path, mode: "100644", type: "blob", sha: r.sha }); bytes += b.bytes.length; progress?.(`Uploading images ${++bn} of ${blobs.length}`); } }));
+    await pool(bq, 4, async (b) => { const r = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: bytesToBase64(b.bytes), encoding: "base64" }) }, `upload ${b.path}`); tree.push({ path: b.path, mode: "100644", type: "blob", sha: r.sha }); bytes += b.bytes.length; progress?.(`Uploading images ${++bn} of ${blobs.length}`); });
     for (const p of toDelete) tree.push({ path: p, mode: "100644", type: "blob", sha: null });
     manifest.stored = stored;
     const mblob = await this.api("/git/blobs", { method: "POST", body: JSON.stringify({ content: utf8ToBase64(JSON.stringify(manifest)), encoding: "base64" }) }, "upload the manifest");

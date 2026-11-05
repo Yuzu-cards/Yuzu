@@ -6,7 +6,7 @@
 // a push re-reads it just before writing and stops when another device moved it. A lock.json file keeps two devices
 // from uploading at once (written, then read back: ours or not).
 import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, findFolders, listFiles, downloadBytes, putFile, deleteFile, gjson, type DriveFile } from "./google";
-import { SyncError, gzip, gunzip, GZIP_ABOVE, sameDevice, type Manifest, type SyncSnapshot, type Progress } from "./sync";
+import { SyncError, gzip, gunzip, GZIP_ABOVE, sameDevice, pool, type Manifest, type SyncSnapshot, type Progress } from "./sync";
 
 export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"], rotasOrange: ["Citrus Maxima", "Rotas"] };
 export interface DriveIndex { media: string; files: Record<string, { id: string; s: number }>; changes: string; at: number; complete: boolean; nextPage?: string }
@@ -45,7 +45,8 @@ export class DriveMedia {
     }
     out.at = Date.now(); return out;
   }
-  async upload(idx: DriveIndex, name: string, blob: Blob): Promise<string> { return putFile({ parent: idx.media, name, body: blob, mime: blob.type || "application/octet-stream", id: idx.files[name]?.id || null }); }
+  /** Upload one file. The index is complete and authoritative, so a name it lacks is created without a lookup first. */
+  async upload(idx: DriveIndex, name: string, blob: Blob): Promise<string> { const id = idx.files[name]?.id || null; return putFile({ parent: idx.media, name, body: blob, mime: blob.type || "application/octet-stream", id, isNew: !id && idx.complete }); }
   async download(id: string): Promise<Blob | null> { const b = await downloadBytes(id); return b ? new Blob([b as BlobPart]) : null; }
 }
 
@@ -57,7 +58,15 @@ export class DriveSync {
   private folder = ""; private listing: Listing | null = null; private seenRev: string | null | undefined = undefined; private holdsLock = false; private inboxId = "";
   constructor(private cache: Record<string, string>, private device: string) {}
   private async open() { if (!this.folder) this.folder = await ensureFolders(PATHS.collection, this.cache); return this.folder; }
-  private async list(): Promise<Listing> { await this.open(); const m: Listing = new Map(); for (const f of await listFiles({ parent: this.folder, all: true })) if (f.mimeType !== "application/vnd.google-apps.folder") m.set(f.name, f); this.listing = m; return m; }
+  private dupes: DriveFile[] = [];
+  /** The collection folder by name. Drive allows two files with one name (a create retried after its answer was lost): the newest wins, the rest are removed after the next good sync. */
+  private async list(): Promise<Listing> {
+    await this.open(); const m: Listing = new Map(); this.dupes = [];
+    const all = (await listFiles({ parent: this.folder, all: true })).filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
+    all.sort((a, b) => ((a.modifiedTime ?? "") < (b.modifiedTime ?? "") ? 1 : -1));
+    for (const f of all) { if (m.has(f.name)) this.dupes.push(f); else m.set(f.name, f); }
+    this.listing = m; return m;
+  }
   private async readText(name: string, stored?: Record<string, string>): Promise<string | null> {
     const real = stored?.[name] ?? name; const f = (this.listing ?? (await this.list())).get(real); if (!f) return null;
     const b = await downloadBytes(f); if (!b) return null; return real.endsWith(".gz") ? gunzip(b) : toText(b);
@@ -86,7 +95,7 @@ export class DriveSync {
   async pullChanged(manifest: Manifest, known: Record<string, string>, progress?: Progress): Promise<Partial<SyncSnapshot> & { files: Record<string, string> }> {
     const changed = Object.entries(manifest.files).filter(([p, h]) => known[p] !== h);
     const out: Partial<SyncSnapshot> & { files: Record<string, string> } = { files: {} }; const parsed: [string, any][] = []; let done = 0; const queue = [...changed];
-    await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) { const [p] = queue.shift()!; const t = await this.readText(p, manifest.stored); if (t != null) { try { parsed.push([p, JSON.parse(t)]); } catch { throw new SyncError(`${p} on Drive is corrupt; sync stopped without changing anything`, "other"); } } done++; progress?.(`Downloading ${done} of ${changed.length} changed files`); } }));
+    await pool(queue, 4, async ([p]) => { const t = await this.readText(p, manifest.stored); if (t != null) { try { parsed.push([p, JSON.parse(t)]); } catch { throw new SyncError(`${p} on Drive is corrupt; sync stopped without changing anything`, "other"); } } done++; progress?.(`Downloading ${done} of ${changed.length} changed files`); });
     for (const [p, data] of parsed) {
       out.files[p] = manifest.files[p];
       if (p === "notetypes.json") out.notetypes = data; else if (p === "settings.json") out.settings = data; else if (p === "tombstones.json") out.tombstones = data;
@@ -107,23 +116,29 @@ export class DriveSync {
     // Another device synced since our pull? Its manifest carries a different revision.
     const cur = await this.readText("manifest.json").then((t) => (t ? (JSON.parse(t) as any).rev ?? String((JSON.parse(t) as any).updatedAt) : null), () => null);
     if (this.seenRev !== undefined && cur !== this.seenRev) throw new SyncError("Another device synced in the meantime", "conflict");
-    let n = 0, bytes = 0; const total = toWrite.length; const queue = [...toWrite];
+    // Each file carries its content fingerprint (appProperties.h). A sync that was cut off (a dropped connection, the app
+    // sent to the background) left its finished files on Drive: the next one skips those and carries on from there.
+    let n = 0, bytes = 0, kept = 0; const total = toWrite.length; const queue = [...toWrite];
     const one = async (p: string) => {
-      const json = make(p); let body: BodyInit = json; let real = p.replace(/\//g, "__");
-      if (json.length > GZIP_ABOVE) { const gz = await gzip(json); body = new Blob([gz as BlobPart]); real += ".gz"; bytes += gz.length; } else bytes += json.length;
-      const prevReal = stored[p] ?? p.replace(/\//g, "__");
-      const id = await putFile({ parent: this.folder, name: real, body, mime: real.endsWith(".gz") ? "application/gzip" : "application/json", id: listing.get(real)?.id ?? null });
-      listing.set(real, { id, name: real });
+      const json = make(p); const base = p.replace(/\//g, "__"); const real = json.length > GZIP_ABOVE ? base + ".gz" : base;
+      const prevReal = stored[p] ?? base; const have = listing.get(real);
+      if (have?.props?.h === hashes[p]) kept++;
+      else {
+        let body: BodyInit = json; if (real.endsWith(".gz")) { const gz = await gzip(json); body = new Blob([gz as BlobPart]); bytes += gz.length; } else bytes += json.length;
+        const id = await putFile({ parent: this.folder, name: real, body, mime: real.endsWith(".gz") ? "application/gzip" : "application/json", id: have?.id ?? null, isNew: !have, props: { h: hashes[p] } });
+        listing.set(real, { id, name: real, props: { h: hashes[p] } });
+      }
       if (prevReal !== real) { const old = listing.get(prevReal); if (old) { try { await deleteFile(old.id); } catch { /* fine */ } listing.delete(prevReal); } }
-      stored[p] = real; n++; progress?.(total >= 20 ? `Uploading ${n} of ${total} changed files (the first Drive sync sends everything once)` : `Uploading ${n} of ${total} changed files`);
+      stored[p] = real; n++; progress?.(total >= 20 ? `Uploading ${n} of ${total} files${kept ? ` (${kept} already on Drive from an earlier try)` : " (the first Drive sync sends everything once)"}` : `Uploading ${n} of ${total} changed files`);
     };
-    await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await one(queue.shift()!); }));
+    await pool(queue, 4, one);
     for (const real of toDelete) { const f = listing.get(real); if (f) { try { await deleteFile(f.id); } catch { /* fine */ } listing.delete(real); } }
     manifest.stored = stored;
     const mid = await putFile({ parent: this.folder, name: "manifest.json", body: JSON.stringify(manifest), id: listing.get("manifest.json")?.id ?? null });
     listing.set("manifest.json", { id: mid, name: "manifest.json" }); this.seenRev = rev;
+    for (const d of this.dupes.splice(0)) { try { await deleteFile(d.id); } catch { /* next time */ } }
     await this.releaseLock();
-    return { manifest, commit: rev, pushed: toWrite.length, bytes };
+    return { manifest, commit: rev, pushed: toWrite.length - kept, bytes };
   }
   async compact(): Promise<boolean> { return false; }
   async repoSizeMB(): Promise<number | null> { return null; }

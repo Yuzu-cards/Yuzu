@@ -100,6 +100,13 @@ export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = 
   const scheduleReview = () => {
     intervalDays = intervalFor(next.stability, cfg.desiredRetention, cfg.maximumInterval, w);
     if (g === 4 && before !== "review") intervalDays = Math.max(intervalDays, 4);
+    // A review card's buttons never show the same days twice: Good is at least a day past Hard, Easy at least a day past
+    // Good (as the FSRS reference schedules them), all within the maximum interval.
+    if (before === "review" && g >= 2) {
+      const iv = (r: Rating) => intervalFor(updateMemory(w, card, r, elapsedDays).stability, cfg.desiredRetention, cfg.maximumInterval, w);
+      const hard = iv(2), good = Math.min(cfg.maximumInterval, Math.max(iv(3), hard + 1)), easy = Math.min(cfg.maximumInterval, Math.max(iv(4), good + 1));
+      intervalDays = g === 2 ? hard : g === 3 ? good : easy;
+    }
     next.state = "review"; next.step = 0;
     next.due = now + intervalDays * DAY;
   };

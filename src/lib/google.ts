@@ -71,19 +71,29 @@ export async function whoAmI(): Promise<string> { try { const r = await gfetch("
 
 // ---------------------------------------------------------------- calls
 /** Authenticated fetch with plain-word errors and retries; a 401 clears the saved token so the UI asks for a tap. */
+let retryScale = 1;
+/** Tests only: shrink the backoff waits (the waits themselves are what keeps a phone's sync alive on a bad connection). */
+export function setRetryScale(x: number) { retryScale = x; }
 export async function gfetch(url: string, init: RequestInit = {}, token = savedToken()): Promise<Response> {
   if (!token?.access) throw new GoogleError("Not connected to Google.", 401, true);
-  let res: Response;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) throw new GoogleError("You're offline. Nothing is lost; Yuzu carries on when you're back online.", 0, false, true);
+  let res: Response; let m = "";
+  const wait = (attempt: number) => new Promise((r) => setTimeout(r, Math.min(16000, 800 * 2 ** attempt) * (0.75 + Math.random() * 0.5) * retryScale));
   for (let attempt = 0; ; attempt++) {
+    // A phone's connection drops mid-request now and then (and when the app goes to the background): retry for ~25 s.
     try { res = await fetch(url, { ...init, cache: "no-store", headers: { ...(init.headers as any), Authorization: `Bearer ${token.access}` } }); }
-    catch (e: any) { if (attempt < 2) { await new Promise((r) => setTimeout(r, 700 * 2 ** attempt)); continue; } throw new GoogleError(`No connection to Google (${e?.message ?? "offline"}).`, 0, false, true); }
-    if ((res.status === 429 || res.status >= 500) && attempt < 3) { await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); continue; }
+    catch (e: any) { if (attempt < 5) { await wait(attempt); continue; } throw new GoogleError(`Google couldn't be reached — the connection dropped (${e?.message ?? "offline"}). Nothing is lost; Yuzu carries on from where it stopped.`, 0, false, true); }
+    m = "";
+    if (res.status === 403 || res.status === 429) { try { const j = await res.clone().json(); m = j?.error?.message ?? ""; m += " " + (j?.error?.errors?.map((x: any) => x.reason).join(" ") ?? ""); } catch { /* no body */ } }
+    const slowDown = res.status === 429 || (res.status === 403 && /rate ?limit|ratelimit|quota|userRateLimitExceeded|rateLimitExceeded/i.test(m));
+    if ((slowDown || res.status >= 500) && attempt < 6) { await wait(attempt + 1); continue; }
     break;
   }
   if (res.ok || res.status === 404) return res;
-  let m = ""; try { m = (await res.clone().json())?.error?.message ?? ""; } catch { /* no body */ }
+  if (!m) { try { m = (await res.clone().json())?.error?.message ?? ""; } catch { /* no body */ } }
   if (res.status === 401 || (res.status === 403 && /insufficient|scope/i.test(m))) { expireToken(); throw new GoogleError("Google needs a tap to reconnect.", res.status, true); }
-  if (res.status === 403) throw new GoogleError(/quota|rate/i.test(m) ? "Google is rate-limiting; it will retry later." : `Google refused (403): ${m || "no permission"}.`, 403);
+  if (res.status === 403) throw /quota|rate/i.test(m) ? new GoogleError("Google asked Yuzu to slow down; it carries on in a minute.", 403, false, true) : new GoogleError(`Google refused (403): ${m.trim() || "no permission"}.`, 403);
+  if (res.status === 429 || res.status >= 500) throw new GoogleError(`Google is busy (${res.status}); Yuzu carries on in a minute.`, res.status, false, true);
   if (res.status === 412 || res.status === 409) throw new GoogleError("Drive changed while syncing.", res.status);
   throw new GoogleError(`Google ${res.status}: ${m || res.statusText}`, res.status);
 }
@@ -92,7 +102,7 @@ export async function gfetch(url: string, init: RequestInit = {}, token = savedT
 export const DRIVE = "https://www.googleapis.com/drive/v3", UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 export const FOLDER = "application/vnd.google-apps.folder", GSHEET = "application/vnd.google-apps.spreadsheet";
 export const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-export interface DriveFile { id: string; name: string; mimeType?: string; modifiedTime?: string; size?: number; md5?: string }
+export interface DriveFile { id: string; name: string; mimeType?: string; modifiedTime?: string; size?: number; md5?: string; props?: Record<string, string> }
 const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 const q = (p: Record<string, string>) => new URLSearchParams(p).toString();
 export async function gjson(url: string, init?: RequestInit) { const r = await gfetch(url, init); return r.status === 404 ? null : r.status === 204 ? null : r.json(); }
@@ -101,8 +111,8 @@ export async function listFiles(o: { parent?: string | null; name?: string | nul
   const parts = ["trashed = false"]; if (o.parent) parts.push(`'${esc(o.parent)}' in parents`); if (o.name) parts.push(`name = '${esc(o.name)}'`); if (o.folders) parts.push(`mimeType = '${FOLDER}'`);
   const out: DriveFile[] = []; let page: string | undefined;
   do {
-    const j = await gjson(`${DRIVE}/files?${q({ q: parts.join(" and "), fields: "nextPageToken,files(id,name,mimeType,modifiedTime,size,md5Checksum)", pageSize: String(o.pageSize ?? (o.all ? 1000 : 100)), spaces: "drive", ...(page ? { pageToken: page } : {}) })}`);
-    for (const f of j?.files ?? []) out.push({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, size: Number(f.size) || 0, md5: f.md5Checksum });
+    const j = await gjson(`${DRIVE}/files?${q({ q: parts.join(" and "), fields: "nextPageToken,files(id,name,mimeType,modifiedTime,size,md5Checksum,appProperties)", pageSize: String(o.pageSize ?? (o.all ? 1000 : 100)), spaces: "drive", ...(page ? { pageToken: page } : {}) })}`);
+    for (const f of j?.files ?? []) out.push({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, size: Number(f.size) || 0, md5: f.md5Checksum, props: f.appProperties });
     page = o.all ? j?.nextPageToken : undefined;
   } while (page);
   return out;
@@ -129,14 +139,20 @@ export async function downloadBytes(f: DriveFile | string): Promise<Uint8Array |
   const r = await gfetch(url); return r.status === 404 ? null : new Uint8Array(await r.arrayBuffer());
 }
 /** Write bytes/text as `name` in the folder: updated in place when an id is known (or found), else created. Returns the id. */
-export async function putFile(o: { parent: string; name: string; body: BodyInit; mime?: string; id?: string | null }): Promise<string> {
+/**
+ * Write a file into a folder: updated in place when its id is known (or found by name), else created. `props` are stored
+ * as the file's appProperties (Yuzu keeps a content fingerprint there). `isNew`: the caller knows the file isn't there yet,
+ * so no lookup by name is spent on it. Returns the id.
+ */
+export async function putFile(o: { parent: string; name: string; body: BodyInit; mime?: string; id?: string | null; props?: Record<string, string>; isNew?: boolean }): Promise<string> {
   const mime = o.mime ?? "application/json"; let id = o.id ?? null;
-  if (!id) id = (await listFiles({ parent: o.parent, name: o.name }))[0]?.id ?? null;
-  if (id) { await gfetch(`${UPLOAD}/files/${encodeURIComponent(id)}?uploadType=media&fields=id`, { method: "PATCH", headers: { "Content-Type": mime }, body: o.body }); return id; }
-  const boundary = "yuzu" + Date.now().toString(36);
-  const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name: o.name, parents: [o.parent], mimeType: mime })}\r\n--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`;
+  if (!id && !o.isNew) id = (await listFiles({ parent: o.parent, name: o.name }))[0]?.id ?? null;
+  if (id && !o.props) { await gfetch(`${UPLOAD}/files/${encodeURIComponent(id)}?uploadType=media&fields=id`, { method: "PATCH", headers: { "Content-Type": mime }, body: o.body }); return id; }
+  const boundary = "yuzu" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const meta = id ? { ...(o.props ? { appProperties: o.props } : {}) } : { name: o.name, parents: [o.parent], mimeType: mime, ...(o.props ? { appProperties: o.props } : {}) };
+  const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`;
   const body = new Blob([head, o.body as BlobPart, `\r\n--${boundary}--`]);
-  const j = await gjson(`${UPLOAD}/files?uploadType=multipart&fields=id`, { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
+  const j = await gjson(`${UPLOAD}/files${id ? "/" + encodeURIComponent(id) : ""}?uploadType=multipart&fields=id`, { method: id ? "PATCH" : "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
   if (!j?.id) throw new GoogleError("Drive did not return a file id."); return j.id;
 }
 export async function deleteFile(id: string) { await gfetch(`${DRIVE}/files/${encodeURIComponent(id)}`, { method: "DELETE" }); }

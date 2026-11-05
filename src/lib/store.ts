@@ -158,7 +158,7 @@ export class Store {
   plan: CitrusPlan | null = null; planAt = 0; // My Apps/hub/citrus/plan.json, as Citrus writes it
   googleStatus: { state: "off" | "working" | "ok" | "error"; message: string; at: number } = { state: "off", message: "Not connected", at: 0 };
   mediaVersion = 0;
-  private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false;
+  private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false; private driveAgain = false;
   private lastStatusFp = ""; private lastStatusAt = 0;
   googleConnected(): boolean { return tokenValid(); }
   googleSignedIn(): boolean { return !!savedToken(); }
@@ -196,7 +196,7 @@ export class Store {
   async googleRefresh(reason = "auto"): Promise<void> {
     if (reason === "manual" && !(await this.renewOnTap())) { if (savedToken()) this.needTap(); return; }
     if (!tokenValid()) { if (savedToken()) this.needTap(); return; }
-    if (this.driveBusy) return; this.driveBusy = true;
+    if (this.driveBusy) { this.driveAgain = true; return; } this.driveBusy = true; this.driveAgain = false;
     try {
       const g = this.settings.google; const progress = (m: string) => this.setGoogle("working", m); const today = this.isoToday();
       if (!Object.keys(this.gcache).length) this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
@@ -228,8 +228,13 @@ export class Store {
       }
       const n = this.driveIndex ? Object.keys(this.driveIndex.files).length : 0; const months = Object.keys(this.rota).length;
       this.setGoogle("ok", `${this.googleEmail() || "Connected"} · ${n.toLocaleString()} media files on Drive${months ? ` · rota for ${months} month${months === 1 ? "" : "s"}` : ""}${this.plan ? " · Citrus plan read" : ""}`);
-    } catch (e: any) { if (e instanceof GoogleError && e.auth) this.needTap(); else this.setGoogle("error", e?.message ?? String(e)); this.log(false, `Google: ${e?.message ?? e}`, 0); }
-    finally { this.driveBusy = false; }
+    } catch (e: any) {
+      if (e instanceof GoogleError && e.auth) this.needTap();
+      else if (e instanceof GoogleError && e.retryable) { this.setGoogle("error", `${e.message.replace(/ Nothing is lost.*$/, "")} — trying again in a minute`); this.scheduleDrive(60000); }
+      else this.setGoogle("error", e?.message ?? String(e));
+      this.log(false, `Google: ${e?.message ?? e}`, 0);
+    }
+    finally { this.driveBusy = false; if (this.driveAgain) { this.driveAgain = false; this.scheduleDrive(1000); } }
   }
   /** Once per device: the hourly backup the short-lived bridge build wrote (My Apps/hub/yuzu/state.json) is stale — bin it. */
   private async googleCleanup() {
@@ -327,30 +332,38 @@ export class Store {
     const candidates: [string, () => Promise<Blob | null>][] = [];
     for (const [name, blob] of this.media) if (!idx.files[name] && !name.startsWith("pack-")) candidates.push([name, async () => blob]);
     if (dir) for (const r of this.mediaRefs()) if (!idx.files[r] && !this.media.has(r)) candidates.push([r, async () => { try { const h = await dir.getFileHandle(r); return await h.getFile(); } catch { return null; } }]);
-    const skipped = new Set<string>();
-    for (const [name, get] of candidates) {
-      if (budget <= 0 || Date.now() - t0 > 40000) return { more: true };
-      const blob = await get(); if (!blob) { skipped.add(name); continue; }
-      try { const id = await drive.upload(idx, name, blob); idx.files[name] = { id, s: blob.size }; budget -= blob.size; n++; }
-      catch (e: any) { if (e instanceof GoogleError && (e.auth || e.status === 403)) throw e; this.log(false, `Drive upload ${name}: ${e?.message ?? e}`, 0); skipped.add(name); }
-      if (n % 10 === 0) { progress(`Sending to Drive: ${n} files`); await db.setMeta("driveMedia", idx); }
-    }
+    // Four uploads at a time, ~15 MB or ~40 s per round; the index is saved as it goes, so a cut-off round loses nothing.
+    const skipped = new Set<string>(); const queue = candidates.slice(); let stop: unknown = null; let lastSave = Date.now();
+    const total = candidates.length;
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      while (queue.length && !stop && budget > 0 && Date.now() - t0 < 40000) {
+        const [name, get] = queue.shift()!;
+        const blob = await get(); if (!blob) { skipped.add(name); continue; }
+        try { const id = await drive.upload(idx, name, blob); idx.files[name] = { id, s: blob.size }; budget -= blob.size; n++; }
+        catch (e: any) { if (e instanceof GoogleError && (e.auth || e.retryable)) { stop = e; break; } this.log(false, `Drive upload ${name}: ${e?.message ?? e}`, 0); skipped.add(name); }
+        if (Date.now() - lastSave > 3000) { lastSave = Date.now(); progress(`Sending media to Drive: ${(total - queue.length).toLocaleString()} of ${total.toLocaleString()}`); await db.setMeta("driveMedia", idx); }
+      }
+    }));
     await db.setMeta("driveMedia", idx);
+    if (stop) throw stop;
+    if (queue.length) { if (n) this.log(true, `${n} media files sent to Drive`, Date.now() - t0); return { more: true }; }
     if (n) this.log(true, `${n} media files sent to Drive`, Date.now() - t0);
     const refs = this.mediaRefs(); const want: [string, { id: string; s: number }][] = [];
     for (const r of refs) if (!this.media.has(r)) { const f = idx.files[r]; if (f?.id) want.push([r, f]); }
     let got = 0, bytes = 0; const q = want.slice(); const saved: { name: string; blob: Blob }[] = [];
+    let stopDl: unknown = null;
     await Promise.all(Array.from({ length: 4 }, async () => {
-      while (q.length && bytes < MEDIA_BATCH_BYTES && Date.now() - t0 < 50000) {
+      while (q.length && !stopDl && bytes < MEDIA_BATCH_BYTES && Date.now() - t0 < 50000) {
         const [name, f] = q.shift()!;
         try { const blob = await drive.download(f.id); if (blob) { this.media.set(name, blob); saved.push({ name, blob }); got++; bytes += blob.size; } }
-        catch (e: any) { if (e instanceof GoogleError && e.auth) throw e; }
-        if (saved.length >= 25) { const b = saved.splice(0); await db.putMany("media", b); this.mediaUrls.clear(); this.mediaVersion++; progress(`From Drive: ${got} of ${want.length} files`); this.bump(); }
+        catch (e: any) { if (e instanceof GoogleError && (e.auth || e.retryable)) { stopDl = e; break; } }
+        if (saved.length >= 25) { const b = saved.splice(0); await db.putMany("media", b); this.mediaUrls.clear(); this.mediaVersion++; progress(`From Drive: ${got.toLocaleString()} of ${want.length.toLocaleString()} files`); this.bump(); }
       }
     }));
     if (saved.length) { await db.putMany("media", saved); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }
     if (got) this.log(true, `${got} media files fetched from Drive`, Date.now() - t0);
-    return { more: q.length > 0 || candidates.length > n + skipped.size };
+    if (stopDl) throw stopDl;
+    return { more: q.length > 0 };
   }
   /** A card shows a file this device lacks: fetch it from Drive right now (once), then the card re-renders. */
   private driveFetchOne(name: string) {
@@ -394,7 +407,7 @@ export class Store {
     let lastBump = 0;
     const progress = (m: string) => { if (this.syncStatus.state !== "syncing") return; this.syncStatus = { ...this.syncStatus, message: m }; const t = Date.now(); if (t - lastBump > 250) { lastBump = t; this.bump(); } };
     try {
-      let summary = "";
+      let summary = ""; let pulledNotes = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         const known = await db.getMeta<Record<string, string>>("syncKnown", {});
         // Fast path: nothing changed here and the repository is exactly what we last saw → a couple of requests, no lock.
@@ -445,6 +458,7 @@ export class Store {
           if (got.hooks) { let changed = false; const merged = { ...this.hooks }; for (const [k, v] of Object.entries(got.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.hooks = merged; await db.setMeta("hooks", merged); } }
           if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
           if (pulledN + pulledC + pulledR) { this.treeCache.clear(); this.dueByDay = null; }
+          if (pulledN) pulledNotes = true;
         }
         await this.checkInbox(gh);
         // Shared images: merge the repository's index, pick what to upload from here (bounded per sync).
@@ -534,11 +548,15 @@ export class Store {
       // The rota may have arrived from another device with the settings; Citrus gets a fresh status after every sync that changed something.
       const rota = this.settings.google?.rota ?? {}; if (JSON.stringify(rota) !== JSON.stringify(this.rota)) { this.rota = rota; this.rebuildShiftWeights(); }
       if (tokenValid()) this.writeHubStatus(false).catch(() => {});
+      // New notes arrived (a new device's first sync, cards added elsewhere): fetch the media they use now, not at the next check.
+      if (pulledNotes && tokenValid() && this.settings.google?.driveMedia) this.scheduleDrive(1500);
       this.autoMaster().catch(() => {});
       this.bump();
     } catch (e: any) {
       if (e instanceof SyncError && e.kind === "ratelimit" && e.resumeAt) { this.pausedUntil = e.resumeAt; this.scheduleSync(Math.max(60000, e.resumeAt - Date.now() + 5000)); }
       if (e instanceof SyncError && e.kind === "server") this.scheduleSync(10 * 60000);
+      if (e instanceof GoogleError && e.retryable) this.scheduleSync(60000);
+      if (e instanceof GoogleError && e.auth) { this.setSync("idle", this.dirty ? "Waiting for a tap: press Sync now (or pull down on Today) — changes are kept" : "Waiting for a tap: press Sync now (or pull down on Today)"); return; }
       const msg = e?.message ?? String(e);
       this.log(e instanceof SyncError && e.kind === "busy", msg, Date.now() - t0);
       this.setSync(e instanceof SyncError && e.kind === "busy" ? "idle" : "error", msg);
@@ -1399,19 +1417,22 @@ export class Store {
     const byCat = new Map<string, Card[]>();
     for (const c of cards) if (c.state === "new") { const k = c.source.split("::").slice(0, 3).join("::"); (byCat.get(k) ?? byCat.set(k, []).get(k)!).push(c); }
     for (const list of byCat.values()) list.sort((a, b) => a.due - b.due || a.created - b.created);
-    const fresh: Card[] = []; const lists = [...byCat.values()];
-    for (let i = 0; fresh.length < budget && lists.some((l) => l.length); i++) { const l = lists[i % lists.length]; if (l.length) fresh.push(l.shift()!); }
-    // Interleave new cards among reviews so a session isn't all-new at the end.
-    const out: Card[] = [...learning];
-    if (this.settings.burySiblings) {
-      const seenNotes = new Set<string>();
+    // Bury siblings: one card per note a day (notes seen today and learning cards count). Reviews are filtered; new cards are
+    // picked around it, so a buried sibling's place goes to the next new card and the day's new-card count stays full.
+    const seenNotes = new Set<string>(); const bury = this.settings.burySiblings;
+    if (bury) {
       const start = this.dayStart(now);
       for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts >= start; i--) { const c = this.cards.get(this.reviews[i].cid); if (c) seenNotes.add(c.nid); }
-      const keep = (c: Card) => { if (seenNotes.has(c.nid)) return false; seenNotes.add(c.nid); return true; };
       for (const c of learning) seenNotes.add(c.nid);
-      review.splice(0, review.length, ...review.filter(keep));
-      fresh.splice(0, fresh.length, ...fresh.filter(keep));
+      review = review.filter((c) => { if (seenNotes.has(c.nid)) return false; seenNotes.add(c.nid); return true; });
     }
+    const fresh: Card[] = []; const lists = [...byCat.values()];
+    for (let i = 0; fresh.length < budget && lists.some((l) => l.length); i++) {
+      const l = lists[i % lists.length]; if (!l.length) continue;
+      const c = l.shift()!; if (bury) { if (seenNotes.has(c.nid)) continue; seenNotes.add(c.nid); } fresh.push(c);
+    }
+    // Interleave new cards among reviews so a session isn't all-new at the end.
+    const out: Card[] = [...learning];
     const step = fresh.length ? Math.max(1, Math.floor((review.length + fresh.length) / fresh.length)) : Infinity;
     let fi = 0;
     for (let i = 0; i < review.length; i++) {
@@ -1511,11 +1532,16 @@ export class Store {
     }
     this.lastAnswer = { cardId, leech, lapses: next.lapses };
     this.undoStack = [...this.undoStack.slice(-19), { reviewId: review.id, card }];
-    await this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undoStack", this.undoStack)]));
+    // The next card shows at once: the save runs in the background (the database applies writes in the order they're
+    // made, and a failed save still raises the red banner). `flushWrites()` waits for it where that matters.
+    this.pendingWrite = this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undoStack", this.undoStack)]));
     this.bump(); this.touch();
     return next;
   }
   lastAnswer: { cardId: string; leech: boolean; lapses: number } | null = null;
+  private pendingWrite: Promise<unknown> = Promise.resolve();
+  /** Wait until the last answer is on disk (before a reload, an export, leaving the app). */
+  flushWrites(): Promise<unknown> { return this.pendingWrite; }
   undoStack: { reviewId: string; card: Card }[] = [];
 
   /** Record why a leech was missed; tags drive later remediation (packs from Claude, suspension). */
