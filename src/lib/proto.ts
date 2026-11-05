@@ -37,7 +37,3 @@ export function protoInt(fields: ProtoField[], num: number): number | undefined 
   const f = fields.find((x) => x.num === num && x.wire === 0);
   return f ? Number(f.value as bigint) : undefined;
 }
-export function protoBytes(fields: ProtoField[], num: number): Uint8Array | undefined {
-  const f = fields.find((x) => x.num === num && x.wire === 2);
-  return f ? (f.value as Uint8Array) : undefined;
-}

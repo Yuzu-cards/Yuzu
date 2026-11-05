@@ -12,7 +12,16 @@ const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart
 const today = iso(new Date());
 // Seed Drive: the department's November 2026 schedule in My Apps/Rotas, Citrus's plan for today, one image already in Yuzu/media.
 G.seedFile("November_Schedule.xlsx", ["My Apps", "Rotas"], new Uint8Array(fs.readFileSync("test/fixtures/rota-sample.xlsx")), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-G.seedFile("plan.json", ["My Apps", "hub", "scheduler"], new TextEncoder().encode(JSON.stringify({ date: today, blocks: [{ app: "orange", start: "17:00", minutes: 50 }, { app: "yuzu", title: "Yuzu: cards", start: "19:30", minutes: 25 }] })), "application/json");
+// Citrus's plan.json as its publishPlan() writes it: 10 days of { shift, blocks }, plus all blocks flat. Tomorrow is a night it knows about (a swap the rota file doesn't have).
+const tmrw = new Date(); tmrw.setDate(tmrw.getDate() + 1); const tmrwIso = iso(tmrw);
+const citrusPlan = { app: "citrus", updatedAt: new Date().toISOString(), from: today,
+  days: { [today]: { shift: null, blocks: [] }, [tmrwIso]: { shift: { code: "N2", label: "Night", site: "Lower Village", start: "20:00", end: "08:00", overnight: true }, blocks: [] } },
+  blocks: [{ app: "orange", title: "Orange: Upper A", date: today, start: "17:00", end: "17:50", minutes: 50, status: "accepted" }, { app: "yuzu", title: "Yuzu reviews", date: today, start: "19:30", end: "19:55", minutes: 25, status: "accepted" }, { app: "yuzu", title: "Yuzu reviews", date: tmrwIso, start: "10:00", end: "10:25", minutes: 25 }] };
+G.seedFile("plan.json", ["My Apps", "hub", "citrus"], new TextEncoder().encode(JSON.stringify(citrusPlan)), "application/json");
+// The stale hourly backup an early bridge build wrote — the first connect bins it.
+G.seedFile("state.json", ["My Apps", "hub", "yuzu"], new TextEncoder().encode("{}"), "application/json");
+// A December rota saved where Orange looks (Citrus Maxima/Rotas): read too.
+G.seedFile("December_Schedule.xlsx", ["Citrus Maxima", "Rotas"], new Uint8Array(fs.readFileSync("test/fixtures/rota-sample.xlsx")), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 const media = { "0": "img_20150110121948-1678858989.png", "1": "carpels unnamed.jpg", "2": "carpels named.jpg" };
 const apkgDir = "/tmp/claude-0/-home-claude/a4e6c5d5-ff32-5a83-8739-0d47ab59416d/scratchpad/apkg"; fs.mkdirSync(apkgDir, { recursive: true });
 const { execSync } = await import("node:child_process"); execSync(`cd ${apkgDir} && unzip -o -q /home/claude/yuzu/test/fixtures/legacy-with-media.apkg`);
@@ -21,8 +30,8 @@ async function device(name: string) {
   const ctx = await browser.newContext({ viewport: { width: 420, height: 860 } }); const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push(name + ": " + e.message)); page.on("dialog", (d) => d.accept());
   page.on("console", (m) => { if (m.type() === "error" && !/ERR_TUNNEL|ERR_FAILED|favicon/.test(m.text())) errors.push(name + " console: " + m.text()); });
-  // Google's sign-in page: answer at once with a token in the hash, as Google does after the redirect.
-  await page.route("https://accounts.google.com/o/oauth2/v2/auth**", (route) => { const u = new URL(route.request().url()); const back = `${u.searchParams.get("redirect_uri")}#access_token=tok${Date.now()}&expires_in=3600&state=${encodeURIComponent(u.searchParams.get("state") ?? "")}&scope=drive`; route.fulfill({ status: 302, headers: { Location: back } }); });
+  // Google's sign-in script (GIS token client): the stub answers at once and records each window it was asked to open.
+  await page.route("https://accounts.google.com/gsi/client", (route) => route.fulfill({ status: 200, body: G.gisScript, contentType: "text/javascript" }));
   await page.route(/https:\/\/www\.googleapis\.com\/.*/, async (route) => {
     const req = route.request(); const h = await req.allHeaders(); const buf = req.postDataBuffer();
     const res = await G.fetchImpl(req.url(), { method: req.method(), headers: h, body: buf ? new Blob([buf as BlobPart]) : undefined } as any);
@@ -45,9 +54,9 @@ try {
   await A.evaluate(async (n) => { const y = (window as any).yuzu; y.media.delete(n); await y._db.deleteMany("media", [n]); }, media["0"]);
   // ---- Connect: the page leaves for Google and comes back with a token
   await A.click("button:has-text('Connect Google')");
-  await A.waitForFunction(() => (window as any).yuzu?.googleConnected?.(), null, { timeout: 20000 });
+  await A.waitForFunction(() => (window as any).yuzu?.syncBackend?.() === "drive", null, { timeout: 20000 });
   await A.waitForFunction(() => /Connected as amro@example.com|media files on Drive/.test((window as any).yuzu.googleStatus.message), null, { timeout: 30000 });
-  ok("sign-in by redirect lands with a token and the email", /amro@example.com/.test(await y(A, "window.yuzu.googleStatus.message")), await y(A, "window.yuzu.googleStatus.message"));
+  ok("sign-in (GIS) lands with a token and the email", /amro@example.com/.test(await y(A, "window.yuzu.googleStatus.message")), await y(A, "window.yuzu.googleStatus.message"));
   ok("sync switched to Drive on the first connect", (await y(A, "window.yuzu.syncBackend()")) === "drive");
   // ---- Collection: the first sync fills My Apps/Yuzu/collection
   const s1 = await waitSync(A); ok("first sync pushed the collection to Drive", /pushed \d+ files/.test(s1.message), s1.message);
@@ -64,16 +73,21 @@ try {
   const w = await A.evaluate(() => { const y = (window as any).yuzu; return [y.dayWeight(new Date("2026-11-17T12:00:00").getTime()), y.dayWeight(new Date("2026-11-18T12:00:00").getTime()), y.dayWeight(new Date("2026-11-03T12:00:00").getTime())]; });
   ok("night N2 on the 17th makes the 17th and 18th light; a day shift leaves the day normal", w[0] === 0.5 && w[1] === 0.5 && w[2] === 1, JSON.stringify(w));
   ok("rota synced through settings for the other devices", Object.keys(await y(A, "window.yuzu.settings.google.rota")).includes("2026-11"));
-  const plan = await y(A, "window.yuzu.planToday()"); ok("Citrus's plan.json read: Yuzu's block for today", plan.length === 1 && plan[0].start === "19:30" && plan[0].minutes === 25, JSON.stringify(plan));
+  const plan = await y(A, "window.yuzu.planToday()"); ok("Citrus's plan.json read: Yuzu's accepted block for today", plan.length === 1 && plan[0].start === "19:30" && plan[0].minutes === 25 && plan[0].accepted, JSON.stringify(plan));
+  const wT = await A.evaluate((t) => { const y = (window as any).yuzu; return [y.shiftOn(t)?.kind, y.dayWeight(new Date(t + "T12:00:00").getTime())]; }, tmrwIso);
+  ok("Citrus's shift for tomorrow (a night) makes it a light day", wT[0] === "night" && wT[1] === 0.5, JSON.stringify(wT));
+  ok("rotas read from both folders (My Apps/Rotas and Citrus Maxima/Rotas)", (await A.evaluate(() => (window as any).yuzu.rotaSeen && Object.keys((window as any).yuzu.rotaSeen).length)) === 2);
+  ok("the stale hub/yuzu/state.json was binned", ![...G.files.values()].some((f) => f.name === "state.json" && !f.trashed));
   await A.click("nav.tabs >> text=Today"); await A.waitForTimeout(500);
   ok("coach shows Citrus's block", /Citrus planned 25 min at 19:30/.test(await A.evaluate(() => document.body.innerText)));
+  ok("coach: night shift tomorrow (from Citrus)", /Night shift tomorrow/.test(await A.evaluate(() => document.body.innerText)));
   // ---- status.json for the scheduler
   const st = G.at(["My Apps", "hub", "yuzu"]); const status = st.has("status.json") ? JSON.parse(st.get("status.json")!) : null;
   ok("status.json written in the hub shape", !!status && status.app === "yuzu" && typeof status.summary === "string" && Array.isArray(status.asks) && status.week?.days?.length === 7 && status.today?.date === today, JSON.stringify(status)?.slice(0, 160));
   ok("status asks for time today with a slot", status?.asks?.[0]?.date === today && /free|before|early|postnight|tough/.test(status.asks[0].slot) && status.asks[0].minutes > 0, JSON.stringify(status?.asks?.[0]));
   // ---- Device B joins from Drive
   const B = await device("B");
-  await B.click("button:has-text('Connect Google')"); await B.waitForFunction(() => (window as any).yuzu?.googleConnected?.(), null, { timeout: 20000 });
+  await B.click("button:has-text('Connect Google')"); await B.waitForFunction(() => (window as any).yuzu?.syncBackend?.() === "drive", null, { timeout: 20000 });
   const sB = await waitSync(B); ok("B pulls the whole collection from Drive", /pulled [\d,]+ cards/.test(sB.message) && (await y(B, "window.yuzu.cards.size")) === (await y(A, "window.yuzu.cards.size")), sB.message);
   // B reviews a card; A gets the review
   await B.evaluate(async () => { const y = (window as any).yuzu; const c = [...y.cards.values()][0]; await y.answer(c, 3); });
@@ -88,11 +102,19 @@ try {
   await B.evaluate(async (n) => { const y = (window as any).yuzu; y.media.delete(n); await y._db.deleteMany("media", [n]); }, media["0"]);
   await B.evaluate((n) => (window as any).yuzu.mediaUrl(n), media["0"]); await B.waitForTimeout(1000);
   ok("a card asking for a Drive file fetches it on the spot", await B.evaluate((n) => (window as any).yuzu.media.has(n), media["0"]));
-  // Token lapse → quiet renewal by redirect keeps it connected
-  await B.evaluate(() => { const t = JSON.parse(localStorage.getItem("yuzu-google")!); t.expires = Date.now() - 1; localStorage.setItem("yuzu-google", JSON.stringify(t)); localStorage.removeItem("yuzu-gsilent"); });
-  await B.evaluate(() => (window as any).yuzu.maybeRenew(false)); await B.waitForTimeout(2500);
-  await B.waitForFunction(() => (window as any).yuzu?.googleConnected?.(), null, { timeout: 20000 }).catch(() => {});
-  ok("quiet renewal by redirect keeps the device connected", await B.evaluate(() => (window as any).yuzu.googleConnected()));
+  // Token lapse: the background never opens Google's window (phones block it); a tap on Sync now renews and syncs.
+  await B.evaluate(() => { const t = JSON.parse(localStorage.getItem("yuzu-google")!); t.expires = Date.now() - 1; localStorage.setItem("yuzu-google", JSON.stringify(t)); (window as any).__gis.length = 0; });
+  await B.evaluate(() => (window as any).yuzu.sync("auto")); await B.waitForTimeout(500);
+  const bg = await B.evaluate(() => ({ calls: (window as any).__gis.length, st: (window as any).yuzu.syncStatus.message }));
+  ok("background sync with a lapsed token waits for a tap (no window)", bg.calls === 0 && /Waiting for a tap/.test(bg.st), JSON.stringify(bg));
+  await B.click("nav.tabs >> text=Settings"); await B.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; }));
+  await B.click("button:has-text('Sync now')"); await B.waitForTimeout(1500);
+  const tap = await B.evaluate(() => ({ calls: (window as any).__gis, ok: (window as any).yuzu.googleConnected() }));
+  ok("a tap on Sync now renews quietly (prompt \"\", inside the tap)", tap.ok && tap.calls.length === 1 && tap.calls[0].prompt === "" && tap.calls[0].tap, JSON.stringify(tap.calls));
+  const sB2 = await waitSync(B); ok("…and the sync goes through", !/Waiting/.test(sB2.message), sB2.message);
+  // A lock left by a failed sync on this install never blocks it (same id, name in another case)
+  const lockOk = await B.evaluate(async () => { const y = (window as any).yuzu; await y.saveSettings({ deviceName: "B" }); return true; });
+  void lockOk;
   await A.screenshot({ path: "test/e2e/shots/google-today.png" });
 } finally {
   console.log("errors:", errors.length ? errors : "none"); if (fails.length || errors.length) { console.log("FAILED:", fails); process.exitCode = 1; }

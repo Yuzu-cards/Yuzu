@@ -278,15 +278,17 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <button className="btn" style={{ marginTop: 8 }} disabled={busy || !mediaStat.bytes} onClick={async () => { const r = await store.pruneMedia(); setMediaMsg(r.files ? `Removed ${r.files.toLocaleString()} pictures no card shows (${(r.bytes / 1048576).toFixed(0)} MB freed).` : "Every stored picture is used by a card."); }}>Remove pictures no card shows</button>
         </div>
         <label className="row small" style={{ margin: "12px 0 6px" }}><input type="checkbox" checked={s.autoplay} onChange={(e) => store.saveSettings({ autoplay: e.target.checked })} /> Play card sounds automatically (tap ▶ or press R to replay)</label>
+        {store.syncBackend() !== "drive" ? <>
         <label className="row small" style={{ margin: "6px 0" }}><input type="checkbox" checked={s.mediaSync} onChange={(e) => store.saveSettings({ mediaSync: e.target.checked })} /> Share images between devices through the sync repository</label>
         <label className="row small" style={{ margin: "6px 0 0" }}><input type="checkbox" checked={s.mediaDownload} onChange={(e) => store.saveSettings({ mediaDownload: e.target.checked })} /> Download shared images on this device</label>
         <p className="small muted" style={{ marginBottom: 0 }}>Sharing moves 15 MB of images per sync, up to about 900 MB in total — fine for a few thousand images. For a whole library, the media file above is faster and keeps your sync repository small.</p>
+        </> : <p className="small muted" style={{ marginBottom: 0 }}>With Google connected, Drive is the master copy of your images and sounds (Settings → Google): every device sends what it has and fetches what its cards need.</p>}
       </div>
 
       </details>
       <details className="section"><summary>Inbox <span className="small muted">packs from Claude</span></summary>
       <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>Packs placed in the <b>inbox</b> folder of your sync repository arrive here on the next sync and wait for your review. {store.inbox.length ? `${store.inbox.length} waiting.` : "Nothing waiting."}{store.packLog.length ? ` ${store.packLog.length} packs added so far (removable).` : ""}</p>
+        <p className="small muted" style={{ marginTop: 0 }}>Packs placed in the <b>inbox</b> folder {store.syncBackend() === "drive" ? <>on Drive (My Apps › Yuzu › collection › inbox)</> : <>of your sync repository</>} arrive here on the next sync and wait for your review. {store.inbox.length ? `${store.inbox.length} waiting.` : "Nothing waiting."}{store.packLog.length ? ` ${store.packLog.length} packs added so far (removable).` : ""}</p>
         <button className="btn block" onClick={onInbox}>Open inbox</button>
       </div>
 
@@ -294,15 +296,26 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <GoogleSection />
       <details className="section" open><summary>Sync between devices</summary>
       <div className="card-box">
+        {store.syncBackend() === "drive"
+          ? <p className="small muted" style={{ marginTop: 0 }}>Cards sync through <b>Google Drive</b> (My Apps › Yuzu › collection), with your Google sign-in — no tokens to manage. Change it under Google above.</p>
+          : null}
+        {store.syncBackend() === "drive" ? <details className="how" style={{ margin: "0 0 8px" }}><summary className="small">GitHub (fallback)</summary>
         {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
         <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
         <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
         <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
         <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
+        </details> : <>
+        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
+        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
+        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
+        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
+        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
+        </>}
         <div className="field"><label>This device's name</label><input defaultValue={s.deviceName} onBlur={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={sy.auto} onChange={(e) => setSync({ auto: e.target.checked })} /> Sync automatically after changes</label>
         <div className="row" style={{ marginTop: 8 }}>
-          <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>
+          {store.syncBackend() !== "drive" && <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>}
           <button className="btn primary grow" disabled={!store.syncConfigured() || store.syncStatus.state === "syncing"} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "Syncing…" : "Sync now"}</button>
         </div>
         <p className="small" style={{ marginBottom: 0, color: store.syncStatus.state === "error" ? "var(--again)" : undefined }}>{syncMsg || store.syncStatus.message}{store.syncStatus.at && store.syncStatus.state !== "syncing" ? ` · ${fmtTime(store.syncStatus.at)}` : ""}</p>
@@ -314,9 +327,9 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             </ul>
             <div className="row" style={{ marginTop: 8 }}>
               <button className="btn" onClick={async () => { if (await confirmSheet({ title: "Re-check everything?", sub: "Nothing is deleted. The next sync compares every file with the repository and re-sends what differs.", yes: "Re-check on next sync", danger: false })) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
-              <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>
+              {store.syncBackend() !== "drive" && <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>}
             </div>
-            <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>
+            {store.syncBackend() !== "drive" && <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>}
           </details>
         )}
       </div>
@@ -478,52 +491,42 @@ function EasyDays() {
 }
 
 
-/** Google: Yuzu's home on Drive (collection + media), the rota from My Apps/Rotas and the hub for Citrus Maxima. */
+/** Google: Yuzu's home on Drive (collection + media), the shifts and plan from Citrus Maxima, and Yuzu's status for Citrus. */
 function GoogleSection() {
   const s = store.settings; const g = s.google; const st = store.googleStatus; const on = store.googleConnected(); const signed = store.googleSignedIn(); const ds = store.driveState();
   const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
   const setG = (patch: Partial<typeof g>) => store.saveSettings({ google: { ...g, ...patch } });
   const act = async (f: () => Promise<string | void>) => { setBusy(true); setMsg(""); try { const m = await f(); if (m) setMsg(m); } catch (e: any) { setMsg(e?.message ?? String(e)); } finally { setBusy(false); } };
-  const today = store.isoToday(); const coming: string[] = []; const d = new Date();
+  const coming: string[] = []; const d = new Date();
   for (let i = 0; i < 10; i++) { const iso = store.isoToday(d); const sh = store.shiftOn(iso); if (sh && sh.kind !== "off") coming.push(`${iso.slice(8, 10)}/${iso.slice(5, 7)} ${sh.kind === "night" ? "🌙" : sh.kind === "leave" ? "✈" : "☀️"} ${sh.code}`); d.setDate(d.getDate() + 1); }
   const plan = store.planToday(); const months = Object.keys(g.rota ?? {}).sort();
   return (
-    <details className="section" open><summary>Google <span className="small muted">Drive home, rota, Citrus</span></summary>
+    <details className="section" open><summary>Google <span className="small muted">Drive home · Citrus Maxima</span></summary>
       <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared by your apps. <b>Drive</b> holds the collection and the master copy of every image and sound (<b>My Apps/Yuzu</b>), the department's schedule files in <b>My Apps/Rotas</b> become light days, and <b>Citrus Maxima</b> reads Yuzu's status and plans your day.</p>
+        <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared with Citrus Maxima, Orange and your other apps. <b>Drive</b> keeps the collection and the master copy of every image and sound (<b>My Apps › Yuzu</b>). Yuzu reports what it needs to <b>Citrus</b> (My Apps › hub › yuzu) and reads back Citrus's plan and your shifts, so nights become light days.</p>
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-          {!on ? <button className="btn primary" disabled={busy} onClick={() => act(async () => { store.googleConnect(false); })}>{signed ? "Reconnect Google" : "Connect Google"}</button>
+          {!on ? <button className="btn primary" disabled={busy} onClick={() => act(() => store.googleConnect())}>{signed ? "Reconnect Google" : "Connect Google"}</button>
                : <button className="btn" disabled={busy} onClick={() => act(async () => { await store.googleDisconnect(); return "Disconnected"; })}>Disconnect</button>}
           {on && <button className="btn" disabled={busy || st.state === "working"} onClick={() => act(() => store.googleRefresh("manual"))}>Refresh now</button>}
           <span className={"small " + (st.state === "error" ? "" : "muted")} style={st.state === "error" ? { color: "var(--again)" } : undefined}>{st.message}</span>
         </div>
+        {signed && !on && <p className="small muted" style={{ margin: "6px 0 0" }}>Google's sign-in lasts an hour; phones only let it renew from a tap. <b>Sync now</b> or a pull-down on Today renews it without asking again.</p>}
         {msg && <p className="small" style={{ marginBottom: 0 }}>{msg}</p>}
-        {on && <p className="small muted" style={{ margin: "8px 0 0" }}>Sync goes through <b>{store.syncBackend() === "drive" ? "Google Drive" : "GitHub"}</b>.{store.syncBackend() === "drive" ? <> <button className="chip" onClick={() => store.saveSettings({ sync: { ...s.sync, backend: "github" } })}>Use GitHub instead</button></> : <> <button className="chip orange" onClick={() => { store.saveSettings({ sync: { ...s.sync, backend: "drive" } }); store.scheduleSync(500); }}>Use Drive</button></>}</p>}
+        {signed && <p className="small muted" style={{ margin: "8px 0 0" }}>Cards sync through <b>{store.syncBackend() === "drive" ? "Google Drive" : "GitHub"}</b>. {store.syncBackend() === "drive" ? <button className="chip" onClick={() => store.saveSettings({ sync: { ...s.sync, backend: "github" } })}>Use GitHub instead</button> : <button className="chip orange" onClick={() => { store.saveSettings({ sync: { ...s.sync, backend: "drive" } }); store.scheduleSync(500); }}>Use Drive</button>}</p>}
         <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.driveMedia} onChange={(e) => setG({ driveMedia: e.target.checked })} /> Drive is the master copy of my media</label>
         {ds && g.driveMedia && <p className="small muted" style={{ margin: "4px 0 0 24px" }}>{ds.onDrive.toLocaleString()} files on Drive{ds.complete ? "" : " (still listing)"} · {ds.toUpload.toLocaleString()} here that Drive lacks · {ds.toDownload.toLocaleString()} this device's cards need{ds.downBytes ? ` (${(ds.downBytes / 1048576).toFixed(0)} MB)` : ""}. Both move in the background; a card that needs a missing file fetches it on the spot.</p>}
         <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.shiftDays} onChange={(e) => setG({ shiftDays: e.target.checked })} /> My shifts make light days</label>
         {g.shiftDays && <div style={{ marginLeft: 24 }}>
-          <div className="field"><label>My name as written in the schedule</label><input defaultValue={g.rotaName} onBlur={(e) => setG({ rotaName: e.target.value.trim() || "Amro" })} placeholder="Amro" /></div>
-          <p className="small muted" style={{ margin: "4px 0 0" }}>{months.length ? `Rota read from Drive for ${months.map((m) => m.slice(5, 7) + "/" + m.slice(0, 4)).join(", ")}.` : "No schedule file read yet: save the month's .xlsx files into My Apps/Rotas on Drive (Orange and Citrus use the same folder)."}{coming.length ? ` Coming up: ${coming.join(" · ")}` : ""}</p>
-          <label className="row small" style={{ margin: "8px 0 0" }}><input type="checkbox" checked={g.calendar} onChange={(e) => setG({ calendar: e.target.checked })} /> Also read shifts from Google Calendar</label>
-          {g.calendar && <div style={{ marginLeft: 24 }}>
-            <div className="field"><label>Calendar</label>
-              {store.calendars.length ? <select value={g.rules.calendarId} onChange={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value } })}>{store.calendars.map((c) => <option key={c.id} value={c.primary ? "primary" : c.id}>{c.name}</option>)}</select>
-                                      : <input defaultValue={g.rules.calendarId} onBlur={(e) => setG({ rules: { ...g.rules, calendarId: e.target.value.trim() || "primary" } })} placeholder="primary" />}
-            </div>
-            <div className="field"><label>Events that are shifts <span className="muted">(words, any of)</span></label><input defaultValue={g.rules.match} onBlur={(e) => setG({ rules: { ...g.rules, match: e.target.value.trim() } })} /></div>
-            <div className="field"><label>…and which of those are nights</label><input defaultValue={g.rules.night} onBlur={(e) => setG({ rules: { ...g.rules, night: e.target.value.trim() } })} /></div>
-          </div>}
+          <p className="small muted" style={{ margin: "4px 0 0" }}>{store.plan?.days ? "Shifts come from Citrus Maxima's plan (swaps included)" : months.length ? `Rota read from Drive for ${months.map((m) => m.slice(5, 7) + "/" + m.slice(0, 4)).join(", ")}` : "No shifts yet: Citrus shares them once it has your rota (or save the month's .xlsx into My Apps › Rotas)"}.{coming.length ? ` Coming up: ${coming.join(" · ")}` : ""}</p>
+          {!store.plan?.days && <div className="field"><label>My name as written in the schedule</label><input defaultValue={g.rotaName} onBlur={(e) => setG({ rotaName: e.target.value.trim() || "Amro" })} placeholder="Amro" /></div>}
         </div>}
-        {plan.length > 0 && <p className="small" style={{ margin: "10px 0 0" }}>Citrus planned for today: {plan.map((b) => `${b.start || "any time"} · ${b.minutes || "?"} min`).join(", ")}</p>}
+        {plan.length > 0 && <p className="small" style={{ margin: "10px 0 0" }}>{plan[0].accepted ? "Citrus planned" : "Citrus suggests"} for today: {plan.map((b) => `${b.start || "any time"}${b.end ? `–${b.end}` : ""} · ${b.minutes || "?"} min`).join(", ")}</p>}
         <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
-          <button className="btn" disabled={busy || !on} onClick={() => act(async () => `${await store.addStudyBlocks(7)} study blocks added to your calendar`)}>Add study blocks for the week</button>
-          <span className="small muted">at</span><input style={{ width: 90 }} defaultValue={g.blockTime} onBlur={(e) => { if (/^\d{2}:\d{2}$/.test(e.target.value)) setG({ blockTime: e.target.value }); }} />
-          <span className="small muted">for</span><input style={{ width: 70 }} type="number" min={10} max={120} step={5} defaultValue={g.blockMinutes} onBlur={(e) => setG({ blockMinutes: Math.max(10, Math.min(120, Number(e.target.value) || 25)) })} /><span className="small muted">min, skipping nights</span>
-          <button className="btn" disabled={busy || !on} onClick={() => act(async () => ((await store.writeHubStatus(true)) ? "status.json written for Citrus" : "Nothing new to tell Citrus"))}>Tell Citrus now</button>
+          <button className="btn" disabled={busy || !signed} onClick={() => act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; return (await store.writeHubStatus(true)) ? "Sent to Citrus" : "Nothing new to tell Citrus"; })}>Tell Citrus now</button>
+          <span className="small muted">Yuzu also tells Citrus after every sync that changes something.</span>
         </div>
         <details className="how" style={{ marginTop: 10 }}><summary className="small">Client ID (advanced)</summary>
-          <div className="field"><label>Google Cloud web client</label><input defaultValue={g.clientId} autoCapitalize="none" placeholder="shared My Apps client" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /><span className="small muted">Empty = the shared My Apps client. This app's address must be among that client's redirect URIs in the Cloud console (see the project note google-cloud-setup).</span></div>
+          <div className="field"><label>Google Cloud web client</label><input defaultValue={g.clientId} autoCapitalize="none" placeholder="shared Citrus apps client" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /><span className="small muted">Empty = the shared client Citrus Maxima and Orange use. This app's address ({typeof location !== "undefined" ? location.origin : ""}) must be among that client's authorised JavaScript origins.</span></div>
         </details>
       </div>
     </details>

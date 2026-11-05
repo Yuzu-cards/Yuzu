@@ -81,11 +81,17 @@ function utf8ToBase64(s: string): string {
 }
 
 export class SyncError extends Error {
-  constructor(message: string, public kind: "auth" | "notfound" | "conflict" | "network" | "ratelimit" | "busy" | "other" = "other", public resumeAt?: number) { super(message); }
+  constructor(message: string, public kind: "auth" | "notfound" | "conflict" | "network" | "ratelimit" | "busy" | "server" | "other" = "other", public resumeAt?: number) { super(message); }
 }
 
 /** Cache of shard fingerprints: path → { fp (fingerprint of the records), hash of the JSON }. The JSON itself is not kept. */
 export type ShardCache = Map<string, { fp: string; hash: string }>;
+
+/** A lock is ours when it carries this install's id, or (older locks, no id) the same device name in any case. */
+export function sameDevice(info: { device?: string; id?: string }, device: string, id = ""): boolean {
+  if (id && info.id) return info.id === id;
+  return (info.device ?? "").trim().toLowerCase() === device.trim().toLowerCase();
+}
 
 export class GitHubSync {
   fetchImpl: typeof fetch = (...a) => fetch(...a);
@@ -125,6 +131,9 @@ export class GitHubSync {
     if (res.status === 403 && /rate limit/i.test(msg)) return new SyncError("GitHub rate limit reached; try again in a few minutes.", "ratelimit");
     if (res.status === 403) return new SyncError(`No permission to ${what} (403). The token needs Contents: read and write on ${this.cfg.owner}/${this.cfg.repo}.`, "auth");
     if (res.status === 404) return new SyncError(`Repository ${this.cfg.owner}/${this.cfg.repo} not found, or the token cannot see it.`, "notfound");
+    // GitHub's own trouble (a repository that was just moved or is being repacked answers "GitRPC::BadObjectState"):
+    // not another device, nothing to merge — say so plainly and come back later.
+    if (/GitRPC|BadObjectState|object.*state|server error/i.test(msg)) return new SyncError("GitHub is still settling this repository (it happens for a while after a move). Nothing was changed; Yuzu tries again in 10 minutes.", "server");
     if (res.status === 409 || res.status === 422) return new SyncError(`Conflict while trying to ${what}: ${msg || res.status}`, "conflict");
     return new SyncError(`GitHub ${res.status} while trying to ${what}: ${msg}`.trim(), "other");
   }
@@ -165,28 +174,28 @@ export class GitHubSync {
   static LOCK_MS = 12 * 60000;
   private holdsLock = false;
   private blobCache = new Map<string, string>();
-  async acquireLock(device: string): Promise<{ held: boolean; by?: string }> {
+  async acquireLock(device: string, id = ""): Promise<{ held: boolean; by?: string }> {
     const cur = await this.api(`/git/ref/yuzu/lock`);
     if (!cur && !(await this.api(`/git/ref/heads/${this.branch}`))) return { held: true }; // empty repository: nothing to contend for yet
     if (cur?.object?.sha) {
-      let info: { device?: string; until?: number } = {};
+      let info: { device?: string; id?: string; until?: number } = {};
       try { const c = await this.api(`/git/commits/${cur.object.sha}`); info = JSON.parse(c?.message ?? "{}"); } catch { /* unreadable: treat as expired */ }
-      if ((info.until ?? 0) > Date.now() && info.device !== device) return { held: false, by: info.device || "another device" };
+      if ((info.until ?? 0) > Date.now() && !sameDevice(info, device, id)) return { held: false, by: info.device || "another device" };
       // ours already, or expired: point the ref at a fresh lock commit
       // GitHub can refuse to move a ref outside heads/tags ("Reference does not exist"), and the other device may
       // have just released it — so on any failure clear the stale lock and take it fresh below.
-      const sha = await this.lockCommit(device);
+      const sha = await this.lockCommit(device, id);
       try { await this.api(`/git/refs/yuzu/lock`, { method: "PATCH", body: JSON.stringify({ sha, force: true }) }, "refresh the sync lock"); this.holdsLock = true; return { held: true, }; }
       catch { try { await this.api(`/git/refs/yuzu/lock`, { method: "DELETE" }, "clear an old sync lock"); } catch { /* already gone */ } }
     }
-    const sha = await this.lockCommit(device);
+    const sha = await this.lockCommit(device, id);
     try { await this.api("/git/refs", { method: "POST", body: JSON.stringify({ ref: "refs/yuzu/lock", sha }) }, "take the sync lock"); }
     catch (e) { if (e instanceof SyncError && e.kind === "conflict") return { held: false, by: "another device" }; throw e; } // created by someone else a moment ago
     this.holdsLock = true; return { held: true };
   }
-  private async lockCommit(device: string): Promise<string> {
+  private async lockCommit(device: string, id = ""): Promise<string> {
     const tree = await this.api("/git/trees", { method: "POST", body: JSON.stringify({ tree: [{ path: "lock", mode: "100644", type: "blob", content: device }] }) }, "take the sync lock");
-    const c = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: JSON.stringify({ device, until: Date.now() + GitHubSync.LOCK_MS }), tree: tree.sha, parents: [] }) }, "take the sync lock");
+    const c = await this.api("/git/commits", { method: "POST", body: JSON.stringify({ message: JSON.stringify({ device, id, until: Date.now() + GitHubSync.LOCK_MS }), tree: tree.sha, parents: [] }) }, "take the sync lock");
     return c.sha as string;
   }
   async releaseLock(): Promise<void> {

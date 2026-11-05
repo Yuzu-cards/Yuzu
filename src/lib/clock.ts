@@ -6,4 +6,3 @@ const DAY = 86400000;
 export function stamp(): number { const t = Math.max(Date.now(), floor + 1); floor = t; return t; }
 /** Tell the clock about a time seen on another device (ignored if implausibly far in the future). */
 export function observe(t: number | undefined) { if (t && Number.isFinite(t) && t < Date.now() + DAY && t > floor) floor = t; }
-export function clockFloor() { return floor; }

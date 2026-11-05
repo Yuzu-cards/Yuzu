@@ -165,3 +165,11 @@ test("deck map: exact, parent fallback keeps the rest, unmapped stays", () => {
   assert.equal(mapDeck("AnKing Step Deck::Cardio::New", m), "Medicine::Exams::Step 1::AnKing::Cardio::New");
   assert.equal(mapDeck("Languages::German", m), null);
 });
+
+test("sync lock: same install by id, older locks by name in any case; GitHub's own trouble is not a conflict", async () => {
+  const { sameDevice } = await import("../src/lib/sync.ts");
+  assert.equal(sameDevice({ device: "S25 Ultra" }, "S25 ULTRA"), true, "a renamed-case device still owns its old lock");
+  assert.equal(sameDevice({ device: "PC" }, "S25 Ultra"), false);
+  assert.equal(sameDevice({ device: "S25 Ultra", id: "a1" }, "S25 Ultra", "b2"), false, "two installs with the same name are told apart by id");
+  assert.equal(sameDevice({ device: "Phone", id: "a1" }, "Renamed", "a1"), true, "renaming the device keeps the lock");
+});

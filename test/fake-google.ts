@@ -36,6 +36,7 @@ export function fakeGoogle() {
       const dl = /^\/drive\/v3\/files\/([^/]+)$/.exec(u.pathname);
       if (dl && u.searchParams.get("alt") === "media") { const f = files.get(dl[1]); return f && !f.trashed ? new Response(f.bytes as BlobPart, { status: 200 }) : json({ error: { message: "not found" } }, 404); }
       if (dl && m === "GET") { const f = files.get(dl[1]); return f ? json({ id: f.id, name: f.name, trashed: !!f.trashed, mimeType: f.mime, parents: f.parents }) : json({ error: { message: "not found" } }, 404); }
+      if (dl && m === "PATCH") { const f = files.get(dl[1]); if (!f) return json({ error: { message: "not found" } }, 404); const b = JSON.parse(await bodyText() || "{}"); if (b.trashed) { f.trashed = true; changes.push({ id: f.id, removed: true }); } if (b.name) f.name = b.name; return json({ id: f.id }); }
       if (dl && m === "DELETE") { const f = files.get(dl[1]); if (f) { f.trashed = true; changes.push({ id: f.id, removed: true }); } return new Response(null, { status: 204 }); }
       const up = /^\/upload\/drive\/v3\/files\/([^/]+)$/.exec(u.pathname);
       if (up && m === "PATCH") { const f = files.get(up[1]); if (!f) return json({ error: { message: "not found" } }, 404); f.bytes = new Uint8Array(await new Response(init.body as any).arrayBuffer()); changes.push({ id: f.id, removed: false }); return json({ id: f.id }); }
@@ -46,6 +47,7 @@ export function fakeGoogle() {
       return json({ error: { message: "no such endpoint " + u.pathname } }, 404);
     },
     /** The stub for https://accounts.google.com/gsi/client: hands out a token at once. */
-    gisScript: `window.google = { accounts: { oauth2: { initTokenClient(o) { return { requestAccessToken() { setTimeout(() => o.callback({ access_token: "tok" + Date.now(), expires_in: 3600, scope: o.scope }), 20); } }; } } } };`,
+    /** The stub for https://accounts.google.com/gsi/client: hands out a token at once, and records every window it was asked to open (and whether a tap was active). */
+    gisScript: `window.__gis = []; window.google = { accounts: { oauth2: { revoke() {}, initTokenClient(o) { return { requestAccessToken(r) { window.__gis.push({ prompt: (r || {}).prompt, tap: !!(navigator.userActivation && navigator.userActivation.isActive), scope: o.scope }); setTimeout(() => o.callback({ access_token: "tok" + Date.now(), expires_in: 3600, scope: o.scope }), 20); } }; } } } };`,
   };
 }

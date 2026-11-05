@@ -5,10 +5,10 @@
 // cards/*.json, reviews/<month>.json, settings.json …), one Drive file each. manifest.json carries a revision stamp;
 // a push re-reads it just before writing and stops when another device moved it. A lock.json file keeps two devices
 // from uploading at once (written, then read back: ours or not).
-import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, listFiles, downloadBytes, putFile, deleteFile, gjson, type DriveFile } from "./google";
-import { SyncError, gzip, gunzip, GZIP_ABOVE, type Manifest, type SyncSnapshot, type Progress } from "./sync";
+import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, findFolders, listFiles, downloadBytes, putFile, deleteFile, gjson, type DriveFile } from "./google";
+import { SyncError, gzip, gunzip, GZIP_ABOVE, sameDevice, type Manifest, type SyncSnapshot, type Progress } from "./sync";
 
-export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"] };
+export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"], rotasOrange: ["Citrus Maxima", "Rotas"] };
 export interface DriveIndex { media: string; files: Record<string, { id: string; s: number }>; changes: string; at: number; complete: boolean; nextPage?: string }
 
 // ---------------------------------------------------------------- media
@@ -71,14 +71,14 @@ export class DriveSync {
     const m = JSON.parse(t) as Manifest & { rev?: string }; if (!m || typeof m !== "object" || !m.files) throw new SyncError("manifest.json on Drive is not a Yuzu manifest", "other");
     this.seenRev = m.rev ?? String(m.updatedAt); return m;
   }
-  async acquireLock(device: string): Promise<{ held: boolean; by?: string }> {
+  async acquireLock(device: string, id = ""): Promise<{ held: boolean; by?: string }> {
     const now = Date.now(); const cur = await this.readText("lock.json").then((t) => (t ? JSON.parse(t) : null), () => null);
-    if (cur && cur.device !== device && cur.until > now) return { held: false, by: cur.device };
-    const mine = { device, until: now + DriveSync.LOCK_MS, n: Math.random().toString(36).slice(2) };
-    const id = await putFile({ parent: await this.open(), name: "lock.json", body: JSON.stringify(mine), id: this.listing?.get("lock.json")?.id ?? null });
-    this.listing?.set("lock.json", { id, name: "lock.json" });
+    if (cur && cur.until > now && !sameDevice(cur, device, id)) return { held: false, by: cur.device };
+    const mine = { device, id, until: now + DriveSync.LOCK_MS, n: Math.random().toString(36).slice(2) };
+    const fileId = await putFile({ parent: await this.open(), name: "lock.json", body: JSON.stringify(mine), id: this.listing?.get("lock.json")?.id ?? null });
+    this.listing?.set("lock.json", { id: fileId, name: "lock.json" });
     await new Promise((r) => setTimeout(r, 400)); // two devices writing at once: whoever's content is there after a moment holds it
-    const back = await downloadBytes(id).then((b) => (b ? JSON.parse(toText(b)) : null), () => null);
+    const back = await downloadBytes(fileId).then((b) => (b ? JSON.parse(toText(b)) : null), () => null);
     if (!back || back.n !== mine.n) return { held: false, by: back?.device ?? "another device" };
     this.holdsLock = true; return { held: true };
   }
@@ -141,19 +141,36 @@ export function statusFingerprint(status: HubStatus): string { const { updatedAt
 export async function writeStatus(status: HubStatus, cache: Record<string, string>): Promise<string> {
   const parent = await ensureFolders(PATHS.hub, cache); const id = await putFile({ parent, name: "status.json", body: JSON.stringify(status, null, 1), id: cache.statusId || null }); cache.statusId = id; return id;
 }
-/** The scheduler's plan: hub/citrus/plan.json (where Citrus Maxima writes it) or hub/scheduler/plan.json (the contract's name); null when there is none yet. */
-export async function readPlan(cache: Record<string, string>): Promise<any | null> {
+/** Citrus Maxima's plan.json (its publishPlan): 10 days of shifts and blocks per app. */
+export interface CitrusBlock { app?: string; title?: string; date: string; start?: string; end?: string; minutes?: number; status?: string; goalId?: string }
+export interface CitrusPlan { app?: string; updatedAt?: string; from?: string; days?: Record<string, { shift: { code?: string; label?: string; site?: string; start?: string; end?: string; overnight?: boolean } | null; blocks?: CitrusBlock[] }>; blocks?: CitrusBlock[] }
+/** Citrus's plan: My Apps/hub/citrus/plan.json (where Citrus writes it; hub/scheduler/plan.json as the older name). null when there is none yet. */
+export async function readPlan(cache: Record<string, string>): Promise<CitrusPlan | null> {
   for (const path of [PATHS.planCitrus, PATHS.plan]) {
-    const parent = await ensureFolders(path, cache); const f = (await listFiles({ parent, name: "plan.json" }))[0]; if (!f) continue;
+    const parent = await findFolders(path, cache); if (!parent) continue;
+    const f = (await listFiles({ parent, name: "plan.json" }))[0]; if (!f) continue;
     const b = await downloadBytes(f); if (!b) continue; try { return JSON.parse(toText(b)); } catch { /* try the other */ }
   }
   return null;
 }
-/** Schedule files in My Apps/Rotas this device hasn't read (seen: id → modifiedTime). */
+const isSheet = (f: DriveFile) => f.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || f.mimeType === "application/vnd.google-apps.spreadsheet" || /\.xlsx$/i.test(f.name);
+/** Schedule files this device hasn't read (seen: id → modifiedTime), from My Apps/Rotas (Citrus) and Citrus Maxima/Rotas (Orange). */
 export async function newRotaFiles(seen: Record<string, string>, cache: Record<string, string>): Promise<{ files: DriveFile[]; seen: Record<string, string> }> {
-  const parent = await ensureFolders(PATHS.rotas, cache);
-  const files = (await listFiles({ parent })).filter((f) => f.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || f.mimeType === "application/vnd.google-apps.spreadsheet" || /\.xlsx$/i.test(f.name)).slice(0, 8);
-  const next: Record<string, string> = {}; for (const f of files) next[f.id] = f.modifiedTime ?? "";
-  return { files: files.filter((f) => seen[f.id] !== (f.modifiedTime ?? "")), seen: next };
+  const files: DriveFile[] = [];
+  for (const [i, path] of [PATHS.rotas, PATHS.rotasOrange].entries()) {
+    const parent = i === 0 ? await ensureFolders(path, cache) : await findFolders(path, cache); if (!parent) continue;
+    files.push(...(await listFiles({ parent })).filter(isSheet));
+  }
+  // newest first, and the same file name in both folders counts once (whichever is newer)
+  files.sort((a, b) => ((a.modifiedTime ?? "") < (b.modifiedTime ?? "") ? 1 : -1));
+  const byName = new Map<string, DriveFile>(); for (const f of files) if (!byName.has(f.name)) byName.set(f.name, f);
+  const list = [...byName.values()].slice(0, 12);
+  const next: Record<string, string> = {}; for (const f of list) next[f.id] = f.modifiedTime ?? "";
+  return { files: list.filter((f) => seen[f.id] !== (f.modifiedTime ?? "")), seen: next };
+}
+/** One-time cleanup: the hourly scheduling backup an early bridge build wrote to My Apps/hub/yuzu/state.json (stale; the collection lives in My Apps/Yuzu). */
+export async function trashStale(cache: Record<string, string>): Promise<void> {
+  const parent = await findFolders(PATHS.hub, cache); if (!parent) return;
+  for (const f of await listFiles({ parent, name: "state.json" })) await gjson(`${DRIVE}/files/${encodeURIComponent(f.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
 }
 export { GoogleError };

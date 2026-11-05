@@ -1,69 +1,78 @@
-// Google for the Citrus apps (the hub contract, 02/11/2026): one Google Cloud project, each app signs in by itself with
-// the OAuth "implicit" redirect — the app sends you to Google, Google sends you straight back with a one-hour access
-// token in the URL hash. No backend, no secret, nothing to install. The token lives in localStorage on this device only.
+// Google for the Citrus apps: one Google Cloud project, the same sign-in as Citrus Maxima and Orange — the Google
+// Identity Services "token client". A tap opens Google's window once; afterwards a renewal (`prompt: ""`) goes through
+// without any screen while you're signed in to Google in this browser. Phones only let that window open from a tap,
+// so renewals happen on taps (Sync now, pull to sync, Connect), never in the background. No backend, no secret, no
+// redirect URIs: the client only needs this app's origin among its authorised JavaScript origins. The one-hour token
+// lives in localStorage on this device only.
 //
-// A quiet renewal (prompt=none) bounces through Google without asking anything while you are still signed in there;
-// otherwise the Settings row and the coach say "Google needs a tap".
-//
-// Drive layout (shared with Orange and Citrus Maxima):
-//   My Apps/Rotas/                 the department's schedule files (read)
-//   My Apps/hub/yuzu/status.json   Yuzu's "where I am" for the scheduler (written)
-//   My Apps/hub/scheduler/plan.json the scheduler's answer (read)
-//   My Apps/Yuzu/collection/       the card collection (sync)      My Apps/Yuzu/media/  images and sounds (master copy)
+// Drive layout — Citrus's own (its code forces the root "My Apps"):
+//   My Apps/Rotas/                    the department's schedule files (read; Citrus Maxima/Rotas too, where Orange looks)
+//   My Apps/hub/yuzu/status.json      Yuzu's "where I am" for Citrus (written)
+//   My Apps/hub/citrus/plan.json      Citrus's plan: blocks per app and the shift of each day (read)
+//   My Apps/Yuzu/collection/          the card collection (sync)      My Apps/Yuzu/media/   images and sounds (master copy)
 
 export const HUB_ROOT = "My Apps";
-/** The shared web client of the "My Apps" Cloud project (a public id; the app's address must be among its redirect URIs). */
-export const DEFAULT_CLIENT_ID = "753489712404-ra7ahu34gjl305b4ss1765idmqg7am5s.apps.googleusercontent.com"; // the "Citrus web" client (Orange's own is …m8600u5f3osnsieeu63ci05ik70rv49p)
-export const SCOPE = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.events";
-const AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN_KEY = "yuzu-google", PENDING_KEY = "yuzu-gauth";
+/** The shared "Citrus apps" web client (a public id). */
+export const DEFAULT_CLIENT_ID = "753489712404-ra7ahu34gjl305b4ss1765idmqg7am5s.apps.googleusercontent.com";
+export const SCOPE = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email";
+const GIS = "https://accounts.google.com/gsi/client";
+const TOKEN_KEY = "yuzu-google";
 export interface GoogleToken { access: string; expires: number; email?: string; scope: string }
 
 export class GoogleError extends Error { constructor(message: string, public status = 0, public auth = false, public retryable = false) { super(message); } }
 
 // ---------------------------------------------------------------- token
-export function savedToken(): GoogleToken | null { try { const t = JSON.parse(localStorage.getItem(TOKEN_KEY) || "null"); return t && t.access ? t : null; } catch { return null; } }
-export function tokenValid(t = savedToken(), now = Date.now()): boolean { return !!t && t.expires - now > 60000; }
+export function savedToken(): GoogleToken | null { try { const t = JSON.parse(localStorage.getItem(TOKEN_KEY) || "null"); return t && (t.access || t.email) ? t : null; } catch { return null; } }
+export function tokenValid(t = savedToken(), now = Date.now()): boolean { return !!t?.access && t.expires - now > 60000; }
 export function forgetToken() { try { localStorage.removeItem(TOKEN_KEY); } catch { /* fine */ } }
 function saveToken(t: GoogleToken) { try { localStorage.setItem(TOKEN_KEY, JSON.stringify(t)); } catch { /* fine */ } }
+/** Keep who is signed in, drop the expired token (the Settings row then says "Reconnect"). */
+export function expireToken() { const t = savedToken(); if (t) saveToken({ ...t, access: "", expires: 0 }); }
 
-// ---------------------------------------------------------------- sign-in by redirect
-/** The address Google sends you back to: this app's own, which must be listed on the web client in the Cloud console. */
-export const redirectUri = (loc: Location = location) => `${loc.origin}${loc.pathname.replace(/index\.html$/, "")}`;
-export function authUrl(clientId: string, { silent = false, hint = "", state = "" } = {}, loc: Location = location) {
-  const q = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri(loc), response_type: "token", scope: SCOPE, include_granted_scopes: "true", state });
-  if (silent) q.set("prompt", "none"); if (hint) q.set("login_hint", hint);
-  return `${AUTH}?${q}`;
+// ---------------------------------------------------------------- sign-in (GIS token client)
+declare global { interface Window { google?: any } }
+let gisLoading: Promise<void> | null = null;
+/** Load Google's sign-in script (preloaded at start-up when signed in, so a tap can open the window straight away). */
+export function loadGis(): Promise<void> {
+  if (typeof window === "undefined") return Promise.reject(new GoogleError("No browser."));
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  if (gisLoading) return gisLoading;
+  gisLoading = new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = GIS; s.async = true;
+    s.onload = () => res(); s.onerror = () => { gisLoading = null; rej(new GoogleError("Couldn't load Google sign-in. Are you online?", 0, false, true)); };
+    document.head.appendChild(s);
+  });
+  return gisLoading;
 }
-/** Leave for Google (the page navigates away). `silent` renews without a screen while you're still signed in there. */
-export function startConnect(clientId: string, { silent = false, hint = "" } = {}) {
-  if (!clientId) throw new GoogleError("No Google client ID: paste it in Settings → Google.");
-  const state = `${silent ? "s" : "i"}.${Math.random().toString(36).slice(2)}.${Date.now()}`;
-  try { sessionStorage.setItem(PENDING_KEY, state); } catch { /* private mode: accepted without the nonce check */ }
-  location.assign(authUrl(clientId, { silent, hint, state }));
-}
+/** Whether this moment is inside a tap (only then may Google's window open on a phone). */
+export const inTap = () => (typeof navigator !== "undefined" && (navigator as any).userActivation ? !!(navigator as any).userActivation.isActive : true);
 /**
- * At boot: Google's answer in the URL hash, removed from the address bar. null when the app opened normally; else the
- * saved token, or { error, silent } ("login_required" after a silent try just means: ask with a tap next time).
+ * Get a token. Call from a tap. `renew`: the account already agreed, so Google answers without asking (a window flashes
+ * and closes); otherwise it shows the account chooser and the consent screen.
  */
-export function captureRedirect(now = Date.now()): { token?: GoogleToken; error?: string; silent: boolean } | null {
-  const hash = location.hash || ""; if (!/(^|[#&])(access_token|error)=/.test(hash)) return null;
-  const p = new URLSearchParams(hash.replace(/^#/, "")); let pending: string | null = null;
-  try { pending = sessionStorage.getItem(PENDING_KEY); sessionStorage.removeItem(PENDING_KEY); } catch { /* ignore */ }
-  try { history.replaceState(null, "", `${location.pathname}${location.search}`); } catch { /* ignore */ }
-  const state = p.get("state") || ""; const silent = state.startsWith("s.");
-  if (pending && state && pending !== state) return { error: "state_mismatch", silent };
-  if (p.get("error")) return { error: p.get("error")!, silent };
-  const t: GoogleToken = { access: p.get("access_token")!, expires: now + Number(p.get("expires_in") || 3600) * 1000, scope: p.get("scope") || SCOPE, email: savedToken()?.email };
-  saveToken(t); return { token: t, silent };
+export async function signIn(clientId: string, { renew = false } = {}): Promise<GoogleToken> {
+  if (!clientId) throw new GoogleError("No Google client ID (Settings → Google → advanced).");
+  await loadGis();
+  const prev = savedToken();
+  const tok = await new Promise<any>((resolve, reject) => {
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId, scope: SCOPE, include_granted_scopes: true, ...(prev?.email ? { hint: prev.email } : {}),
+      callback: (r: any) => (r?.error ? reject(new GoogleError(/interaction|login_required|consent/.test(r.error) ? "Google needs you to sign in again." : `Google sign-in: ${r.error_description || r.error}`, 401, true)) : resolve(r)),
+      error_callback: (e: any) => reject(new GoogleError(e?.type === "popup_closed" ? "Sign-in window closed." : e?.type === "popup_failed_to_open" ? "The browser blocked Google's window. Tap again." : `Google sign-in: ${e?.message || e?.type || "failed"}`)),
+    });
+    client.requestAccessToken({ prompt: renew ? "" : "consent" });
+  });
+  const t: GoogleToken = { access: tok.access_token, expires: Date.now() + (Number(tok.expires_in) || 3600) * 1000, scope: tok.scope || SCOPE, email: prev?.email };
+  saveToken(t); return t;
 }
-/** The account's email, for the Settings row and the login hint. */
+export function signOut() { const t = savedToken(); try { if (t?.access && window.google?.accounts?.oauth2) window.google.accounts.oauth2.revoke(t.access, () => {}); } catch { /* fine */ } forgetToken(); }
+/** The account's email, for the Settings row and the hint on the next sign-in. */
 export async function whoAmI(): Promise<string> { try { const r = await gfetch("https://www.googleapis.com/oauth2/v3/userinfo"); const email = (await r.json())?.email ?? ""; const t = savedToken(); if (t && email) saveToken({ ...t, email }); return email; } catch { return savedToken()?.email ?? ""; } }
 
 // ---------------------------------------------------------------- calls
 /** Authenticated fetch with plain-word errors and retries; a 401 clears the saved token so the UI asks for a tap. */
 export async function gfetch(url: string, init: RequestInit = {}, token = savedToken()): Promise<Response> {
-  if (!token) throw new GoogleError("Not connected to Google.", 401, true);
+  if (!token?.access) throw new GoogleError("Not connected to Google.", 401, true);
   let res: Response;
   for (let attempt = 0; ; attempt++) {
     try { res = await fetch(url, { ...init, cache: "no-store", headers: { ...(init.headers as any), Authorization: `Bearer ${token.access}` } }); }
@@ -73,7 +82,7 @@ export async function gfetch(url: string, init: RequestInit = {}, token = savedT
   }
   if (res.ok || res.status === 404) return res;
   let m = ""; try { m = (await res.clone().json())?.error?.message ?? ""; } catch { /* no body */ }
-  if (res.status === 401 || (res.status === 403 && /insufficient|scope/i.test(m))) { forgetToken(); throw new GoogleError("Google signed this device out. Tap Connect in Settings → Google.", res.status, true); }
+  if (res.status === 401 || (res.status === 403 && /insufficient|scope/i.test(m))) { expireToken(); throw new GoogleError("Google needs a tap to reconnect.", res.status, true); }
   if (res.status === 403) throw new GoogleError(/quota|rate/i.test(m) ? "Google is rate-limiting; it will retry later." : `Google refused (403): ${m || "no permission"}.`, 403);
   if (res.status === 412 || res.status === 409) throw new GoogleError("Drive changed while syncing.", res.status);
   throw new GoogleError(`Google ${res.status}: ${m || res.statusText}`, res.status);
@@ -102,15 +111,17 @@ export async function createFolder(name: string, parent: string | null): Promise
   const j = await gjson(`${DRIVE}/files?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: FOLDER, ...(parent ? { parents: [parent] } : {}) }) }); return j.id;
 }
 /** The folder at `path` under My Drive, created where missing; ids cached by path and re-checked only when a call about them fails. */
-export async function ensureFolders(path: string[], cache: Record<string, string>): Promise<string> {
+export async function ensureFolders(path: string[], cache: Record<string, string>): Promise<string> { return (await findFolders(path, cache, true))!; }
+/** The folder at `path`, or null when it isn't there (with `create`, made where missing). */
+export async function findFolders(path: string[], cache: Record<string, string>, create = false): Promise<string | null> {
   let parent: string | null = null; let key = "";
   for (const name of path) {
     key = key ? `${key}/${name}` : name; let id: string | null = cache[key] ?? null;
-    if (id) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (!ok) id = null; }
-    if (!id) { const found = await listFiles({ parent: parent ?? "root", name, folders: true }); id = found[0]?.id ?? (await createFolder(name, parent)); cache[key] = id; }
+    if (id) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (!ok) { id = null; delete cache[key]; } }
+    if (!id) { const found = await listFiles({ parent: parent ?? "root", name, folders: true }); id = found[0]?.id ?? (create ? await createFolder(name, parent) : null); if (!id) return null; cache[key] = id; }
     parent = id;
   }
-  return parent!;
+  return parent;
 }
 export async function downloadBytes(f: DriveFile | string): Promise<Uint8Array | null> {
   const file = typeof f === "string" ? { id: f } as DriveFile : f;
@@ -129,4 +140,3 @@ export async function putFile(o: { parent: string; name: string; body: BodyInit;
   if (!j?.id) throw new GoogleError("Drive did not return a file id."); return j.id;
 }
 export async function deleteFile(id: string) { await gfetch(`${DRIVE}/files/${encodeURIComponent(id)}`, { method: "DELETE" }); }
-export const folderLink = (id: string) => `https://drive.google.com/drive/folders/${encodeURIComponent(id)}`;

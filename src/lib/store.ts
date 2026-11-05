@@ -10,11 +10,10 @@ import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { savedToken, tokenValid, forgetToken, startConnect, captureRedirect, whoAmI, downloadBytes, DEFAULT_CLIENT_ID, GoogleError } from "./google";
-import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, type DriveIndex, type HubStatus } from "./drive";
+import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, DEFAULT_CLIENT_ID, GoogleError } from "./google";
+import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
 declare const __VERSION__: string;
-import { GoogleCalendar, weightsFromShifts, DEFAULT_RULES, type ShiftDay, type ShiftRules, type CalendarInfo } from "./calendar";
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
@@ -65,12 +64,12 @@ export interface Settings {
   smart: SmartDeck[];
   sync: { owner: string; repo: string; token: string; auto: boolean; /** where the collection syncs: Google Drive (the hub) or a GitHub repository (the old way) */ backend?: "drive" | "github" };
   /** Google (synced): the shared Cloud project's client ID, the shift rules, and what to do with Drive and Calendar. */
-  google: { clientId: string; rules: ShiftRules; shiftDays: boolean; driveMedia: boolean; blockTime: string; blockMinutes: number; /** your name as written in the department schedule */ rotaName: string; /** also read a Google Calendar for shifts (the rota files are the main source) */ calendar: boolean; /** months read from My Apps/Rotas: "2026-11" → day → code */ rota: Record<string, Record<string, string>> };
+  google: { clientId: string; /** shifts (Citrus's plan, the rota files) make light days */ shiftDays: boolean; /** Drive keeps the master copy of the media */ driveMedia: boolean; /** your name as written in the department schedule */ rotaName: string; /** months read from the Rotas folder: "2026-11" → day → code */ rota: Record<string, Record<string, string>> };
 }
 export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [],
-  google: { clientId: "", rules: DEFAULT_RULES, shiftDays: true, driveMedia: true, blockTime: "19:00", blockMinutes: 25, rotaName: "Amro", calendar: false, rota: {} },
+  google: { clientId: "", shiftDays: true, driveMedia: true, rotaName: "Amro", rota: {} },
   fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
@@ -150,14 +149,13 @@ export class Store {
   private edits = 0; // bumps on every local change, so a sync can tell whether something happened while it uploaded
   private touch() { this.edits++; if (!this.dirty) { this.dirty = true; db.setMeta("syncDirty", true).catch(() => {}); } this.scheduleSync(); }
 
-  // ---- Google: Drive as Yuzu's home (collection + media), the hub for Citrus, the rota from Drive -------------
+  // ---- Google: Drive as Yuzu's home (collection + media), Citrus Maxima's hub, the rota -------------
   driveIndex: DriveIndex | null = null; syncOwnerMoved = false;
   gcache: Record<string, string> = {}; // Drive folder ids by path (+ statusId), per device
-  shifts: ShiftDay[] = []; shiftWeights: Record<string, number> = {}; shiftsAt = 0;
-  rota: Record<string, Record<string, string>> = {}; // "2026-11" → { "1": "D2", … } from My Apps/Rotas (synced in settings.google.rota)
+  shiftWeights: Record<string, number> = {};
+  rota: Record<string, Record<string, string>> = {}; // "2026-11" → { "1": "D2", … } from the Rotas folder (synced in settings.google.rota)
   rotaSeen: Record<string, string> = {}; rotaCheckedOn = "";
-  plan: any = null; planAt = 0; // hub/scheduler/plan.json, as Citrus writes it
-  calendars: CalendarInfo[] = [];
+  plan: CitrusPlan | null = null; planAt = 0; // My Apps/hub/citrus/plan.json, as Citrus writes it
   googleStatus: { state: "off" | "working" | "ok" | "error"; message: string; at: number } = { state: "off", message: "Not connected", at: 0 };
   mediaVersion = 0;
   private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false;
@@ -167,40 +165,43 @@ export class Store {
   googleEmail(): string { return savedToken()?.email ?? ""; }
   private setGoogle(state: typeof this.googleStatus.state, message: string) { this.googleStatus = { state, message, at: Date.now() }; this.bump(); }
   private clientId() { return this.settings.google.clientId || DEFAULT_CLIENT_ID; }
-  /** A tap: leave for Google's sign-in; it sends us back with a token and `googleBoot()` takes it from there. */
-  googleConnect(silent = false): void { startConnect(this.clientId(), { silent, hint: this.googleEmail() }); }
-  async googleDisconnect(): Promise<void> { forgetToken(); this.driveIndex = null; this.gcache = {}; await db.setMeta("driveMedia", null); await db.setMeta("gcache", {}); if (this.settings.sync.backend === "drive") await this.saveSettings({ sync: { ...this.settings.sync, backend: "github" } }); this.setGoogle("off", "Not connected"); }
+  private needTap() { this.setGoogle("error", "Google needs a tap: press Sync now (or pull down on Today)"); }
+  /** From a tap: Google's window, then Drive becomes Yuzu's home (GitHub stays selectable as the fallback). */
+  async googleConnect(): Promise<void> {
+    const renew = !!savedToken()?.email;
+    await signIn(this.clientId(), { renew });
+    const email = await whoAmI(); this.setGoogle("ok", `Connected as ${email || "you"}`);
+    if (this.settings.sync.backend !== "drive") { await this.saveSettings({ sync: { ...this.settings.sync, backend: "drive" } }); this.log(true, "Sync now goes through Google Drive (My Apps/Yuzu)", 0); }
+    this.googleRefresh("connect").catch(() => {}); this.scheduleSync(500);
+  }
+  async googleDisconnect(): Promise<void> { signOut(); this.driveIndex = null; this.gcache = {}; await db.setMeta("driveMedia", null); await db.setMeta("gcache", {}); if (this.settings.sync.backend === "drive") await this.saveSettings({ sync: { ...this.settings.sync, backend: "github" } }); this.setGoogle("off", "Not connected"); }
   /**
-   * At boot: Google's answer from the URL (after a connect or a quiet renewal), and the decision to use Drive for sync.
-   * The first successful connect switches sync to Drive; GitHub stays available in Settings as the fallback.
+   * A lapsed token is renewed only inside a tap (phones block Google's window otherwise): Sync now, pull to sync,
+   * Refresh, Connect. Returns whether a valid token is there afterwards.
    */
+  async renewOnTap(): Promise<boolean> {
+    if (tokenValid()) return true; if (!savedToken()?.email || !inTap()) return false;
+    try { await signIn(this.clientId(), { renew: true }); this.setGoogle("ok", `Connected as ${this.googleEmail() || "you"}`); return true; }
+    catch (e: any) { this.setGoogle("error", e?.message ?? String(e)); return false; }
+  }
+  /** At start-up: who is signed in (also from the short-lived bridge build of 02/11), and Google's script preloaded. */
   async googleBoot(): Promise<void> {
-    const r = captureRedirect();
-    if (r?.error) { if (!r.silent) this.setGoogle("error", `Google sign-in didn't finish (${r.error.replace(/_/g, " ")}).`); else { this.silentFailedAt = Date.now(); this.setGoogle("error", "Google needs a tap to reconnect (Settings → Google)"); } return; }
-    if (r?.token) {
-      const email = await whoAmI(); this.setGoogle("ok", `Connected as ${email || "you"}`);
-      if (this.settings.sync.backend !== "drive") { await this.saveSettings({ sync: { ...this.settings.sync, backend: "drive" } }); this.log(true, "Sync now goes through Google Drive (My Apps/Yuzu)", 0); }
-      await this.googleRefresh("connect"); this.scheduleSync(500);
-      return;
-    }
-    if (savedToken()) this.googleStatus = { state: tokenValid() ? "ok" : "error", message: tokenValid() ? `Connected as ${this.googleEmail() || "you"}` : "Google needs a tap to reconnect (Settings → Google)", at: 0 };
+    try { const old = JSON.parse(localStorage.getItem("yuzu_hub") || "null"); if (old?.email && !savedToken()) localStorage.setItem("yuzu-google", JSON.stringify({ access: "", expires: 0, email: old.email, scope: "" })); localStorage.removeItem("yuzu_hub"); localStorage.removeItem("yuzu-gauth"); localStorage.removeItem("yuzu-gsilent"); } catch { /* fine */ }
+    if (!savedToken()) return;
+    loadGis().catch(() => {}); // so the first tap can open Google's window at once
+    if (tokenValid()) this.googleStatus = { state: "ok", message: `Connected as ${this.googleEmail() || "you"}`, at: 0 };
+    else this.googleStatus = { state: "error", message: "Google needs a tap: press Sync now (or pull down on Today)", at: 0 };
   }
-  private silentAt = 0; private silentFailedAt = 0;
-  /** A quiet renewal when the token lapsed: at most one bounce through Google a day, never mid-session, and not for a week after one failed. */
-  maybeRenew(hasSession: boolean): boolean {
-    if (!savedToken() || tokenValid() || hasSession || typeof location === "undefined") return false;
-    if (Date.now() - this.silentAt < 20 * 3600000 || Date.now() - this.silentFailedAt < 7 * 86400000) return false;
-    this.silentAt = Date.now(); try { localStorage.setItem("yuzu-gsilent", String(this.silentAt)); } catch { /* fine */ }
-    this.googleConnect(true); return true;
-  }
-  /** Bring the rota, the plan and the media index up to date, write status.json, then the media work in the background. */
+  /** Bring the rota, Citrus's plan and the media index up to date, write status.json, then the media work in the background. */
   async googleRefresh(reason = "auto"): Promise<void> {
-    if (!tokenValid()) { if (savedToken()) this.setGoogle("error", "Google needs a tap to reconnect (Settings → Google)"); return; }
+    if (reason === "manual" && !(await this.renewOnTap())) { if (savedToken()) this.needTap(); return; }
+    if (!tokenValid()) { if (savedToken()) this.needTap(); return; }
     if (this.driveBusy) return; this.driveBusy = true;
     try {
       const g = this.settings.google; const progress = (m: string) => this.setGoogle("working", m); const today = this.isoToday();
       if (!Object.keys(this.gcache).length) this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
-      // The rota: schedule files in My Apps/Rotas this device hasn't read (once a day, or on a tap).
+      await this.googleCleanup();
+      // The rota: schedule files this device hasn't read, in My Apps/Rotas (Citrus) and Citrus Maxima/Rotas (Orange), once a day or on a tap.
       if (g.shiftDays && (this.rotaCheckedOn !== today || reason === "manual" || reason === "connect")) {
         try {
           const { files, seen } = await newRotaFiles(this.rotaSeen, this.gcache); let found = 0;
@@ -209,16 +210,11 @@ export class Store {
           }
           this.rotaSeen = seen; this.rotaCheckedOn = today; await db.setMeta("rotaSeen", { seen, on: today });
           if (found) { await this.saveSettings({ google: { ...this.settings.google, rota: this.rota } }); this.log(true, `Rota: ${found} month${found === 1 ? "" : "s"} read from Drive`, 0); }
-        } catch (e: any) { this.log(false, `Rotas folder: ${e?.message ?? e}`, 0); if (e instanceof GoogleError && e.auth) { this.setGoogle("error", e.message); return; } }
+        } catch (e: any) { this.log(false, `Rotas folder: ${e?.message ?? e}`, 0); if (e instanceof GoogleError && e.auth) { this.needTap(); return; } }
       }
-      // The calendar, when the rota doesn't cover a day (and for "Add study blocks").
-      if (g.shiftDays && g.calendar) {
-        try { const cal = new GoogleCalendar(); const from = new Date(); from.setDate(from.getDate() - 1); const to = new Date(); to.setDate(to.getDate() + 28); if (!this.calendars.length) this.calendars = await cal.calendars(); this.shifts = await cal.shifts(g.rules, from, to); this.shiftsAt = Date.now(); await db.setMeta("shifts", { list: this.shifts, at: this.shiftsAt, calendars: this.calendars }); }
-        catch (e: any) { this.log(false, `Calendar: ${e?.message ?? e}`, 0); }
-      }
-      this.rebuildShiftWeights();
-      // Citrus's plan for today.
+      // Citrus's plan: its blocks for Yuzu and the shift of each of the next 10 days (swaps included).
       try { const plan = await readPlan(this.gcache); if (plan) { this.plan = plan; this.planAt = Date.now(); await db.setMeta("plan", { plan, at: this.planAt }); } } catch { /* next time */ }
+      this.rebuildShiftWeights();
       await db.setMeta("gcache", this.gcache);
       await this.writeHubStatus(reason === "connect" || reason === "manual");
       if (g.driveMedia) {
@@ -232,18 +228,31 @@ export class Store {
       }
       const n = this.driveIndex ? Object.keys(this.driveIndex.files).length : 0; const months = Object.keys(this.rota).length;
       this.setGoogle("ok", `${this.googleEmail() || "Connected"} · ${n.toLocaleString()} media files on Drive${months ? ` · rota for ${months} month${months === 1 ? "" : "s"}` : ""}${this.plan ? " · Citrus plan read" : ""}`);
-    } catch (e: any) { this.setGoogle("error", e?.message ?? String(e)); this.log(false, `Google: ${e?.message ?? e}`, 0); }
+    } catch (e: any) { if (e instanceof GoogleError && e.auth) this.needTap(); else this.setGoogle("error", e?.message ?? String(e)); this.log(false, `Google: ${e?.message ?? e}`, 0); }
     finally { this.driveBusy = false; }
+  }
+  /** Once per device: the hourly backup the short-lived bridge build wrote (My Apps/hub/yuzu/state.json) is stale — bin it. */
+  private async googleCleanup() {
+    if (await db.getMeta<boolean>("gcleaned1", false)) return;
+    try { await trashStale(this.gcache); } catch { return; /* next time */ }
+    await db.setMeta("gcleaned1", true);
   }
   private scheduleDrive(ms: number) { if (this.driveTimer) clearTimeout(this.driveTimer); this.driveTimer = setTimeout(() => { this.driveTimer = null; this.googleRefresh("more").catch(() => {}); }, ms); }
   isoToday(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
-  /** Your shift on a date from the rota (null when no rota covers it): kind, label, hours, and whether you're coming off a night. */
+  /** The shift code on a date: Citrus's plan first (it knows swaps), then the rota files. undefined when neither covers the day. */
+  private codeOn(iso: string): { code: string; night?: boolean } | undefined {
+    const day = this.plan?.days?.[iso];
+    if (day && "shift" in day) return day.shift ? { code: String(day.shift.code ?? ""), night: !!day.shift.overnight } : { code: "" };
+    const days = this.rota[iso.slice(0, 7)]; if (!days) return undefined;
+    return { code: days[String(Number(iso.slice(8)))] ?? "" };
+  }
+  /** Your shift on a date (null when nothing covers it): kind, label, hours, and whether you're coming off a night. */
   shiftOn(iso: string): { code: string; kind: string; label: string; hours: string; afterNight: boolean; start?: number } | null {
-    const days = this.rota[iso.slice(0, 7)]; if (!days) return null;
-    const info = shiftInfo(days[String(Number(iso.slice(8)))] ?? "");
-    const prev = new Date(iso + "T12:00:00"); prev.setDate(prev.getDate() - 1); const pIso = this.isoToday(prev); const pDays = this.rota[pIso.slice(0, 7)];
-    const afterNight = !!pDays && shiftInfo(pDays[String(Number(pIso.slice(8)))] ?? "").kind === "night";
-    return { code: info.code, kind: info.kind, label: info.label, hours: info.hours, afterNight, start: info.start };
+    const c = this.codeOn(iso); if (!c) return null;
+    const info = shiftInfo(c.code); const kind = c.night ? "night" : info.kind;
+    const prev = new Date(iso + "T12:00:00"); prev.setDate(prev.getDate() - 1); const p = this.codeOn(this.isoToday(prev));
+    const afterNight = !!p && (!!p.night || shiftInfo(p.code).kind === "night");
+    return { code: info.code, kind, label: info.label, hours: info.hours, afterNight, start: info.start };
   }
   /** Fit of a day for study, as the hub names it: free · before (a shift) · early · postnight · tough. */
   slotOn(iso: string): string {
@@ -252,9 +261,9 @@ export class Store {
     if (s.afterNight && s.kind === "night") return "tough"; if (s.afterNight) return "postnight"; if (s.kind === "night") return "before";
     return s.start !== undefined && s.start <= 8 ? "early" : "before";
   }
-  /** Day weights for the balancer: the rota first (night → that day and the next light; between nights off), then the calendar. */
+  /** Day weights for the balancer from the shifts (Citrus's plan, else the rota files): a night and the morning after at half, between two nights a quarter. */
   private rebuildShiftWeights() {
-    const w: Record<string, number> = { ...weightsFromShifts(this.shifts) };
+    const w: Record<string, number> = {};
     const d = new Date(); d.setDate(d.getDate() - 1);
     for (let i = 0; i < 45; i++) { const iso = this.isoToday(d); const s = this.shiftOn(iso); if (s) { if (s.kind === "night" && s.afterNight) w[iso] = 0.25; else if (s.kind === "night" || s.afterNight) w[iso] = Math.min(w[iso] ?? 1, 0.5); } d.setDate(d.getDate() + 1); }
     this.shiftWeights = w; this.dueByDay = null;
@@ -293,18 +302,15 @@ export class Store {
       await writeStatus(status, this.gcache); this.lastStatusFp = fp; this.lastStatusAt = Date.now(); await db.setMeta("gcache", this.gcache); return true;
     } catch (e: any) { this.log(false, `status.json: ${e?.message ?? e}`, 0); return false; }
   }
-  /** Citrus's blocks for Yuzu today, from plan.json, whatever shape it uses (title/app + start/time + minutes). */
-  planToday(): { start: string; minutes: number; title: string }[] {
-    const p = this.plan; if (!p) return []; const today = this.isoToday(); const out: { start: string; minutes: number; title: string }[] = [];
-    const walk = (x: any, date: string | null) => {
-      if (!x || typeof x !== "object") return;
-      if (Array.isArray(x)) { for (const y of x) walk(y, date); return; }
-      const d = typeof x.date === "string" ? x.date : date;
-      const isYuzu = /yuzu/i.test(String(x.app ?? x.title ?? x.name ?? ""));
-      if (isYuzu && (d === today || !d)) { const start = String(x.start ?? x.time ?? x.at ?? "").match(/\d{1,2}:\d{2}/)?.[0] ?? ""; const minutes = Number(x.minutes ?? x.min ?? x.duration) || 0; if (start || minutes) out.push({ start, minutes, title: String(x.title ?? x.name ?? "Yuzu") }); }
-      for (const k of Object.keys(x)) if (typeof x[k] === "object") walk(x[k], d);
-    };
-    walk(p, null); return out;
+  /**
+   * Citrus's blocks for Yuzu on a date (today by default), from plan.json: the ones you accepted in Citrus (or did), else
+   * its suggestions, marked as such. Blocks are Yuzu's when Citrus tagged them "yuzu" or their title says cards/reviews.
+   */
+  planToday(iso = this.isoToday()): { start: string; end: string; minutes: number; title: string; accepted: boolean }[] {
+    const blocks = (this.plan?.blocks ?? []).filter((b) => b.date === iso && (String(b.app ?? "").toLowerCase() === "yuzu" || /yuzu|flash ?cards?|anki|\bcards?\b|reviews?/i.test(b.title ?? "")));
+    const pick = (b: any) => ({ start: String(b.start ?? ""), end: String(b.end ?? ""), minutes: Number(b.minutes) || 0, title: String(b.title ?? "Yuzu"), accepted: b.status === "accepted" || b.status === "done" });
+    const acc = blocks.filter((b) => b.status === "accepted" || b.status === "done");
+    return (acc.length ? acc : blocks).map(pick).sort((x, y) => (x.start < y.start ? -1 : 1));
   }
   /** What Drive still lacks from here, and what the cards here still lack from Drive. */
   driveState() {
@@ -352,13 +358,6 @@ export class Store {
     this.driveFetching.add(name);
     new DriveMedia(this.gcache).download(f.id).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
   }
-  /** Study blocks for the next week in Google Calendar, on days that are not nights or the morning after. */
-  async addStudyBlocks(days = 7): Promise<number> {
-    if (!tokenValid()) throw new Error("Connect Google first (Settings → Google).");
-    const cal = new GoogleCalendar(); const g = this.settings.google; let n = 0; const d = new Date();
-    for (let i = 1; i <= days; i++) { d.setDate(d.getDate() + 1); const iso = this.isoToday(d); if ((this.shiftWeights[iso] ?? 1) < 1 || this.dayWeight(d.getTime()) <= 0) continue; await cal.addBlock(g.rules.calendarId, iso, g.blockTime, g.blockMinutes); n++; }
-    return n;
-  }
 
   // ---- sync ---------------------------------------------------------------
   hasUnsynced(): boolean { return this.dirty; }
@@ -375,6 +374,8 @@ export class Store {
   /** One sync at a time even with several tabs open (Web Locks), then the real work. */
   async sync(reason = "manual"): Promise<void> {
     if (reason !== "manual" && Date.now() < this.pausedUntil) return; // waiting out a rate limit
+    // A tap (Sync now, pull to sync, the coach) is the only moment a lapsed Google sign-in can renew on a phone.
+    if (reason === "manual" && savedToken() && !tokenValid()) { if (await this.renewOnTap()) this.googleRefresh("tap").catch(() => {}); }
     const locks = (typeof navigator !== "undefined" ? (navigator as any).locks : null) as LockManager | null;
     if (!locks) return this.syncNow(reason);
     await locks.request("yuzu-sync", { ifAvailable: true }, async (lock) => { if (!lock) { this.syncAgain = true; return; } await this.syncNow(reason); });
@@ -384,7 +385,7 @@ export class Store {
     if (this.syncStatus.state === "syncing") { this.syncAgain = true; return; }
     if (typeof navigator !== "undefined" && !navigator.onLine) { this.setSync("error", "Offline — will sync when back online"); return; }
     const drive = this.syncBackend() === "drive";
-    if (drive && !tokenValid()) { this.setSync("error", "Google needs a tap to reconnect (Settings → Google)"); return; }
+    if (drive && !tokenValid()) { this.setSync(reason === "manual" ? "error" : "idle", this.dirty ? "Waiting for a tap: press Sync now (or pull down on Today) — changes are kept" : "Waiting for a tap: press Sync now (or pull down on Today)"); return; }
     if (drive && !Object.keys(this.gcache).length) this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
     const cfg: SyncConfig = { owner: this.settings.sync.owner, repo: this.settings.sync.repo, token: this.settings.sync.token };
     const gh: GitHubSync | DriveSync = drive ? new DriveSync(this.gcache, this.settings.deviceName || "device") : new GitHubSync(cfg);
@@ -404,7 +405,7 @@ export class Store {
           if (peek && peek.updatedAt === lastSeen && this.shardCache.size) { await this.checkInbox(gh); summary = "Up to date"; break; }
         }
         // One device at a time: take the lock first; if another device holds it, come back in a minute instead of colliding.
-        const lock = await gh.acquireLock(this.settings.deviceName || "device");
+        const lock = await gh.acquireLock(this.settings.deviceName || "device", await this.deviceId());
         if (!lock.held) { this.scheduleSync(60000); throw new SyncError(`${lock.by} is syncing right now; this device will retry in a minute.`, "busy"); }
         const remote = await gh.pullManifest();
         let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | Awaited<ReturnType<DriveSync["pullChanged"]>> | null = null;
@@ -537,10 +538,13 @@ export class Store {
       this.bump();
     } catch (e: any) {
       if (e instanceof SyncError && e.kind === "ratelimit" && e.resumeAt) { this.pausedUntil = e.resumeAt; this.scheduleSync(Math.max(60000, e.resumeAt - Date.now() + 5000)); }
+      if (e instanceof SyncError && e.kind === "server") this.scheduleSync(10 * 60000);
       const msg = e?.message ?? String(e);
       this.log(e instanceof SyncError && e.kind === "busy", msg, Date.now() - t0);
       this.setSync(e instanceof SyncError && e.kind === "busy" ? "idle" : "error", msg);
     } finally {
+      // Whatever happened — a failed download, a dropped connection — never leave the lock behind for 12 minutes.
+      await gh.releaseLock().catch(() => {});
       if (this.syncAgain) { this.syncAgain = false; this.scheduleSync(1000); }
     }
   }
@@ -635,12 +639,9 @@ export class Store {
     this.dirty = await db.getMeta<boolean>("syncDirty", false);
     this.syncLog = await db.getMeta<SyncLogEntry[]>("syncLog", []);
     this.driveIndex = await db.getMeta<DriveIndex | null>("driveMedia", null);
-    const sh = await db.getMeta<{ list: ShiftDay[]; at: number; calendars: CalendarInfo[] } | null>("shifts", null);
-    if (sh) { this.shifts = sh.list; this.shiftWeights = weightsFromShifts(sh.list); this.shiftsAt = sh.at; this.calendars = sh.calendars ?? []; }
     const rs = await db.getMeta<{ seen: Record<string, string>; on: string } | null>("rotaSeen", null); if (rs) { this.rotaSeen = rs.seen; this.rotaCheckedOn = rs.on; }
     const pl = await db.getMeta<{ plan: any; at: number } | null>("plan", null); if (pl) { this.plan = pl.plan; this.planAt = pl.at; }
     this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
-    try { this.silentAt = Number(localStorage.getItem("yuzu-gsilent") ?? 0); } catch { /* fine */ }
     this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
     this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
     this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
@@ -649,7 +650,7 @@ export class Store {
     this.mastery = await db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} });
     this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
     this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
-    this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) }, google: { ...DEFAULT_SETTINGS.google, ...(saved.google ?? {}), rules: { ...DEFAULT_RULES, ...(saved.google?.rules ?? {}) } } };
+    this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) }, google: { ...DEFAULT_SETTINGS.google, ...(saved.google ?? {}) } };
     // 02/11/2026: the repositories moved from the Amaerys account to the Yuzu-cards organisation (a new token is needed too).
     if (/^amaerys$/i.test(this.settings.sync.owner)) { this.settings = { ...this.settings, sync: { ...this.settings.sync, owner: "Yuzu-cards" } }; this.syncOwnerMoved = true; await db.setMeta("settings", this.settings); }
     // FSRS-6 (28/10/2026): 19 saved weights → 21; re-tune on the user's history under FSRS-6 shortly after start.
@@ -667,9 +668,10 @@ export class Store {
       const since = this.settings.fit ? this.reviews.filter((r) => r.ts > this.settings.fit!.at).length : this.reviews.length;
       if (since >= 1000) setTimeout(() => { this.optimizeScheduler().catch(() => {}); }, 15000);
       this.scheduleSync(1500);
-      // Google: the answer to a sign-in (or a quiet renewal), then the daily look round Drive; status.json after syncs.
-      this.googleBoot().then(() => { if (tokenValid()) setTimeout(() => { this.googleRefresh("start").catch(() => {}); }, 5000); else this.maybeRenew(false); }).catch(() => {});
-      setInterval(() => { if (document.visibilityState !== "visible") return; if (tokenValid()) { if (Date.now() - this.lastStatusAt > 30 * 60000) this.googleRefresh("poll").catch(() => {}); } else this.maybeRenew(false); }, 10 * 60000);
+      // Google: who is signed in, then the daily look round Drive (rota, Citrus's plan, media); status.json after syncs.
+      // An expired token waits for a tap (phones block Google's window otherwise).
+      this.googleBoot().then(() => { if (tokenValid()) setTimeout(() => { this.googleRefresh("start").catch(() => {}); }, 5000); }).catch(() => {});
+      setInterval(() => { if (document.visibilityState === "visible" && tokenValid() && Date.now() - this.lastStatusAt > 30 * 60000) this.googleRefresh("poll").catch(() => {}); }, 10 * 60000);
       window.addEventListener("online", () => this.scheduleSync(2000));
       // While the app is open, look for changes from other devices every 5 minutes (one or two requests when nothing changed).
       setInterval(() => { if (document.visibilityState === "visible" && this.syncConfigured() && this.settings.sync.auto && this.syncStatus.state !== "syncing") this.sync("poll").catch(() => {}); }, 5 * 60000);
@@ -1440,7 +1442,7 @@ export class Store {
     const dt = new Date(ts); const iso = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`; const s = this.settings;
     if (s.breakFrom && s.breakTo && iso >= s.breakFrom && iso <= s.breakTo) return 0;
     const weekly = s.easyDays?.[new Date(ts).getDay()] ?? 1;
-    const shift = s.google?.shiftDays ? this.shiftWeights[iso] : undefined; // a night shift from the calendar makes that day and the next light
+    const shift = s.google?.shiftDays ? this.shiftWeights[iso] : undefined; // a night shift (Citrus or the rota) makes that day and the next light
     return shift === undefined ? weekly : Math.min(weekly, shift);
   }
   private balance(next: Card, review: Review, now: number): Card {
