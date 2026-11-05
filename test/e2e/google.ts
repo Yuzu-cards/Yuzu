@@ -3,7 +3,7 @@
 // master copy (send what's here, fetch what the cards need, on-the-spot fetch), the rota read from My Apps/Rotas →
 // light days and coach tips, Citrus's plan.json read back, and Yuzu's status.json written for the scheduler.
 import { chromium } from "playwright"; import { spawn } from "node:child_process"; import fs from "node:fs";
-import { fakeGoogle } from "../fake-google.ts";
+import { fakeGoogle } from "../fake-google.ts"; import { parseBundleHeader } from "../../src/lib/drive.ts";
 const port = 4181; const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
 const G = fakeGoogle(); const browser = await chromium.launch(); const errors: string[] = []; const fails: string[] = [];
@@ -68,8 +68,11 @@ try {
   ok("manifest and shards are on Drive", coll.has("manifest.json") && [...coll.keys()].some((k) => k.startsWith("notes__")) && [...coll.keys()].some((k) => k.startsWith("cards__")), [...coll.keys()].slice(0, 6).join(", "));
   // ---- Media round
   await A.waitForFunction(() => /media files on Drive/.test((window as any).yuzu.googleStatus.message) && (window as any).yuzu.googleStatus.state === "ok", null, { timeout: 60000 }).catch(() => {});
-  const mediaOnDrive = G.at(["My Apps", "Yuzu", "media"]);
-  ok("sends the files Drive lacked", mediaOnDrive.has(media["1"]) && mediaOnDrive.has(media["2"]), [...mediaOnDrive.keys()].join(", "));
+  // The files Drive lacked go up in one bundle (YZB1 header + bytes), not one Drive file each.
+  const bundled = new Map<string, Uint8Array>();
+  for (const f of G.files.values()) if (!f.trashed && f.props?.yzb === "1") { const h = parseBundleHeader(f.bytes)!; for (const [n, e] of h.entries) bundled.set(n, f.bytes.slice(e.o!, e.o! + e.s)); }
+  ok("sends the files Drive lacked, bundled", bundled.has(media["1"]) && bundled.has(media["2"]), [...bundled.keys()].join(", "));
+  ok("…byte for byte", Buffer.compare(Buffer.from(bundled.get(media["1"]) ?? []), fs.readFileSync(`${apkgDir}/1`)) === 0 && Buffer.compare(Buffer.from(bundled.get(media["2"]) ?? []), fs.readFileSync(`${apkgDir}/2`)) === 0);
   ok("fetches the file the cards need", await A.evaluate((n) => (window as any).yuzu.media.has(n), media["0"]));
   ok("…all of it through dropped connections", G.stats.dropped > 10, `${G.stats.dropped} uploads dropped and retried`); G.fail = null;
   ok("fetched bytes intact", (await A.evaluate((n) => (window as any).yuzu.media.get(n)?.size, media["0"])) === fs.statSync(`${apkgDir}/0`).size);
@@ -101,6 +104,11 @@ try {
   await B.evaluate(() => (window as any).yuzu.sync("test")); await waitSync(B);
   await A.evaluate(() => (window as any).yuzu.sync("test")); const sA = await waitSync(A);
   ok("a review on B reaches A through Drive", (await y(A, "window.yuzu.reviews.length")) === (await y(B, "window.yuzu.reviews.length")) && (await y(A, "window.yuzu.reviews.length")) > 0, sA.message);
+  // Pull to refresh with nothing new anywhere: one look at Drive's changes feed covers the collection, plan, rota and media.
+  const idle = (p: any) => p.waitForFunction(() => { const y = (window as any).yuzu; return y.syncStatus.state !== "syncing" && !y.driveBusy; }, null, { timeout: 30000 });
+  await idle(A); await A.waitForTimeout(5000); await idle(A);
+  const r0 = G.stats.requests; await A.evaluate(() => (window as any).yuzu.sync("manual")); await A.waitForTimeout(300); await idle(A); const used = G.stats.requests - r0;
+  ok("pull to refresh with nothing new costs one request", used === 1, `${used} requests · ${await y(A, "window.yuzu.syncStatus.message")}`);
   // Lock: A holds it, B is told to wait
   await A.evaluate(() => (window as any).yuzu._db.setMeta("x", 1));
   const held = await A.evaluate(async () => { const { DriveSync } = await import("./assets/" + [...document.scripts].map((s) => s.src.split("/").pop()).find((n) => n?.startsWith("app-"))!).catch(() => ({ DriveSync: null })); return !!DriveSync; }).catch(() => false);

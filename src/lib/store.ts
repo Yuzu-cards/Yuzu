@@ -10,8 +10,8 @@ import { stamp, observe } from "./clock";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, DEFAULT_CLIENT_ID, GoogleError } from "./google";
-import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
+import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError } from "./google";
+import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
 declare const __VERSION__: string;
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
@@ -192,47 +192,97 @@ export class Store {
     if (tokenValid()) this.googleStatus = { state: "ok", message: `Connected as ${this.googleEmail() || "you"}`, at: 0 };
     else this.googleStatus = { state: "error", message: "Google needs a tap: press Sync now (or pull down on Today)", at: 0 };
   }
+  /**
+   * One look at the Drive changes feed tells what moved anywhere in My Drive since the last look: the collection (another
+   * device synced), Citrus's plan, the Rotas folders, the inbox, the media folder. Sync and refresh share it, so an app
+   * opened or pulled to refresh with nothing new costs one request. Flags stay set until the part that reads them has.
+   */
+  private watch = { token: "", at: 0, collection: true, plan: true, rota: true, inbox: true };
+  private watchP: Promise<void> | null = null;
+  async driveWatch(maxAgeMs = 4000): Promise<typeof this.watch> {
+    if (this.watch.token && Date.now() - this.watch.at < maxAgeMs) return this.watch;
+    if (!this.watchP) this.watchP = this.watchNow().finally(() => { this.watchP = null; });
+    await this.watchP; return this.watch;
+  }
+  private async watchNow() {
+    const w = this.watch; const all = () => { w.collection = w.plan = w.rota = w.inbox = true; };
+    if (!w.token) { const saved = await db.getMeta<typeof w | null>("driveWatch", null); if (saved?.token) Object.assign(w, saved); }
+    if (!w.token) { w.token = await startToken(); all(); w.at = Date.now(); await db.setMeta("driveWatch", w); return; }
+    let r: Awaited<ReturnType<typeof changesSince>>;
+    try { r = await changesSince(w.token); }
+    catch (e) { if (e instanceof GoogleError && (e.auth || e.retryable)) throw e; w.token = await startToken(); all(); w.at = Date.now(); await db.setMeta("driveWatch", w); return; }
+    const id = (path: string[]) => this.gcache[path.join("/")] ?? "\u0000";
+    const coll = id(PATHS.collection), inbox = id(PATHS.inbox), plans = [id(PATHS.planCitrus), id(PATHS.plan)], rotas = [id(PATHS.rotas), id(PATHS.rotasOrange)];
+    const myRev = await db.getMeta<string>("driveRev", "");
+    const media: typeof r.changes = [];
+    for (const c of r.changes) {
+      const ps = c.parents ?? [];
+      if (c.removed || !c.parents) { media.push(c); continue; } // a deleted file has no parents left to say where it was
+      if (ps.includes(coll)) { if (c.name === "manifest.json" && (c.props?.rev ?? "?") !== myRev) w.collection = true; }
+      else if (ps.includes(inbox)) w.inbox = true;
+      else if (ps.some((p) => plans.includes(p))) { if (c.name === "plan.json") w.plan = true; }
+      else if (ps.some((p) => rotas.includes(p))) w.rota = true;
+      if (this.driveIndex && (ps.includes(this.driveIndex.media) || this.driveIndex.files[c.name ?? ""]?.id === c.id || this.driveIndex.bundles?.[c.id])) media.push(c);
+    }
+    if (this.driveIndex?.complete && media.length && applyMediaChanges(this.driveIndex, media)) { await db.setMeta("driveMedia", this.driveIndex); this.mediaVersion++; }
+    if (coll === "\u0000") w.collection = true; // folders not known on this device yet: look the slow way
+    w.token = r.token; w.at = Date.now(); await db.setMeta("driveWatch", { ...w });
+    if (r.more) w.at = 0; // more pages waiting: the next caller reads on
+  }
   /** Bring the rota, Citrus's plan and the media index up to date, write status.json, then the media work in the background. */
   async googleRefresh(reason = "auto"): Promise<void> {
     if (reason === "manual" && !(await this.renewOnTap())) { if (savedToken()) this.needTap(); return; }
     if (!tokenValid()) { if (savedToken()) this.needTap(); return; }
     if (this.driveBusy) { this.driveAgain = true; return; } this.driveBusy = true; this.driveAgain = false;
     try {
+      await this.mediaReady;
       const g = this.settings.google; const progress = (m: string) => this.setGoogle("working", m); const today = this.isoToday();
       if (!Object.keys(this.gcache).length) this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
-      await this.googleCleanup();
-      // The rota: schedule files this device hasn't read, in My Apps/Rotas (Citrus) and Citrus Maxima/Rotas (Orange), once a day or on a tap.
-      if (g.shiftDays && (this.rotaCheckedOn !== today || reason === "manual" || reason === "connect")) {
-        try {
-          const { files, seen } = await newRotaFiles(this.rotaSeen, this.gcache); let found = 0;
-          for (const f of files) {
-            try { const b = await downloadBytes(f); if (!b) continue; const r = await rotaFromXlsx(b, g.rotaName || "Amro", today); if (r.month) { this.rota = { ...this.rota, [r.month]: r.days }; found++; } } catch { /* not a schedule, or not one with your row */ }
-          }
-          this.rotaSeen = seen; this.rotaCheckedOn = today; await db.setMeta("rotaSeen", { seen, on: today });
-          if (found) { await this.saveSettings({ google: { ...this.settings.google, rota: this.rota } }); this.log(true, `Rota: ${found} month${found === 1 ? "" : "s"} read from Drive`, 0); }
-        } catch (e: any) { this.log(false, `Rotas folder: ${e?.message ?? e}`, 0); if (e instanceof GoogleError && e.auth) { this.needTap(); return; } }
+      // "more": the media pump carrying on — the rest was done moments ago.
+      if (reason !== "more") {
+        const w = await this.driveWatch();
+        await this.googleCleanup();
+        // The rota: schedule files this device hasn't read, in My Apps/Rotas (Citrus) and Citrus Maxima/Rotas (Orange) — when they changed, once a day, or on a tap.
+        if (g.shiftDays && (w.rota || this.rotaCheckedOn !== today || reason === "manual" || reason === "connect")) {
+          w.rota = false;
+          try {
+            const { files, seen } = await newRotaFiles(this.rotaSeen, this.gcache); let found = 0;
+            for (const f of files) {
+              try { const b = await downloadBytes(f); if (!b) continue; const r = await rotaFromXlsx(b, g.rotaName || "Amro", today); if (r.month) { this.rota = { ...this.rota, [r.month]: r.days }; found++; } } catch { /* not a schedule, or not one with your row */ }
+            }
+            this.rotaSeen = seen; this.rotaCheckedOn = today; await db.setMeta("rotaSeen", { seen, on: today });
+            if (found) { await this.saveSettings({ google: { ...this.settings.google, rota: this.rota } }); this.log(true, `Rota: ${found} month${found === 1 ? "" : "s"} read from Drive`, 0); }
+          } catch (e: any) { w.rota = true; this.log(false, `Rotas folder: ${e?.message ?? e}`, 0); if (e instanceof GoogleError && e.auth) { this.needTap(); return; } }
+        }
+        // Citrus's plan: its blocks for Yuzu and the shift of each of the next 10 days (swaps included) — read when Citrus wrote a new one.
+        if (w.plan || !this.plan || reason === "manual" || reason === "connect") { w.plan = false; try { const plan = await readPlan(this.gcache); if (plan) { this.plan = plan; this.planAt = Date.now(); await db.setMeta("plan", { plan, at: this.planAt }); } } catch { w.plan = true; } }
+        this.rebuildShiftWeights();
+        await db.setMeta("gcache", this.gcache);
+        await this.writeHubStatus(reason === "connect" || reason === "manual");
       }
-      // Citrus's plan: its blocks for Yuzu and the shift of each of the next 10 days (swaps included).
-      try { const plan = await readPlan(this.gcache); if (plan) { this.plan = plan; this.planAt = Date.now(); await db.setMeta("plan", { plan, at: this.planAt }); } } catch { /* next time */ }
-      this.rebuildShiftWeights();
-      await db.setMeta("gcache", this.gcache);
-      await this.writeHubStatus(reason === "connect" || reason === "manual");
       if (g.driveMedia) {
         const drive = new DriveMedia(this.gcache);
         let idx = this.driveIndex ?? (await db.getMeta<DriveIndex | null>("driveMedia", null));
-        idx = await drive.ensure(idx); idx = await drive.refresh(idx, 20000, progress);
+        if (idx && !idx.bundles) idx.bundles = {};
+        if (!idx?.media) { idx = await drive.ensure(idx); if (!this.watch.token) await this.driveWatch(0); } // the feed starts before the listing, so nothing slips between
+        if (!idx.complete) { idx = await drive.list(idx, 20000, progress); }
         this.driveIndex = idx; await db.setMeta("driveMedia", idx); await db.setMeta("gcache", this.gcache);
-        if (!idx.complete) { this.scheduleDrive(1500); this.setGoogle("working", `Reading Drive: ${Object.keys(idx.files).length.toLocaleString()} files so far`); return; }
+        if (!idx.complete) { this.scheduleDrive(500); this.setGoogle("working", `Reading Drive: ${Object.keys(idx.files).length.toLocaleString()} files so far`); return; }
+        const left = await drive.readHeaders(idx, 20000);
+        if (left) { await db.setMeta("driveMedia", idx); this.mediaVersion++; this.scheduleDrive(300); this.setGoogle("working", `Reading Drive: ${left.toLocaleString()} bundles to look into`); return; }
         const r = await this.driveWork(drive, progress);
-        if (r.more) { this.scheduleDrive(2500); return; }
+        if (r.more) { this.scheduleDrive(200); return; }
       }
+      this.releaseWake();
       const n = this.driveIndex ? Object.keys(this.driveIndex.files).length : 0; const months = Object.keys(this.rota).length;
       this.setGoogle("ok", `${this.googleEmail() || "Connected"} · ${n.toLocaleString()} media files on Drive${months ? ` · rota for ${months} month${months === 1 ? "" : "s"}` : ""}${this.plan ? " · Citrus plan read" : ""}`);
     } catch (e: any) {
-      if (e instanceof GoogleError && e.auth) this.needTap();
-      else if (e instanceof GoogleError && e.retryable) { this.setGoogle("error", `${e.message.replace(/ Nothing is lost.*$/, "")} — trying again in a minute`); this.scheduleDrive(60000); }
+      const at = this.mediaProgress();
+      if (e instanceof GoogleError && e.auth) { this.setGoogle("error", at ? `Paused at ${at} — Google needs a tap: press Sync now to carry on` : "Google needs a tap: press Sync now (or pull down on Today)"); }
+      else if (e instanceof GoogleError && e.retryable) { this.setGoogle("error", `${e.message.replace(/ Nothing is lost.*$|;.*$/, "")}${at ? ` — paused at ${at}` : ""} — carrying on in a minute`); this.scheduleDrive(60000); }
       else this.setGoogle("error", e?.message ?? String(e));
-      this.log(false, `Google: ${e?.message ?? e}`, 0);
+      this.log(false, `Google: ${e?.message ?? e}${at ? ` (media: ${at})` : ""}`, 0);
+      this.releaseWake();
     }
     finally { this.driveBusy = false; if (this.driveAgain) { this.driveAgain = false; this.scheduleDrive(1000); } }
   }
@@ -319,57 +369,73 @@ export class Store {
   }
   /** What Drive still lacks from here, and what the cards here still lack from Drive. */
   driveState() {
-    const idx = this.driveIndex; if (!idx) return null;
-    const refs = this.mediaRefs(); let up = 0, down = 0, downBytes = 0;
-    for (const name of this.media.keys()) if (!idx.files[name] && !name.startsWith("pack-")) up++;
+    const idx = this.driveIndex; if (!idx || !this.mediaLoaded) return null;
+    const refs = this.mediaRefs(); let up = 0, down = 0, downBytes = 0, here = 0;
+    for (const name of this.media.keys()) { if (name.startsWith("pack-")) continue; here++; if (!idx.files[name]) up++; }
     for (const r of refs) if (!this.media.has(r)) { const f = idx.files[r]; if (f) { down++; downBytes += f.s; } }
-    return { onDrive: Object.keys(idx.files).length, toUpload: up, toDownload: down, downBytes, complete: idx.complete };
+    return { onDrive: Object.keys(idx.files).length, here, toUpload: up, toDownload: down, downBytes, complete: idx.complete, bundles: Object.keys(idx.bundles ?? {}).length };
   }
-  /** One bounded round: upload media Drive lacks (this device as the master copy), then fetch what the cards here need. */
+  /** Back in the app (or back online) with media still to move: carry on (a phone pauses pages in the background). */
+  private resumeMedia() { const st = this.settings.google?.driveMedia && tokenValid() ? this.driveState() : null; if (st && (st.toUpload || st.toDownload) && !this.driveBusy) this.scheduleDrive(1500); }
+  /** "12,340 of 47,210 files" while media is going up (counted over this device's whole library, so it never starts over). */
+  private mediaProgress(): string { const st = this.driveIndex && this.driveState(); if (!st || !st.toUpload) return ""; return `${(st.here - st.toUpload).toLocaleString()} of ${st.here.toLocaleString()} files on Drive`; }
+  // While media is going up or down the screen is kept on (a phone that sleeps stops the page), and let go when it's done.
+  private wake: any = null;
+  private async holdWake() { try { if (this.wake || typeof navigator === "undefined" || !(navigator as any).wakeLock || document.visibilityState !== "visible") return; this.wake = await (navigator as any).wakeLock.request("screen"); this.wake.addEventListener?.("release", () => { this.wake = null; }); } catch { this.wake = null; } }
+  private releaseWake() { try { this.wake?.release?.(); } catch { /* fine */ } this.wake = null; }
+  /**
+   * One bounded round (~40 s): media Drive lacks goes up in bundles (this device as the master copy), then what the cards
+   * here lack comes down. The index is saved after every bundle, so a round cut off anywhere loses at most one bundle.
+   */
   private async driveWork(drive: DriveMedia, progress: (m: string) => void): Promise<{ more: boolean }> {
-    const idx = this.driveIndex!; let budget = MEDIA_BATCH_BYTES, n = 0; const t0 = Date.now();
+    const idx = this.driveIndex!; const t0 = Date.now(); let n = 0;
     const dir = await this.ankiFolder();
-    const candidates: [string, () => Promise<Blob | null>][] = [];
-    for (const [name, blob] of this.media) if (!idx.files[name] && !name.startsWith("pack-")) candidates.push([name, async () => blob]);
-    if (dir) for (const r of this.mediaRefs()) if (!idx.files[r] && !this.media.has(r)) candidates.push([r, async () => { try { const h = await dir.getFileHandle(r); return await h.getFile(); } catch { return null; } }]);
-    // Four uploads at a time, ~15 MB or ~40 s per round; the index is saved as it goes, so a cut-off round loses nothing.
-    const skipped = new Set<string>(); const queue = candidates.slice(); let stop: unknown = null; let lastSave = Date.now();
-    const total = candidates.length;
-    await Promise.all(Array.from({ length: 4 }, async () => {
-      while (queue.length && !stop && budget > 0 && Date.now() - t0 < 40000) {
-        const [name, get] = queue.shift()!;
-        const blob = await get(); if (!blob) { skipped.add(name); continue; }
-        try { const id = await drive.upload(idx, name, blob); idx.files[name] = { id, s: blob.size }; budget -= blob.size; n++; }
-        catch (e: any) { if (e instanceof GoogleError && (e.auth || e.retryable)) { stop = e; break; } this.log(false, `Drive upload ${name}: ${e?.message ?? e}`, 0); skipped.add(name); }
-        if (Date.now() - lastSave > 3000) { lastSave = Date.now(); progress(`Sending media to Drive: ${(total - queue.length).toLocaleString()} of ${total.toLocaleString()}`); await db.setMeta("driveMedia", idx); }
+    const local: string[] = []; for (const name of this.media.keys()) if (!idx.files[name] && !name.startsWith("pack-")) local.push(name);
+    const fromDir: string[] = []; if (dir) for (const r of this.mediaRefs()) if (!idx.files[r] && !this.media.has(r)) fromDir.push(r);
+    const getBlob = async (name: string): Promise<Blob | null> => { const b = this.media.get(name); if (b) return b; if (!dir) return null; try { return await (await dir.getFileHandle(name)).getFile(); } catch { return null; } };
+    const queue = [...local, ...fromDir]; let stop: unknown = null; let lastSave = 0;
+    if (queue.length) this.holdWake();
+    const say = () => { const at = this.mediaProgress(); if (at) progress(`Sending media to Drive: ${at}`); };
+    // Up to three bundles in flight; each is made of files read just before it goes.
+    await Promise.all(Array.from({ length: 3 }, async () => {
+      while (queue.length && !stop && Date.now() - t0 < 40000) {
+        const items: { name: string; blob: Blob }[] = []; let bytes = 0;
+        while (queue.length && items.length < BUNDLE_FILES && bytes < BUNDLE_BYTES) {
+          const name = queue.shift()!; const blob = await getBlob(name); if (!blob) continue;
+          if (blob.size > LOOSE_ABOVE) { if (items.length) { queue.unshift(name); break; } items.push({ name, blob }); break; } // a big file goes on its own
+          items.push({ name, blob }); bytes += blob.size;
+        }
+        if (!items.length) continue;
+        try { await drive.uploadBundle(idx, items); n += items.length; }
+        catch (e: any) { queue.unshift(...items.map((i) => i.name)); if (e instanceof GoogleError && (e.auth || e.retryable)) { stop = e; break; } this.log(false, `Drive upload (${items.length} files): ${e?.message ?? e}`, 0); stop = e; break; }
+        if (Date.now() - lastSave > 2000 || !queue.length) { lastSave = Date.now(); await db.setMeta("driveMedia", idx); }
+        say();
       }
     }));
     await db.setMeta("driveMedia", idx);
+    if (n) this.log(true, `${n.toLocaleString()} media files sent to Drive${this.mediaProgress() ? ` (${this.mediaProgress()})` : ""}`, Date.now() - t0);
     if (stop) throw stop;
-    if (queue.length) { if (n) this.log(true, `${n} media files sent to Drive`, Date.now() - t0); return { more: true }; }
-    if (n) this.log(true, `${n} media files sent to Drive`, Date.now() - t0);
-    const refs = this.mediaRefs(); const want: [string, { id: string; s: number }][] = [];
+    if (queue.length) return { more: true };
+    // Down: what the cards here use that this device lacks — whole bundles where most of one is wanted.
+    const refs = this.mediaRefs(); const want: [string, DriveIndex["files"][string]][] = [];
     for (const r of refs) if (!this.media.has(r)) { const f = idx.files[r]; if (f?.id) want.push([r, f]); }
-    let got = 0, bytes = 0; const q = want.slice(); const saved: { name: string; blob: Blob }[] = [];
+    if (!want.length) return { more: false };
+    this.holdWake();
+    let got = 0, bytes = 0; const saved: { name: string; blob: Blob }[] = []; const flush = async () => { if (!saved.length) return; const b = saved.splice(0); await db.putMany("media", b); this.mediaUrls.clear(); this.mediaVersion++; progress(`From Drive: ${got.toLocaleString()} of ${want.length.toLocaleString()} files`); this.bump(); };
     let stopDl: unknown = null;
-    await Promise.all(Array.from({ length: 4 }, async () => {
-      while (q.length && !stopDl && bytes < MEDIA_BATCH_BYTES && Date.now() - t0 < 50000) {
-        const [name, f] = q.shift()!;
-        try { const blob = await drive.download(f.id); if (blob) { this.media.set(name, blob); saved.push({ name, blob }); got++; bytes += blob.size; } }
-        catch (e: any) { if (e instanceof GoogleError && (e.auth || e.retryable)) { stopDl = e; break; } }
-        if (saved.length >= 25) { const b = saved.splice(0); await db.putMany("media", b); this.mediaUrls.clear(); this.mediaVersion++; progress(`From Drive: ${got.toLocaleString()} of ${want.length.toLocaleString()} files`); this.bump(); }
-      }
-    }));
-    if (saved.length) { await db.putMany("media", saved); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }
-    if (got) this.log(true, `${got} media files fetched from Drive`, Date.now() - t0);
+    try {
+      await drive.fetchMany(want, async (name, blob) => { this.media.set(name, blob); saved.push({ name, blob }); got++; bytes += blob.size; if (saved.length >= 200) await flush(); }, () => bytes >= 60 * 1048576 || Date.now() - t0 > 50000);
+    } catch (e: any) { if (e instanceof GoogleError && (e.auth || e.retryable)) stopDl = e; }
+    await flush();
+    if (got) this.log(true, `${got.toLocaleString()} media files fetched from Drive`, Date.now() - t0);
     if (stopDl) throw stopDl;
-    return { more: q.length > 0 };
+    return { more: got > 0 && got < want.length };
   }
-  /** A card shows a file this device lacks: fetch it from Drive right now (once), then the card re-renders. */
+  /** A card shows a file this device lacks: fetch it from Drive right now (once, a ranged read from its bundle), then the card re-renders. */
   private driveFetchOne(name: string) {
-    const f = this.driveIndex?.files[name]; if (!f?.id || this.driveFetching.has(name) || !tokenValid()) return;
+    const f = this.driveIndex?.files[name]; if (!f?.id || !this.mediaLoaded || this.driveFetching.has(name) || !tokenValid()) return;
     this.driveFetching.add(name);
-    new DriveMedia(this.gcache).download(f.id).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
+    new DriveMedia(this.gcache).fetchOne(f, name).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
   }
 
   // ---- sync ---------------------------------------------------------------
@@ -383,25 +449,28 @@ export class Store {
   }
   private setSync(state: SyncStatus["state"], message: string) { this.syncStatus = { state, message, at: Date.now() }; this.bump(); }
 
-  private pausedUntil = 0;
+  private pausedUntil = 0; private manifestMemo: { rev?: string; m?: any } = {};
   /** One sync at a time even with several tabs open (Web Locks), then the real work. */
   async sync(reason = "manual"): Promise<void> {
     if (reason !== "manual" && Date.now() < this.pausedUntil) return; // waiting out a rate limit
     // A tap (Sync now, pull to sync, the coach) is the only moment a lapsed Google sign-in can renew on a phone.
     if (reason === "manual" && savedToken() && !tokenValid()) { if (await this.renewOnTap()) this.googleRefresh("tap").catch(() => {}); }
     const locks = (typeof navigator !== "undefined" ? (navigator as any).locks : null) as LockManager | null;
-    if (!locks) return this.syncNow(reason);
-    await locks.request("yuzu-sync", { ifAvailable: true }, async (lock) => { if (!lock) { this.syncAgain = true; return; } await this.syncNow(reason); });
+    if (!locks) await this.syncNow(reason);
+    else await locks.request("yuzu-sync", { ifAvailable: true }, async (lock) => { if (!lock) { this.syncAgain = true; return; } await this.syncNow(reason); });
+    // Pulled down / Sync now: Citrus's plan, the rota and the media come along (the same look at Drive's changes, so it costs nothing when nothing moved).
+    if (reason === "manual" && this.syncBackend() === "drive" && tokenValid()) this.googleRefresh("pull").catch(() => {});
   }
   private async syncNow(reason: string): Promise<void> {
     if (!this.syncConfigured()) { this.setSync("off", "Not set up"); return; }
+    await this.mediaReady;
     if (this.syncStatus.state === "syncing") { this.syncAgain = true; return; }
     if (typeof navigator !== "undefined" && !navigator.onLine) { this.setSync("error", "Offline — will sync when back online"); return; }
     const drive = this.syncBackend() === "drive";
     if (drive && !tokenValid()) { this.setSync(reason === "manual" ? "error" : "idle", this.dirty ? "Waiting for a tap: press Sync now (or pull down on Today) — changes are kept" : "Waiting for a tap: press Sync now (or pull down on Today)"); return; }
     if (drive && !Object.keys(this.gcache).length) this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
     const cfg: SyncConfig = { owner: this.settings.sync.owner, repo: this.settings.sync.repo, token: this.settings.sync.token };
-    const gh: GitHubSync | DriveSync = drive ? new DriveSync(this.gcache, this.settings.deviceName || "device") : new GitHubSync(cfg);
+    const gh: GitHubSync | DriveSync = drive ? new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo) : new GitHubSync(cfg);
     const t0 = Date.now();
     this.setSync("syncing", "Syncing…");
     let lastBump = 0;
@@ -412,15 +481,22 @@ export class Store {
         const known = await db.getMeta<Record<string, string>>("syncKnown", {});
         // Fast path: nothing changed here and the repository is exactly what we last saw → a couple of requests, no lock.
         const lastSeen = await db.getMeta<number>("syncSeenAt", 0);
+        // Drive: the changes feed says whether another device synced or a pack landed in the inbox (one request, shared with the refresh).
+        const w = drive ? await this.driveWatch(reason === "manual" ? 0 : 4000) : null; const wasColl = w?.collection ?? true, wasInbox = w?.inbox ?? true;
+        if (w) { w.collection = false; w.inbox = false; }
         if (!this.dirty && attempt === 0) {
           if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
+          // (a full look at least once a day all the same, in case the feed ever missed something)
+          const trust = !!w && lastSeen > 0 && this.shardCache.size > 0 && Date.now() - (await db.getMeta<number>("driveFullAt", 0)) < DAY;
+          if (trust && !wasColl) { if (wasInbox) await this.checkInbox(gh); summary = "Up to date"; break; }
           const peek = await gh.pullManifest();
-          if (peek && peek.updatedAt === lastSeen && this.shardCache.size) { await this.checkInbox(gh); summary = "Up to date"; break; }
+          if (peek && peek.updatedAt === lastSeen && this.shardCache.size) { if (drive) { await db.setMeta("driveRev", (gh as DriveSync).rev() ?? ""); await db.setMeta("driveFullAt", Date.now()); } if (!w || wasInbox || !trust) await this.checkInbox(gh); summary = "Up to date"; break; }
         }
         // One device at a time: take the lock first; if another device holds it, come back in a minute instead of colliding.
         const lock = await gh.acquireLock(this.settings.deviceName || "device", await this.deviceId());
-        if (!lock.held) { this.scheduleSync(60000); throw new SyncError(`${lock.by} is syncing right now; this device will retry in a minute.`, "busy"); }
-        const remote = await gh.pullManifest();
+        if (!lock.held) { if (w) { w.collection = wasColl; w.inbox = wasInbox; } this.scheduleSync(60000); throw new SyncError(`${lock.by} is syncing right now; this device will retry in a minute.`, "busy"); }
+        // (the folder was listed for the lock moments ago: one metadata read says whether that listing still stands)
+        const remote = drive ? await (gh as DriveSync).pullManifest({ fresh: false }) : await gh.pullManifest();
         let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | Awaited<ReturnType<DriveSync["pullChanged"]>> | null = null;
         if (remote) {
           got = await gh.pullChanged(remote, known, progress);
@@ -460,7 +536,7 @@ export class Store {
           if (pulledN + pulledC + pulledR) { this.treeCache.clear(); this.dueByDay = null; }
           if (pulledN) pulledNotes = true;
         }
-        await this.checkInbox(gh);
+        if (!w || wasInbox || reason === "manual") await this.checkInbox(gh);
         // Shared images: merge the repository's index, pick what to upload from here (bounded per sync).
         let mediaIndex: MediaIndex = { ...(await db.getMeta<MediaIndex>("mediaIndex", {})), ...(got?.mediaIndex ?? {}) };
         const mediaBlobs: { path: string; bytes: Uint8Array }[] = [];
@@ -511,7 +587,7 @@ export class Store {
           }
           const res = await gh.push(hashes, make, remote, this.settings.deviceName, progress, counts, mediaBlobs);
           if (!res.commit) await gh.releaseLock(); // nothing to push: the push did not make a commit, so remove the lock separately
-          await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); await db.setMeta("mediaIndex", mediaIndex); await db.setMeta("mediaWants", wants);
+          await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); if (drive) { await db.setMeta("driveRev", (gh as DriveSync).rev() ?? ""); await db.setMeta("driveFullAt", Date.now()); } await db.setMeta("mediaIndex", mediaIndex); await db.setMeta("mediaWants", wants);
           // Shared images missing here: fetch a batch now; the rest on the next sync.
           if (this.settings.mediaDownload && !drive) {
             const waiting = Object.entries(mediaIndex).filter(([name, v]) => v.p && !this.media.has(name)); const used = waiting.length ? this.mediaRefs() : null; const missing = waiting.filter(([name]) => used!.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
@@ -556,6 +632,7 @@ export class Store {
       if (e instanceof SyncError && e.kind === "ratelimit" && e.resumeAt) { this.pausedUntil = e.resumeAt; this.scheduleSync(Math.max(60000, e.resumeAt - Date.now() + 5000)); }
       if (e instanceof SyncError && e.kind === "server") this.scheduleSync(10 * 60000);
       if (e instanceof GoogleError && e.retryable) this.scheduleSync(60000);
+      if (this.syncBackend() === "drive") { this.watch.collection = true; this.watch.inbox = true; } // look properly next time
       if (e instanceof GoogleError && e.auth) { this.setSync("idle", this.dirty ? "Waiting for a tap: press Sync now (or pull down on Today) — changes are kept" : "Waiting for a tap: press Sync now (or pull down on Today)"); return; }
       const msg = e?.message ?? String(e);
       this.log(e instanceof SyncError && e.kind === "busy", msg, Date.now() - t0);
@@ -636,7 +713,8 @@ export class Store {
     catch (e: any) { this.loadError = e?.message ?? String(e); console.error("load failed", e); this.bump(); throw e; }
   }
   private async loadInner() {
-    const snap = await db.loadSnapshot();
+    const mark = (n: string) => { try { performance.mark("yuzu:" + n); } catch { /* fine */ } };
+    mark("load"); const snap = await db.loadSnapshot(); mark("snapshot");
     this.notetypes = new Map(snap.notetypes.map((n) => [n.id, n]));
     this.notes = new Map(snap.notes.map((n) => [n.id, n]));
     // Validate: drop cards whose note is gone, repair impossible numbers so the scheduler can never choke on them.
@@ -650,24 +728,19 @@ export class Store {
     this.cards = cards;
     if (orphans) this.loadNotes.push(`${orphans} cards without a note were ignored`);
     if (repaired) this.loadNotes.push(`${repaired} cards had invalid scheduling values and were repaired`);
-    this.reviews = snap.reviews.filter((r) => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts);
-    for (const m of await db.getAll<{ name: string; blob: Blob }>("media")) this.media.set(m.name, m.blob);
-    const saved = await db.getMeta<Partial<Settings>>("settings", {});
-    this.tombstones = await db.getMeta<Record<string, number>>("tombstones", {});
-    this.dirty = await db.getMeta<boolean>("syncDirty", false);
-    this.syncLog = await db.getMeta<SyncLogEntry[]>("syncLog", []);
-    this.driveIndex = await db.getMeta<DriveIndex | null>("driveMedia", null);
-    const rs = await db.getMeta<{ seen: Record<string, string>; on: string } | null>("rotaSeen", null); if (rs) { this.rotaSeen = rs.seen; this.rotaCheckedOn = rs.on; }
-    const pl = await db.getMeta<{ plan: any; at: number } | null>("plan", null); if (pl) { this.plan = pl.plan; this.planAt = pl.at; }
-    this.gcache = await db.getMeta<Record<string, string>>("gcache", {});
-    this.dismissedPairs = new Set(await db.getMeta<string[]>("dismissedPairs", []));
-    this.inbox = await db.getMeta<typeof this.inbox>("inbox", []);
-    this.undoStack = await db.getMeta<typeof this.undoStack>("undoStack", []);
-    this.hooks = await db.getMeta<typeof this.hooks>("hooks", {});
-    this.improve = await db.getMeta<typeof this.improve>("improve", {});
-    this.mastery = await db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} });
-    this.packLog = await db.getMeta<typeof this.packLog>("packLog", []);
-    this.mergeLog = await db.getMeta<typeof this.mergeLog>("mergeLog2", []);
+    this.reviews = snap.reviews.filter((r) => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts); mark("maps");
+    // Media (tens of thousands of files) is read after the screen is up, a chunk at a time; see loadMedia.
+    // The small records are read together rather than one after another.
+    const [saved, tombstones, dirty, syncLog, driveIndex, rs, pl, gcache, dismissed, inbox, undoStack, hooks, improve, mastery, packLog, mergeLog] = await Promise.all([
+      db.getMeta<Partial<Settings>>("settings", {}), db.getMeta<Record<string, number>>("tombstones", {}), db.getMeta<boolean>("syncDirty", false), db.getMeta<SyncLogEntry[]>("syncLog", []),
+      db.getMeta<DriveIndex | null>("driveMedia", null), db.getMeta<{ seen: Record<string, string>; on: string } | null>("rotaSeen", null), db.getMeta<{ plan: any; at: number } | null>("plan", null),
+      db.getMeta<Record<string, string>>("gcache", {}), db.getMeta<string[]>("dismissedPairs", []), db.getMeta<typeof this.inbox>("inbox", []), db.getMeta<typeof this.undoStack>("undoStack", []),
+      db.getMeta<typeof this.hooks>("hooks", {}), db.getMeta<typeof this.improve>("improve", {}), db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} }), db.getMeta<typeof this.packLog>("packLog", []), db.getMeta<typeof this.mergeLog>("mergeLog2", []),
+    ]);
+    this.tombstones = tombstones; this.dirty = dirty; this.syncLog = syncLog; this.driveIndex = driveIndex;
+    if (rs) { this.rotaSeen = rs.seen; this.rotaCheckedOn = rs.on; }
+    if (pl) { this.plan = pl.plan; this.planAt = pl.at; }
+    this.gcache = gcache; this.dismissedPairs = new Set(dismissed); this.inbox = inbox; this.undoStack = undoStack; this.hooks = hooks; this.improve = improve; this.mastery = mastery; this.packLog = packLog; this.mergeLog = mergeLog;
     this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) }, google: { ...DEFAULT_SETTINGS.google, ...(saved.google ?? {}) } };
     // 02/11/2026: the repositories moved from the Amaerys account to the Yuzu-cards organisation (a new token is needed too).
     if (/^amaerys$/i.test(this.settings.sync.owner)) { this.settings = { ...this.settings, sync: { ...this.settings.sync, owner: "Yuzu-cards" } }; this.syncOwnerMoved = true; await db.setMeta("settings", this.settings); }
@@ -675,10 +748,11 @@ export class Store {
     if ((this.settings.scheduler.w?.length ?? 0) < 21) { this.settings = { ...this.settings, scheduler: { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }, fit: null }; await db.setMeta("settings", this.settings); }
     setActiveWeights(this.settings.scheduler.w);
     this.rota = this.settings.google?.rota ?? {}; this.rebuildShiftWeights();
-    await this.migrations();
+    await this.migrations(); mark("meta");
     this.loaded = true;
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
     this.bump();
+    this.mediaReady = this.loadMedia();
     if (typeof window !== "undefined") {
       // Ask the browser not to evict our data under storage pressure (silently ignored where unsupported).
       navigator.storage?.persist?.().catch(() => {});
@@ -699,8 +773,9 @@ export class Store {
       db.getMeta<{ key: string; names: string[] } | null>("mediaRefs", null).then((r) => { if (r && !this.savedRefs) this.savedRefs = r; }).catch(() => {});
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "hidden") { if (this.dirty && this.syncConfigured()) { if (this.syncTimer) clearTimeout(this.syncTimer); this.syncTimer = null; this.sync("hidden").catch(() => {}); } }
-        else this.scheduleSync(this.dirty ? 500 : 2000);
+        else { this.scheduleSync(this.dirty ? 500 : 2000); this.resumeMedia(); }
       });
+      window.addEventListener("online", () => this.resumeMedia());
     }
   }
 
@@ -763,9 +838,27 @@ export class Store {
     return { newNotes, newCards, updated, organized, reviews: addedReviews.length };
   }
 
+  /**
+   * The media library is read after start-up (a phone with 47,000 images spent seconds on it before the first screen).
+   * Until it's all in, a card that needs a file reads just that one; everything that walks the whole library waits.
+   */
+  mediaLoaded = false; mediaReady: Promise<void> = Promise.resolve();
+  private mediaEarly = new Set<string>();
+  private async loadMedia(): Promise<void> {
+    if (typeof indexedDB === "undefined") { this.mediaLoaded = true; return; }
+    try { await db.eachMediaChunk((rows) => { for (const m of rows) if (!this.media.has(m.name)) this.media.set(m.name, m.blob); }); }
+    catch (e: any) { console.error("media load", e); }
+    try { performance.mark("yuzu:media"); } catch { /* fine */ }
+    this.mediaLoaded = true; this.mediaUrls.clear(); this.mediaVersion++; this.bump();
+  }
   mediaUrl = (name: string): string | null => {
     const hit = this.mediaUrls.get(name); if (hit) return hit;
-    const b = this.media.get(name); if (!b) { this.driveFetchOne(name); return null; }
+    const b = this.media.get(name);
+    if (!b && !this.mediaLoaded) { // not read yet: this one file now
+      if (!this.mediaEarly.has(name)) { this.mediaEarly.add(name); db.getOne<{ name: string; blob: Blob }>("media", name).then((r) => { if (r?.blob) { if (!this.media.has(name)) this.media.set(name, r.blob); this.mediaVersion++; this.bump(); } }).catch(() => {}); }
+      return null;
+    }
+    if (!b) { this.driveFetchOne(name); return null; }
     const u = URL.createObjectURL(b); this.mediaUrls.set(name, u); return u;
   };
 
@@ -1053,6 +1146,7 @@ export class Store {
   }
   /** Delete stored media no visible card uses (e.g. after hiding Sketchy). Pack images and template files stay. */
   async pruneMedia(): Promise<{ files: number; bytes: number }> {
+    await this.mediaReady;
     const refs = this.mediaRefs(); const del: string[] = []; let bytes = 0;
     for (const [name, blob] of this.media) if (!refs.has(name) && !name.startsWith("pack-") && !name.startsWith("_")) { del.push(name); bytes += blob.size; }
     for (const n of del) this.media.delete(n);
@@ -1148,6 +1242,7 @@ export class Store {
   }
   /** Add media from an Anki export with media, a Yuzu media file, or files picked from Anki's media folder. Stopping keeps what is stored; running it again resumes. */
   async addMediaFrom(input: Blob | File[] | FolderHandles, env: MediaEnv) {
+    await this.mediaReady;
     // A file counts only once the database has it and it reads back in full; until then it is not in
     // `this.media`, so nothing exists only in memory. If the browser refuses to save, the import stops
     // with the browser's own reason instead of carrying on.
@@ -1210,6 +1305,7 @@ export class Store {
    * for download. A file that can't be read is re-read from the database and skipped if that fails too.
    */
   async exportMedia(onProgress?: (msg: string) => void, dir?: any): Promise<{ files: { name: string; blob?: Blob; size: number }[]; skipped: string[] }> {
+    await this.mediaReady;
     const refs = this.mediaRefs();
     const all = [...this.media].filter(([n]) => refs.has(n) || n.startsWith("pack-"));
     const out: { name: string; blob?: Blob; size: number }[] = []; const skipped: string[] = []; const PART = 1800 * 1048576, MAX = 60000;
@@ -1244,6 +1340,7 @@ export class Store {
     return { files: out, skipped };
   }
   async clearMedia(keepPacks = true) {
+    await this.mediaReady;
     const del: string[] = []; for (const name of this.media.keys()) if (!(keepPacks && name.startsWith("pack-"))) { del.push(name); this.media.delete(name); }
     await db.deleteMany("media", del); this.mediaUrls.clear(); this.bump(); return del.length;
   }

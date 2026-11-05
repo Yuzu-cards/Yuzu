@@ -89,6 +89,16 @@ export async function getAll<T>(store: StoreName): Promise<T[]> {
     r.onerror = () => rej(r.error);
   });
 }
+/** Media rows a chunk at a time (keys first, then ranges), yielding between chunks so the page stays responsive. */
+export async function eachMediaChunk(fn: (rows: { name: string; blob: Blob }[]) => void, chunk = 1500): Promise<number> {
+  const db = await openDb(); const keys = (await req(tx(db, "media", "readonly").getAllKeys())) as string[]; keys.sort();
+  for (let i = 0; i < keys.length; i += chunk) {
+    const range = IDBKeyRange.bound(keys[i], keys[Math.min(keys.length, i + chunk) - 1]);
+    fn((await req(tx(db, "media", "readonly").getAll(range))) as { name: string; blob: Blob }[]);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  return keys.length;
+}
 export async function getOne<T>(store: StoreName, key: IDBValidKey): Promise<T | undefined> {
   const db = await openDb();
   if (BUCKETED[store]) { const b = await req(tx(db, BUCKETED[store]!, "readonly").get(bucketOf(String(key)))) as Bucket | undefined; return b?.rows.find((r) => r.id === key) as T | undefined; }

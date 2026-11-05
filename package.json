@@ -1,6 +1,6 @@
 {
   "name": "yuzu",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Yuzu \u2014 spaced-repetition flashcards for medicine and German, offline-first PWA with GitHub sync",
   "scripts": {
     "build": "node scripts/build.mjs",

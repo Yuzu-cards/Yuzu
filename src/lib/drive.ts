@@ -1,52 +1,125 @@
 // Google Drive as Yuzu's home: the media master copy (My Apps/Yuzu/media) and the card collection (My Apps/Yuzu/collection).
 //
-// Media: an index name → {id, size} is kept here and refreshed through the Drive changes feed, so 47,000 files are listed
-// once and then only what changed is read. Collection: the same shards and manifest as the GitHub sync (notes/*.json,
+// Media: an index name → {id, size, offset} is kept here and refreshed through the Drive changes feed, so the folder is
+// listed once and then only what changed is read; files travel in bundles (below). Collection: the same shards and manifest as the GitHub sync (notes/*.json,
 // cards/*.json, reviews/<month>.json, settings.json …), one Drive file each. manifest.json carries a revision stamp;
 // a push re-reads it just before writing and stops when another device moved it. A lock.json file keeps two devices
 // from uploading at once (written, then read back: ours or not).
-import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, findFolders, listFiles, downloadBytes, putFile, deleteFile, gjson, type DriveFile } from "./google";
+import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, findFolders, listFiles, downloadBytes, putFile, deleteFile, gjson, fileMeta, type DriveFile } from "./google";
+import { mimeFor } from "../import/media";
 import { SyncError, gzip, gunzip, GZIP_ABOVE, sameDevice, pool, type Manifest, type SyncSnapshot, type Progress } from "./sync";
 
 export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"], rotasOrange: ["Citrus Maxima", "Rotas"] };
-export interface DriveIndex { media: string; files: Record<string, { id: string; s: number }>; changes: string; at: number; complete: boolean; nextPage?: string }
+export interface DriveEntry { id: string; s: number; o?: number; m?: string } // o: offset inside a bundle (absent for a loose file), m: type
+export interface DriveIndex { media: string; files: Record<string, DriveEntry>; changes: string; at: number; complete: boolean; nextPage?: string; bundles?: Record<string, { n: string; t: number; s: number; read: boolean }> }
 
 // ---------------------------------------------------------------- media
+// Media goes up and down in bundles: a few hundred files packed into one ~6 MB Drive file, so 47,000 images are ~300
+// requests instead of 47,000 (Drive allows only a few new files a second per account, which is what made one-by-one
+// uploads take hours). A bundle is immutable and describes itself: "YZB1", the header length (uint32, little-endian), a JSON
+// header {v:1, f:[[name, offset, size, type]]}, then the files' bytes; appProperties {yzb:"1", t:<bytes before the data>}
+// let a device read just the header with one ranged request. Loose files (dragged into the folder from a PC, or larger
+// than a bundle) keep working as before. One file is fetched on its own with a ranged request.
+export const BUNDLE_BYTES = 6 * 1048576, BUNDLE_FILES = 500, LOOSE_ABOVE = 3 * 1048576;
+const MAGIC = new TextEncoder().encode("YZB1");
+export function makeBundle(items: { name: string; blob: Blob }[]): { blob: Blob; head: number; entries: [string, DriveEntry][] } {
+  let off = 0; const f: [string, number, number, string][] = [];
+  for (const it of items) { f.push([it.name, off, it.blob.size, it.blob.type || ""]); off += it.blob.size; }
+  const header = new TextEncoder().encode(JSON.stringify({ v: 1, f })); const head = 8 + header.length;
+  const len = new Uint8Array(4); new DataView(len.buffer).setUint32(0, header.length, true);
+  const blob = new Blob([MAGIC as BlobPart, len as BlobPart, header as BlobPart, ...items.map((i) => i.blob)], { type: "application/octet-stream" });
+  return { blob, head, entries: f.map(([n, o, sz, m]) => [n, { id: "", s: sz, o: head + o, ...(m ? { m } : {}) }]) };
+}
+export function parseBundleHeader(b: Uint8Array): { head: number; entries: [string, Omit<DriveEntry, "id">][] } | null {
+  if (b.length < 8 || MAGIC.some((x, i) => b[i] !== x)) return null;
+  const n = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(4, true); if (b.length < 8 + n) return null;
+  const j = JSON.parse(new TextDecoder().decode(b.subarray(8, 8 + n))); const head = 8 + n;
+  return { head, entries: (j.f ?? []).map(([name, o, s, m]: [string, number, number, string]) => [name, { s, o: head + o, ...(m ? { m } : {}) }]) };
+}
+const isBundle = (props?: Record<string, string>) => props?.yzb === "1";
+function addListed(idx: DriveIndex, f: { id: string; name: string; size?: number | string; props?: Record<string, string> }) {
+  if (isBundle(f.props)) { idx.bundles ??= {}; if (!idx.bundles[f.id]) idx.bundles[f.id] = { n: f.name, t: Number(f.props!.t) || 0, s: Number(f.size) || 0, read: false }; }
+  else { const cur = idx.files[f.name]; if (!cur || cur.o === undefined) idx.files[f.name] = { id: f.id, s: Number(f.size) || 0 }; } // a loose copy never displaces a bundled one already known
+}
+/** Apply rows of the Drive changes feed to the index (files and bundles added, moved out or removed). Returns whether it changed. */
+export function applyMediaChanges(idx: DriveIndex, changes: { id: string; removed: boolean; name?: string; parents?: string[]; trashed?: boolean; size?: number; props?: Record<string, string> }[]): boolean {
+  let byId: Map<string, string[]> | null = null; let changed = false;
+  const drop = (id: string) => {
+    if (idx.bundles?.[id]) { delete idx.bundles[id]; changed = true; }
+    byId ??= (() => { const m = new Map<string, string[]>(); for (const [n, v] of Object.entries(idx.files)) { const a = m.get(v.id); if (a) a.push(n); else m.set(v.id, [n]); } return m; })();
+    for (const n of byId.get(id) ?? []) { delete idx.files[n]; changed = true; } byId.delete(id);
+  };
+  for (const c of changes) {
+    const ours = !c.removed && !c.trashed && (c.parents ?? []).includes(idx.media);
+    if (!ours) { drop(c.id); continue; }
+    if (isBundle(c.props)) { if (!idx.bundles?.[c.id]) { addListed(idx, { id: c.id, name: c.name ?? "", size: c.size, props: c.props }); changed = true; } }
+    else if (c.name) { const cur = idx.files[c.name]; if (!cur || cur.id !== c.id) { if (!cur || cur.o === undefined) { idx.files[c.name] = { id: c.id, s: c.size ?? 0 }; changed = true; } } }
+  }
+  return changed;
+}
 export class DriveMedia {
   constructor(private cache: Record<string, string>) {}
   async ensure(prev: DriveIndex | null): Promise<DriveIndex> {
     if (prev?.media) return prev;
     const media = await ensureFolders(PATHS.media, this.cache);
-    const start = await gjson(`${DRIVE}/changes/startPageToken`);
-    return { media, files: {}, changes: start?.startPageToken ?? "", at: 0, complete: false };
+    return { media, files: {}, changes: "", at: 0, complete: false, bundles: {} };
   }
-  /** A fresh index lists the folder 1,000 files a page (bounded per run, cursor kept); a complete one reads the changes feed. */
-  async refresh(idx: DriveIndex, budgetMs = 20000, progress?: (m: string) => void): Promise<DriveIndex> {
-    const t0 = Date.now(); const out: DriveIndex = { ...idx, files: { ...idx.files } };
-    if (!out.complete) {
-      const qs = `'${out.media}' in parents and trashed = false`;
-      do {
-        const page = await gjson(`${DRIVE}/files?q=${encodeURIComponent(qs)}&fields=nextPageToken,files(id,name,size)&pageSize=1000&spaces=drive${out.nextPage ? `&pageToken=${encodeURIComponent(out.nextPage)}` : ""}`);
-        for (const f of page?.files ?? []) out.files[f.name] = { id: f.id, s: Number(f.size) || 0 };
-        out.nextPage = page?.nextPageToken || undefined; progress?.(`Reading Drive: ${Object.keys(out.files).length.toLocaleString()} files`);
-        if (!out.nextPage) { out.complete = true; break; }
-      } while (Date.now() - t0 < budgetMs);
-      out.at = Date.now(); return out;
-    }
-    let token = out.changes;
-    for (let i = 0; i < 50 && token; i++) {
-      const page = await gjson(`${DRIVE}/changes?pageToken=${encodeURIComponent(token)}&fields=nextPageToken,newStartPageToken,changes(removed,file(id,name,size,parents,trashed))&pageSize=1000&spaces=drive`);
-      for (const c of page?.changes ?? []) {
-        const f = c.file; if (!f) continue; const ours = (f.parents ?? []).includes(out.media);
-        if (c.removed || f.trashed || !ours) { for (const [n, v] of Object.entries(out.files)) if (v.id === f.id) delete out.files[n]; }
-        else out.files[f.name] = { id: f.id, s: Number(f.size) || 0 };
-      }
-      token = page?.nextPageToken || ""; if (page?.newStartPageToken) out.changes = page.newStartPageToken;
-    }
+  /** A fresh index lists the folder 1,000 files a page (bounded per run, cursor kept); later changes arrive through the changes feed. */
+  async list(idx: DriveIndex, budgetMs = 20000, progress?: (m: string) => void): Promise<DriveIndex> {
+    const t0 = Date.now(); const out: DriveIndex = { ...idx, files: { ...idx.files }, bundles: { ...(idx.bundles ?? {}) } };
+    const qs = `'${out.media}' in parents and trashed = false`;
+    do {
+      const page = await gjson(`${DRIVE}/files?q=${encodeURIComponent(qs)}&fields=${encodeURIComponent("nextPageToken,files(id,name,size,appProperties)")}&pageSize=1000&spaces=drive${out.nextPage ? `&pageToken=${encodeURIComponent(out.nextPage)}` : ""}`);
+      for (const f of page?.files ?? []) addListed(out, { id: f.id, name: f.name, size: f.size, props: f.appProperties });
+      out.nextPage = page?.nextPageToken || undefined; progress?.(`Reading Drive: ${Object.keys(out.files).length.toLocaleString()} files`);
+      if (!out.nextPage) { out.complete = true; break; }
+    } while (Date.now() - t0 < budgetMs);
     out.at = Date.now(); return out;
   }
-  /** Upload one file. The index is complete and authoritative, so a name it lacks is created without a lookup first. */
-  async upload(idx: DriveIndex, name: string, blob: Blob): Promise<string> { const id = idx.files[name]?.id || null; return putFile({ parent: idx.media, name, body: blob, mime: blob.type || "application/octet-stream", id, isNew: !id && idx.complete }); }
+  /** Bundles whose header hasn't been read yet (another device's): one small ranged request each, six at a time. Returns how many are left. */
+  async readHeaders(idx: DriveIndex, budgetMs = 20000): Promise<number> {
+    const t0 = Date.now(); const todo = Object.entries(idx.bundles ?? {}).filter(([, b]) => !b.read);
+    await pool(todo, 6, async ([id, b]) => {
+      if (Date.now() - t0 > budgetMs) return;
+      const bytes = await downloadBytes(id, [0, Math.max(8, b.t) - 1]); if (!bytes) { delete idx.bundles![id]; return; }
+      const h = parseBundleHeader(bytes); if (!h) { b.read = true; return; }
+      for (const [name, e] of h.entries) idx.files[name] = { id, ...e };
+      b.read = true;
+    });
+    return Object.values(idx.bundles ?? {}).filter((b) => !b.read).length;
+  }
+  /** Send one bundle (or one loose file when it's alone and large); the index learns where each file is. */
+  async uploadBundle(idx: DriveIndex, items: { name: string; blob: Blob }[]): Promise<void> {
+    if (items.length === 1 && items[0].blob.size > LOOSE_ABOVE) { const it = items[0]; const id = await this.upload(idx, it.name, it.blob); idx.files[it.name] = { id, s: it.blob.size }; return; }
+    const { blob, head, entries } = makeBundle(items);
+    const name = `bundle-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 10)}.yzb`;
+    const id = await putFile({ parent: idx.media, name, body: blob, mime: "application/octet-stream", isNew: true, props: { yzb: "1", t: String(head), n: String(items.length) } });
+    idx.bundles ??= {}; idx.bundles[id] = { n: name, t: head, s: blob.size, read: true };
+    for (const [n, e] of entries) idx.files[n] = { ...e, id };
+  }
+  /** Upload one loose file. The index is complete and authoritative, so a name it lacks is created without a lookup first. */
+  async upload(idx: DriveIndex, name: string, blob: Blob): Promise<string> { const cur = idx.files[name]; const id = cur && cur.o === undefined ? cur.id : null; return putFile({ parent: idx.media, name, body: blob, mime: blob.type || "application/octet-stream", id, isNew: !id && idx.complete }); }
+  /** One file: a ranged read from its bundle, or the whole loose file. */
+  async fetchOne(e: DriveEntry, name = ""): Promise<Blob | null> {
+    const b = e.o !== undefined ? await downloadBytes(e.id, [e.o, e.o + e.s - 1]) : await downloadBytes(e.id); const type = e.m || (name ? mimeFor(name) : "");
+    return b ? new Blob([b as BlobPart], type ? { type } : {}) : null;
+  }
+  /**
+   * Many files: grouped by bundle; a bundle most of whose files are wanted comes down whole (one request), otherwise each
+   * file is a ranged read. `got` is called for each file as it arrives; `stop` ends early (time or bytes spent).
+   */
+  async fetchMany(want: [string, DriveEntry][], got: (name: string, blob: Blob) => Promise<void> | void, stop: () => boolean, n = 4): Promise<void> {
+    const groups = new Map<string, [string, DriveEntry][]>(); for (const w of want) { const k = w[1].o !== undefined ? w[1].id : "loose:" + w[0]; const g = groups.get(k); if (g) g.push(w); else groups.set(k, [w]); }
+    await pool([...groups.values()], n, async (g) => {
+      if (stop()) return;
+      if (g.length === 1) { const b = await this.fetchOne(g[0][1], g[0][0]); if (b) await got(g[0][0], b); return; }
+      const lo = Math.min(...g.map(([, e]) => e.o!)), hi = Math.max(...g.map(([, e]) => e.o! + e.s)); const wanted = g.reduce((a, [, e]) => a + e.s, 0);
+      if (wanted >= (hi - lo) * 0.3) { // one request for the span that holds them
+        const bytes = await downloadBytes(g[0][1].id, [lo, hi - 1]); if (!bytes) return;
+        for (const [name, e] of g) await got(name, new Blob([bytes.slice(e.o! - lo, e.o! - lo + e.s) as BlobPart], e.m ? { type: e.m } : {}));
+      } else for (const [name, e] of g) { if (stop()) return; const b = await this.fetchOne(e, name); if (b) await got(name, b); }
+    });
+  }
   async download(id: string): Promise<Blob | null> { const b = await downloadBytes(id); return b ? new Blob([b as BlobPart]) : null; }
 }
 
@@ -56,7 +129,8 @@ const toText = (b: Uint8Array) => new TextDecoder().decode(b);
 export class DriveSync {
   static LOCK_MS = 12 * 60000;
   private folder = ""; private listing: Listing | null = null; private seenRev: string | null | undefined = undefined; private holdsLock = false; private inboxId = "";
-  constructor(private cache: Record<string, string>, private device: string) {}
+  /** memo: the last manifest this device read or wrote, kept by the caller across syncs (no download when Drive still has it). */
+  constructor(private cache: Record<string, string>, private device: string, private memo: { rev?: string; m?: Manifest } = {}) {}
   private async open() { if (!this.folder) this.folder = await ensureFolders(PATHS.collection, this.cache); return this.folder; }
   private dupes: DriveFile[] = [];
   /** The collection folder by name. Drive allows two files with one name (a create retried after its answer was lost): the newest wins, the rest are removed after the next good sync. */
@@ -67,6 +141,7 @@ export class DriveSync {
     for (const f of all) { if (m.has(f.name)) this.dupes.push(f); else m.set(f.name, f); }
     this.listing = m; return m;
   }
+  private memoFor(f?: DriveFile): Manifest | null { const r = f?.props?.rev; return r && this.memo.rev === r && this.memo.m ? this.memo.m : null; }
   private async readText(name: string, stored?: Record<string, string>): Promise<string | null> {
     const real = stored?.[name] ?? name; const f = (this.listing ?? (await this.list())).get(real); if (!f) return null;
     const b = await downloadBytes(f); if (!b) return null; return real.endsWith(".gz") ? gunzip(b) : toText(b);
@@ -75,23 +150,45 @@ export class DriveSync {
     try { const m = await this.pullManifest(); return { ok: true, message: m ? `Drive holds a Yuzu collection from ${m.device || "another device"} (${new Date(m.updatedAt).toLocaleString()})` : "Drive is ready — the first sync fills My Apps/Yuzu/collection." }; }
     catch (e: any) { return { ok: false, message: e.message }; }
   }
-  async pullManifest(): Promise<Manifest | null> {
-    await this.list(); const t = await this.readText("manifest.json"); if (!t) { this.seenRev = null; return null; }
-    const m = JSON.parse(t) as Manifest & { rev?: string }; if (!m || typeof m !== "object" || !m.files) throw new SyncError("manifest.json on Drive is not a Yuzu manifest", "other");
-    this.seenRev = m.rev ?? String(m.updatedAt); return m;
+  private seenMt: string | undefined; private lastManifest: { m: Manifest; mt?: string } | null = null;
+  /** The revision of the manifest last read or written by this sync (what the changes feed is compared with). */
+  rev(): string | null | undefined { return this.seenRev; }
+  /**
+   * The manifest. `fresh: false` (right after taking the lock, with the folder listed moments ago): one metadata read tells
+   * whether the manifest moved since the listing; if not, the listing still stands and the manifest read before is reused.
+   */
+  async pullManifest({ fresh = true }: { fresh?: boolean } = {}): Promise<Manifest | null> {
+    if (!fresh && this.listing) {
+      const f = this.listing.get("manifest.json");
+      if (f?.modifiedTime) {
+        const meta = await fileMeta(f.id, "id,modifiedTime,trashed").catch((e) => { if (e instanceof GoogleError && (e.auth || e.retryable)) throw e; return null; });
+        if (meta && !meta.trashed && meta.modifiedTime === f.modifiedTime) {
+          if (this.lastManifest && this.lastManifest.mt === f.modifiedTime) return this.adopt(this.lastManifest.m, f.modifiedTime);
+          const mm = this.memoFor(f); if (mm) return this.adopt(mm, f.modifiedTime);
+          const t = await this.readText("manifest.json"); if (t) return this.adopt(this.parse(t), f.modifiedTime);
+        }
+      }
+    }
+    await this.list(); const lf = this.listing?.get("manifest.json"); const mm = this.memoFor(lf); if (mm) return this.adopt(mm, lf?.modifiedTime);
+    const t = await this.readText("manifest.json"); if (!t) { this.seenRev = null; this.seenMt = undefined; return null; }
+    return this.adopt(this.parse(t), this.listing?.get("manifest.json")?.modifiedTime);
   }
+  private parse(t: string): Manifest { const m = JSON.parse(t) as Manifest; if (!m || typeof m !== "object" || !m.files) throw new SyncError("manifest.json on Drive is not a Yuzu manifest", "other"); return m; }
+  private adopt(m: Manifest & { rev?: string }, mt?: string): Manifest { this.seenRev = m.rev ?? String(m.updatedAt); this.seenMt = mt; this.lastManifest = { m, mt }; if (m.rev) { this.memo.rev = m.rev; this.memo.m = m; } return m; }
   async acquireLock(device: string, id = ""): Promise<{ held: boolean; by?: string }> {
     const now = Date.now(); const cur = await this.readText("lock.json").then((t) => (t ? JSON.parse(t) : null), () => null);
     if (cur && cur.until > now && !sameDevice(cur, device, id)) return { held: false, by: cur.device };
     const mine = { device, id, until: now + DriveSync.LOCK_MS, n: Math.random().toString(36).slice(2) };
     const fileId = await putFile({ parent: await this.open(), name: "lock.json", body: JSON.stringify(mine), id: this.listing?.get("lock.json")?.id ?? null });
     this.listing?.set("lock.json", { id: fileId, name: "lock.json" });
-    await new Promise((r) => setTimeout(r, 400)); // two devices writing at once: whoever's content is there after a moment holds it
+    await new Promise((r) => setTimeout(r, 300)); // two devices writing at once: whoever's content is there after a moment holds it
     const back = await downloadBytes(fileId).then((b) => (b ? JSON.parse(toText(b)) : null), () => null);
     if (!back || back.n !== mine.n) return { held: false, by: back?.device ?? "another device" };
     this.holdsLock = true; return { held: true };
   }
-  async releaseLock(): Promise<void> { if (!this.holdsLock) return; this.holdsLock = false; const f = this.listing?.get("lock.json"); if (f) { try { await putFile({ parent: this.folder, name: "lock.json", body: JSON.stringify({ device: this.device, until: 0 }), id: f.id }); } catch { /* it expires anyway */ } } }
+  private after: Promise<void> | null = null;
+  async releaseLock(): Promise<void> { if (this.after) { const a = this.after; this.after = null; await a; } return this.unlock(); }
+  private async unlock(): Promise<void> { if (!this.holdsLock) return; this.holdsLock = false; const f = this.listing?.get("lock.json"); if (f) { try { await putFile({ parent: this.folder, name: "lock.json", body: JSON.stringify({ device: this.device, until: 0 }), id: f.id }); } catch { /* it expires anyway */ } } }
   async pullChanged(manifest: Manifest, known: Record<string, string>, progress?: Progress): Promise<Partial<SyncSnapshot> & { files: Record<string, string> }> {
     const changed = Object.entries(manifest.files).filter(([p, h]) => known[p] !== h);
     const out: Partial<SyncSnapshot> & { files: Record<string, string> } = { files: {} }; const parsed: [string, any][] = []; let done = 0; const queue = [...changed];
@@ -114,8 +211,13 @@ export class DriveSync {
     const manifest: Manifest & { rev: string } = { version: 1, files: hashes, updatedAt: Date.now(), device, stored, counts, commits: 0, rev };
     if (!toWrite.length && !toDelete.length) return { manifest: remote ?? manifest, commit: null, pushed: 0, bytes: 0 };
     // Another device synced since our pull? Its manifest carries a different revision.
-    const cur = await this.readText("manifest.json").then((t) => (t ? (JSON.parse(t) as any).rev ?? String((JSON.parse(t) as any).updatedAt) : null), () => null);
-    if (this.seenRev !== undefined && cur !== this.seenRev) throw new SyncError("Another device synced in the meantime", "conflict");
+    // (one metadata read: the manifest's modified time is what was seen at the pull, else its revision is re-read)
+    const mf = listing.get("manifest.json");
+    const meta = mf && this.seenMt ? await fileMeta(mf.id, "id,modifiedTime,trashed").catch(() => null) : null;
+    if (!(meta && !meta.trashed && meta.modifiedTime === this.seenMt)) {
+      const cur = await this.readText("manifest.json").then((t) => (t ? (JSON.parse(t) as any).rev ?? String((JSON.parse(t) as any).updatedAt) : null), () => null);
+      if (this.seenRev !== undefined && cur !== this.seenRev) throw new SyncError("Another device synced in the meantime", "conflict");
+    }
     // Each file carries its content fingerprint (appProperties.h). A sync that was cut off (a dropped connection, the app
     // sent to the background) left its finished files on Drive: the next one skips those and carries on from there.
     let n = 0, bytes = 0, kept = 0; const total = toWrite.length; const queue = [...toWrite];
@@ -134,10 +236,11 @@ export class DriveSync {
     await pool(queue, 4, one);
     for (const real of toDelete) { const f = listing.get(real); if (f) { try { await deleteFile(f.id); } catch { /* fine */ } listing.delete(real); } }
     manifest.stored = stored;
-    const mid = await putFile({ parent: this.folder, name: "manifest.json", body: JSON.stringify(manifest), id: listing.get("manifest.json")?.id ?? null });
-    listing.set("manifest.json", { id: mid, name: "manifest.json" }); this.seenRev = rev;
-    for (const d of this.dupes.splice(0)) { try { await deleteFile(d.id); } catch { /* next time */ } }
-    await this.releaseLock();
+    // The revision rides along as an appProperty, so other devices tell "changed" from the changes feed without a download.
+    const mid = await putFile({ parent: this.folder, name: "manifest.json", body: JSON.stringify(manifest), id: listing.get("manifest.json")?.id ?? null, props: { rev } });
+    listing.set("manifest.json", { id: mid, name: "manifest.json", props: { rev } }); this.seenRev = rev; this.lastManifest = null; this.seenMt = undefined; this.memo.rev = rev; this.memo.m = manifest;
+    const tidy = async () => { for (const d of this.dupes.splice(0)) { try { await deleteFile(d.id); } catch { /* next time */ } } await this.unlock(); };
+    this.after = tidy().catch(() => {}); // the lock is released and duplicates removed after the answer, not before it
     return { manifest, commit: rev, pushed: toWrite.length - kept, bytes };
   }
   async compact(): Promise<boolean> { return false; }

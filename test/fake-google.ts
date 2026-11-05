@@ -4,9 +4,10 @@ export function fakeGoogle() {
   let tick = 0; const now = () => Date.now() * 1000 + tick++; // strictly increasing "modifiedTime" (µs), so newest-wins is deterministic
   const changes: { id: string; removed: boolean }[] = []; let seq = 0; let nextId = 1;
   const events: any[] = [];
-  const stats = { requests: 0, uploads: 0, dropped: 0, throttled: 0 };
+  const stats = { requests: 0, uploads: 0, dropped: 0, throttled: 0, downloads: 0, ranged: 0 };
   const mkId = () => "f" + nextId++;
   const add = (name: string, parents: string[], mime: string, bytes: Uint8Array, props?: Record<string, string>) => { const id = mkId(); files.set(id, { id, name, parents, mime, bytes, t: now(), props }); changes.push({ id, removed: false }); return id; };
+  const mt = (f: { t?: number }) => new Date((f.t ?? 0) / 1000).toISOString().replace("Z", String((f.t ?? 0) % 1000).padStart(3, "0") + "Z");
   const json = (o: any, status = 200) => new Response(JSON.stringify(o), { status, headers: { "Content-Type": "application/json" } });
   const parseQ = (q: string) => { const name = /name = '([^']*)'/.exec(q)?.[1]; const parent = /'([^']*)' in parents/.exec(q)?.[1]; const folder = /mimeType = 'application\/vnd.google-apps.folder'/.test(q); return { name, parent, folder }; };
   return {
@@ -29,11 +30,11 @@ export function fakeGoogle() {
       if (u.pathname === "/oauth2/v3/userinfo") return json({ email: "amro@example.com" });
       if (u.pathname === "/drive/v3/about") return json({ storageQuota: { usage: 1e9, limit: 15e9 } });
       if (u.pathname === "/drive/v3/changes/startPageToken") return json({ startPageToken: String(changes.length) });
-      if (u.pathname === "/drive/v3/changes") { const from = Number(u.searchParams.get("pageToken") ?? 0); const out = changes.slice(from).map((c) => ({ removed: c.removed, file: files.get(c.id) ? { id: c.id, name: files.get(c.id)!.name, size: String(files.get(c.id)!.bytes.length), parents: files.get(c.id)!.parents, trashed: !!files.get(c.id)!.trashed } : undefined })); return json({ changes: out, newStartPageToken: String(changes.length) }); }
+      if (u.pathname === "/drive/v3/changes") { const from = Number(u.searchParams.get("pageToken") ?? 0); const out = changes.slice(from).map((c) => { const f = files.get(c.id); return { fileId: c.id, removed: c.removed && !f?.trashed, file: f && !(c.removed && !f.trashed) ? { id: c.id, name: f.name, size: String(f.bytes.length), parents: f.parents, trashed: !!f.trashed, modifiedTime: mt(f), appProperties: f.props } : undefined }; }); return json({ changes: out, newStartPageToken: String(changes.length) }); }
       if (u.pathname === "/drive/v3/files" && m === "GET") {
         const { name, parent, folder } = parseQ(u.searchParams.get("q") ?? ""); const size = Number(u.searchParams.get("pageSize") ?? 100); const page = Number(u.searchParams.get("pageToken") ?? 0);
         const all = [...files.values()].filter((f) => !f.trashed && (!name || f.name === name) && (!parent || f.parents.includes(parent)) && (!folder || f.mime.endsWith("folder")));
-        const slice = all.slice(page, page + size); return json({ files: slice.map((f) => ({ id: f.id, name: f.name, size: String(f.bytes.length), mimeType: f.mime, modifiedTime: new Date((f.t ?? 0) / 1000).toISOString().replace("Z", String((f.t ?? 0) % 1000).padStart(3, "0") + "Z"), appProperties: f.props })), nextPageToken: page + size < all.length ? String(page + size) : undefined });
+        const slice = all.slice(page, page + size); return json({ files: slice.map((f) => ({ id: f.id, name: f.name, size: String(f.bytes.length), mimeType: f.mime, modifiedTime: mt(f), appProperties: f.props })), nextPageToken: page + size < all.length ? String(page + size) : undefined });
       }
       if (u.pathname === "/drive/v3/files" && m === "POST") { const b = JSON.parse(await bodyText()); return json({ id: add(b.name, b.parents ?? ["root"], b.mimeType ?? "application/octet-stream", new Uint8Array()) }); }
       const multipart = async () => {
@@ -44,8 +45,12 @@ export function fakeGoogle() {
       };
       if (u.pathname === "/upload/drive/v3/files" && m === "POST") { const { meta, bytes } = await multipart(); stats.uploads++; return json({ id: add(meta.name, meta.parents, meta.mimeType ?? "image/png", bytes, meta.appProperties) }); }
       const dl = /^\/drive\/v3\/files\/([^/]+)$/.exec(u.pathname);
-      if (dl && u.searchParams.get("alt") === "media") { const f = files.get(dl[1]); return f && !f.trashed ? new Response(f.bytes as BlobPart, { status: 200 }) : json({ error: { message: "not found" } }, 404); }
-      if (dl && m === "GET") { const f = files.get(dl[1]); return f ? json({ id: f.id, name: f.name, trashed: !!f.trashed, mimeType: f.mime, parents: f.parents }) : json({ error: { message: "not found" } }, 404); }
+      if (dl && u.searchParams.get("alt") === "media") {
+        const f = files.get(dl[1]); if (!f || f.trashed) return json({ error: { message: "not found" } }, 404); stats.downloads++;
+        const range = /bytes=(\d+)-(\d+)/.exec(hs.Range ?? hs.range ?? ""); if (range) { stats.ranged++; return new Response(f.bytes.slice(Number(range[1]), Number(range[2]) + 1) as BlobPart, { status: 206 }); }
+        return new Response(f.bytes as BlobPart, { status: 200 });
+      }
+      if (dl && m === "GET") { const f = files.get(dl[1]); return f ? json({ id: f.id, name: f.name, trashed: !!f.trashed, mimeType: f.mime, parents: f.parents, modifiedTime: mt(f), appProperties: f.props }) : json({ error: { message: "not found" } }, 404); }
       if (dl && m === "PATCH") { const f = files.get(dl[1]); if (!f) return json({ error: { message: "not found" } }, 404); const b = JSON.parse(await bodyText() || "{}"); if (b.trashed) f.trashed = true; if (b.name) f.name = b.name; f.t = now(); changes.push({ id: f.id, removed: !!b.trashed }); return json({ id: f.id }); } // any metadata change is a change
       if (dl && m === "DELETE") { const f = files.get(dl[1]); if (f) { f.trashed = true; changes.push({ id: f.id, removed: true }); } return new Response(null, { status: 204 }); }
       const up = /^\/upload\/drive\/v3\/files\/([^/]+)$/.exec(u.pathname);

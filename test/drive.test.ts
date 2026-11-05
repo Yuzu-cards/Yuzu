@@ -5,6 +5,7 @@
 //  - dropped connections and throttling are ridden out by retries
 //  - two devices: the lock, the manifest revision check, duplicate files
 //  - the media folder: a 2,500-file index, the changes feed (new, deleted, moved away), uploads without lookups, bytes intact
+//  - media bundles: thousands of files in a handful of requests, headers by ranged reads, byte-identical on another device
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { fakeGoogle } from "./fake-google.ts";
@@ -17,8 +18,8 @@ const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: any, init?: any) => { const u = String(url); if (/googleapis\.com/.test(u)) return G.fetchImpl(u, init ?? {}); return realFetch(url, init); }) as any;
 const signIn = () => localStorage.setItem("yuzu-google", JSON.stringify({ access: "tok1", expires: Date.now() + 3600e3, email: "amro@example.com", scope: "drive" }));
 
-const { setRetryScale } = await import("../src/lib/google.ts");
-const { DriveSync, DriveMedia, PATHS } = await import("../src/lib/drive.ts");
+const { setRetryScale, changesSince, startToken } = await import("../src/lib/google.ts");
+const { DriveSync, DriveMedia, PATHS, applyMediaChanges, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE } = await import("../src/lib/drive.ts");
 const { GitHubSync } = await import("../src/lib/sync.ts");
 type Snap = Parameters<typeof GitHubSync.shard>[0];
 before(() => { setRetryScale(0.002); signIn(); });
@@ -118,7 +119,7 @@ test("media folder: a 2,500-file index, the changes feed, uploads without lookup
   G = fakeGoogle(); signIn();
   for (let i = 0; i < 2500; i++) G.seedFile(`img${i}.jpg`, PATHS.media, new Uint8Array([i % 256, 1, 2, 3]));
   const cache: Record<string, string> = {}; const dm = new DriveMedia(cache);
-  let idx = await dm.ensure(null); idx = await dm.refresh(idx, 60_000);
+  let idx = await dm.ensure(null); const token = await startToken(); idx = await dm.list(idx, 60_000);
   assert.equal(idx.complete, true); assert.equal(Object.keys(idx.files).length, 2500, "all 2,500 listed (3 pages)");
   // the feed: one new, one deleted, one moved out of the folder
   const other = [...G.files.values()].find((f) => f.name === "Yuzu")!;
@@ -126,11 +127,59 @@ test("media folder: a 2,500-file index, the changes feed, uploads without lookup
   const del = [...G.files.values()].find((f) => f.name === "img7.jpg")!; await G.fetchImpl(`https://www.googleapis.com/drive/v3/files/${del.id}`, { method: "DELETE", headers: { Authorization: "Bearer tok1" } });
   const mv = [...G.files.values()].find((f) => f.name === "img8.jpg")!; mv.parents = [other.id];
   await G.fetchImpl(`https://www.googleapis.com/drive/v3/files/${mv.id}`, { method: "PATCH", headers: { Authorization: "Bearer tok1" }, body: JSON.stringify({ name: "img8.jpg" }) }); // a change event for the move
-  const reqs = G.stats.requests; idx = await dm.refresh(idx, 60_000);
-  assert.ok(G.stats.requests - reqs <= 2, `the feed is one small request (${G.stats.requests - reqs})`);
+  const reqs = G.stats.requests; const ch = await changesSince(token); applyMediaChanges(idx, ch.changes);
+  assert.ok(G.stats.requests - reqs <= 1, `the feed is one small request (${G.stats.requests - reqs})`);
   assert.ok(idx.files["new.png"] && !idx.files["img7.jpg"] && !idx.files["img8.jpg"], "new in, deleted and moved-away out");
   // upload: no name lookup for a file the complete index doesn't have; bytes come back intact
   const before = G.stats.requests; const id = await dm.upload(idx, "brand-new.webp", new Blob([new Uint8Array([7, 7, 7])]));
   assert.equal(G.stats.requests - before, 1, "one request, no lookup");
   const back = await dm.download(id); assert.deepEqual([...new Uint8Array(await back!.arrayBuffer())], [7, 7, 7]);
+});
+
+test("media bundles: 3,000 files go up in a handful of requests and come back byte-identical on another device", { timeout: 120_000 }, async () => {
+  G = fakeGoogle(); signIn();
+  G.seedFile("dragged-from-pc.jpg", PATHS.media, new Uint8Array([4, 4, 4])); // a loose file next to the bundles
+  const files = Array.from({ length: 3000 }, (_, i) => ({ name: `img${i}.webp`, blob: new Blob([new Uint8Array(500 + (i % 7000)).fill(i % 251)], { type: "image/webp" }) }));
+  const big = { name: "lecture.mp4", blob: new Blob([new Uint8Array(LOOSE_ABOVE + 10).fill(3)], { type: "video/mp4" }) };
+  const A = new DriveMedia({}); let ia = await A.ensure(null); ia = await A.list(ia);
+  const r0 = G.stats.requests;
+  let batch: typeof files = [], bytes = 0;
+  for (const f of files) { batch.push(f); bytes += f.blob.size; if (batch.length >= BUNDLE_FILES || bytes >= BUNDLE_BYTES) { await A.uploadBundle(ia, batch); batch = []; bytes = 0; } }
+  if (batch.length) await A.uploadBundle(ia, batch);
+  await A.uploadBundle(ia, [big]);
+  const upReqs = G.stats.requests - r0; const nb = Object.keys(ia.bundles ?? {}).length;
+  assert.ok(nb >= 3 && nb <= 8, `bundles: ${nb}`); assert.equal(upReqs, nb + 1, `one request per bundle (+1 loose big file): ${upReqs}`);
+  assert.equal(ia.files["lecture.mp4"].o, undefined, "a big file goes loose");
+  // device B: list (bundles show up with their header size), read the headers with ranged requests, then fetch everything
+  const B = new DriveMedia({}); let ib = await B.ensure(null); ib = await B.list(ib);
+  const r1 = G.stats.requests; const left = await B.readHeaders(ib); assert.equal(left, 0);
+  assert.equal(G.stats.requests - r1, nb, "one small ranged read per bundle header");
+  assert.equal(Object.keys(ib.files).length, 3002, "every bundled file, the loose one and the big one are known");
+  const want = Object.entries(ib.files); const got = new Map<string, Blob>(); const r2 = G.stats.requests;
+  await B.fetchMany(want, (n, b) => { got.set(n, b); }, () => false);
+  assert.ok(G.stats.requests - r2 <= nb + 2, `whole bundles in one request each (${G.stats.requests - r2})`);
+  assert.equal(got.size, 3002);
+  for (const f of [...files, big]) { const b = got.get(f.name)!; assert.equal(b.size, f.blob.size, f.name); assert.equal(b.type, f.blob.type); assert.deepEqual(new Uint8Array(await b.arrayBuffer()), new Uint8Array(await f.blob.arrayBuffer()), f.name); }
+  // one file on its own: a ranged read of just its bytes
+  const r3 = G.stats.ranged; const one = await B.fetchOne(ib.files["img1234.webp"]); assert.equal(G.stats.ranged - r3, 1);
+  assert.deepEqual(new Uint8Array(await one!.arrayBuffer()), new Uint8Array(await files[1234].blob.arrayBuffer()));
+  // a few wanted files from a bundle: ranged reads, not the whole bundle
+  const few: [string, any][] = [["img1.webp", ib.files["img1.webp"]], ["img2999.webp", ib.files["img2999.webp"]]]; const out: string[] = [];
+  await B.fetchMany(few, (n) => { out.push(n); }, () => false); assert.deepEqual(out.sort(), ["img1.webp", "img2999.webp"]);
+  // a bundle deleted on Drive drops out of the index through the feed
+  const tok = await startToken(); const victim = Object.keys(ib.bundles!)[0]; const names = Object.entries(ib.files).filter(([, e]) => e.id === victim).length;
+  await G.fetchImpl(`https://www.googleapis.com/drive/v3/files/${victim}`, { method: "DELETE", headers: { Authorization: "Bearer tok1" } });
+  applyMediaChanges(ib, (await changesSince(tok)).changes); assert.equal(Object.keys(ib.files).length, 3002 - names);
+});
+
+test("media bundles through a connection that drops 1 request in 5: nothing lost, nothing doubled", { timeout: 120_000 }, async () => {
+  G = fakeGoogle(); signIn(); let k = 0; G.fail = (u, m) => (m !== "GET" && ++k % 5 === 0 ? "network" : null);
+  const files = Array.from({ length: 1200 }, (_, i) => ({ name: `f${i}.png`, blob: new Blob([new Uint8Array(3000).fill(i % 200)], { type: "image/png" }) }));
+  const A = new DriveMedia({}); let ia = await A.ensure(null); ia = await A.list(ia);
+  for (let i = 0; i < files.length; i += 300) await A.uploadBundle(ia, files.slice(i, i + 300));
+  G.fail = null; assert.ok(G.stats.dropped > 0);
+  const B = new DriveMedia({}); let ib = await B.ensure(null); ib = await B.list(ib); await B.readHeaders(ib);
+  assert.equal(Object.keys(ib.files).length, 1200);
+  const got = new Map<string, Blob>(); await B.fetchMany(Object.entries(ib.files), (n, b) => { got.set(n, b); }, () => false);
+  for (const f of files) assert.deepEqual(new Uint8Array(await got.get(f.name)!.arrayBuffer()), new Uint8Array(await f.blob.arrayBuffer()));
 });

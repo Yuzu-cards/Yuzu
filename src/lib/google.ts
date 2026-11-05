@@ -123,21 +123,46 @@ export async function createFolder(name: string, parent: string | null): Promise
 /** The folder at `path` under My Drive, created where missing; ids cached by path and re-checked only when a call about them fails. */
 export async function ensureFolders(path: string[], cache: Record<string, string>): Promise<string> { return (await findFolders(path, cache, true))!; }
 /** The folder at `path`, or null when it isn't there (with `create`, made where missing). */
+// Folder ids from the cache are checked once per app session (one request for the deepest folder of a path vouches for the
+// folders above it); until then every refresh spent a request per folder per call just to confirm ids it already had.
+const verified = new Set<string>();
+export function forgetVerified() { verified.clear(); }
 export async function findFolders(path: string[], cache: Record<string, string>, create = false): Promise<string | null> {
+  const full = path.join("/");
+  if (cache[full] && verified.has(cache[full])) return cache[full];
+  if (cache[full]) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(cache[full])}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (ok) { verified.add(cache[full]); return cache[full]; } }
   let parent: string | null = null; let key = "";
   for (const name of path) {
     key = key ? `${key}/${name}` : name; let id: string | null = cache[key] ?? null;
-    if (id) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (!ok) { id = null; delete cache[key]; } }
-    if (!id) { const found = await listFiles({ parent: parent ?? "root", name, folders: true }); id = found[0]?.id ?? (create ? await createFolder(name, parent) : null); if (!id) return null; cache[key] = id; }
+    if (id && !verified.has(id)) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (!ok) { id = null; delete cache[key]; } else verified.add(id); }
+    if (!id) { const found = await listFiles({ parent: parent ?? "root", name, folders: true }); id = found[0]?.id ?? (create ? await createFolder(name, parent) : null); if (!id) return null; cache[key] = id; verified.add(id); }
     parent = id;
   }
   return parent;
 }
-export async function downloadBytes(f: DriveFile | string): Promise<Uint8Array | null> {
+/** A file's bytes (a Google Sheet as .xlsx); `range` [start, end] (inclusive) fetches only that slice. null when it's gone. */
+export async function downloadBytes(f: DriveFile | string, range?: [number, number]): Promise<Uint8Array | null> {
   const file = typeof f === "string" ? { id: f } as DriveFile : f;
   const url = file.mimeType === GSHEET ? `${DRIVE}/files/${encodeURIComponent(file.id)}/export?mimeType=${encodeURIComponent(XLSX)}` : `${DRIVE}/files/${encodeURIComponent(file.id)}?alt=media`;
-  const r = await gfetch(url); return r.status === 404 ? null : new Uint8Array(await r.arrayBuffer());
+  const r = await gfetch(url, range ? { headers: { Range: `bytes=${range[0]}-${range[1]}` } } : {}); if (r.status === 404) return null;
+  const b = new Uint8Array(await r.arrayBuffer());
+  return range && r.status === 200 && b.length > range[1] - range[0] + 1 ? b.slice(range[0], range[1] + 1) : b; // a server that ignored the Range
 }
+/** One metadata read (e.g. the manifest's appProperties) without downloading the file. */
+export async function fileMeta(id: string, fields = "id,name,modifiedTime,trashed,appProperties"): Promise<any | null> { return gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=${encodeURIComponent(fields)}`); }
+/** The Drive changes feed: everything that changed in My Drive since `token` (one request when nothing did). */
+export interface DriveChange { id: string; removed: boolean; name?: string; parents?: string[]; trashed?: boolean; size?: number; modifiedTime?: string; props?: Record<string, string> }
+export async function changesSince(token: string, maxPages = 50): Promise<{ changes: DriveChange[]; token: string; more: boolean }> {
+  const out: DriveChange[] = []; let t = token; let next = token;
+  for (let i = 0; i < maxPages && t; i++) {
+    const page = await gjson(`${DRIVE}/changes?pageToken=${encodeURIComponent(t)}&fields=${encodeURIComponent("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,size,parents,trashed,modifiedTime,appProperties))")}&pageSize=1000&spaces=drive&includeRemoved=true`);
+    if (!page) throw new GoogleError("Drive's change list restarted.", 410);
+    for (const c of page.changes ?? []) { const f = c.file; out.push({ id: f?.id ?? c.fileId, removed: !!c.removed, name: f?.name, parents: f?.parents, trashed: f?.trashed, size: f ? Number(f.size) || 0 : 0, modifiedTime: f?.modifiedTime, props: f?.appProperties }); }
+    if (page.newStartPageToken) { next = page.newStartPageToken; t = ""; } else { t = page.nextPageToken ?? ""; next = t || next; }
+  }
+  return { changes: out, token: next, more: !!t };
+}
+export async function startToken(): Promise<string> { return (await gjson(`${DRIVE}/changes/startPageToken`))?.startPageToken ?? ""; }
 /** Write bytes/text as `name` in the folder: updated in place when an id is known (or found), else created. Returns the id. */
 /**
  * Write a file into a folder: updated in place when its id is known (or found by name), else created. `props` are stored
