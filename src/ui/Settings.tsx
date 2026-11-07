@@ -196,6 +196,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
+      <ExamSettings />
       {reversible.length > 0 && <details className="section"><summary>Language cards <span className="small muted">reverse and typed cards</span></summary>
         <div className="card-box">
           <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
@@ -537,6 +538,25 @@ function GoogleSection() {
         <details className="how" style={{ marginTop: 10 }}><summary className="small">Client ID (advanced)</summary>
           <div className="field"><label>Google Cloud web client</label><input defaultValue={g.clientId} autoCapitalize="none" placeholder="shared Citrus apps client" onBlur={(e) => setG({ clientId: e.target.value.trim() })} /><span className="small muted">Empty = the shared client Citrus Maxima and Orange use. This app's address ({typeof location !== "undefined" ? location.origin : ""}) must be among that client's authorised JavaScript origins.</span></div>
         </details>
+      </div>
+    </details>
+  );
+}
+
+/** Exam countdowns: a name, a date and the part of the collection it covers; Today shows how it's going. */
+function ExamSettings() {
+  const [name, setName] = useState(""); const [date, setDate] = useState(""); const [path, setPath] = useState("");
+  const decks = store.tree("decks").children.flatMap((c) => [c, ...c.children.map((g) => ({ ...g, name: c.name + " › " + g.name }))]);
+  const list = [...(store.settings.deadlines ?? [])].sort((a, b) => (a.date < b.date ? -1 : 1));
+  return (
+    <details className="section"><summary>Exam countdown <span className="small muted">{list.length ? `${list.length} set` : "dates and scope"}</span></summary>
+      <div className="card-box">
+        <p className="small muted" style={{ marginTop: 0 }}>Set an exam date and which decks it covers. Today then shows how many new cards a day you need, how much you'd remember on the day, and a drill on the cards most likely to slip. It also tells Citrus when you're behind.</p>
+        {list.map((d) => <div key={d.id} className="row small" style={{ gap: 8, margin: "6px 0" }}><b className="grow">{d.name}</b><span className="muted">{d.date.split("-").reverse().join("/")} · {d.path ? d.path.split("::").slice(-1)[0] : "everything"}</span><button className="btn" onClick={() => store.saveSettings({ deadlines: list.filter((x) => x.id !== d.id) })}>Remove</button></div>)}
+        <div className="field"><label>Name</label><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Step 1" /></div>
+        <div className="field"><label>Date</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+        <div className="field"><label>Covers</label><select value={path} onChange={(e) => setPath(e.target.value)}><option value="">Everything</option>{decks.map((d) => <option key={d.path} value={d.path}>{d.name}</option>)}</select></div>
+        <button className="btn primary" disabled={!name.trim() || !date} onClick={async () => { await store.saveSettings({ deadlines: [...list, { id: "x" + Date.now().toString(36), name: name.trim(), date, view: "decks", path }] }); setName(""); setDate(""); setPath(""); }}>Add exam</button>
       </div>
     </details>
   );

@@ -3,6 +3,7 @@ import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle } from "../lib/render";
+import { MCQ_ID, parseOptions, shuffled } from "../lib/mcq";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
 import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
 import { systemColor, stamp, tilt } from "./theme";
@@ -196,7 +197,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [results, setResults] = useState<{ id: string; g: Rating; ms: number; sure?: boolean }[]>(resume?.results ?? []);
   const [queue, setQueue] = useState<Card[]>(fullQueue);
   const [idx, setIdx] = useState(resume ? Math.min(resume.idx, Math.max(0, fullQueue.length - (resume.ids.length - resume.idx))) : 0);
-  const [showAnswer, setShowAnswer] = useState(false);
+  const [showAnswer, setShowAnswer] = useState(false); const [picked, setPicked] = useState<number | null>(null);
   const [doneCount, setDoneCount] = useState(resume?.done ?? 0);
   const onExit = () => { saveSession(null); exit(); };
   // Save the session after every step (cheap: ids only). Cleared on exit and when the session is finished.
@@ -239,7 +240,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); return [...q.slice(0, at), ...add, ...q.slice(at)]; });
   }, [idx]);
 
-  useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setInfo(false); setTyped(""); setHint(false); setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); }, [card?.id]);
+  useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setPicked(null); setInfo(false); setTyped(""); setHint(false); setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); }, [card?.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -247,6 +248,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       if ((e.target as HTMLElement)?.tagName === "INPUT") { if (e.key === "Enter") { e.preventDefault(); setShowAnswer(true); (e.target as HTMLInputElement).blur(); } return; }
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (!showAnswer) setShowAnswer(true); else answer(3); }
       if (showAnswer && ["1", "2", "3", "4"].includes(e.key)) answer(Number(e.key) as Rating);
+      if (!showAnswer && mcq && /^[1-9]$/.test(e.key) && Number(e.key) <= mcq.length) { setPicked(Number(e.key) - 1); setShowAnswer(true); return; }
       if (e.key === "i") setInfo(true);
       if (e.key === "h" && !showAnswer) setHint(true);
       if (e.key === "r") playSounds(cardSounds(document.querySelector(".study .card-host")?.shadowRoot));
@@ -263,6 +265,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const rendered = useMemo(() => (card && note && nt ? renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl }) : null), [card?.id, rev, mediaRev]);
   const intervals = useMemo(() => (card ? previewIntervals(card, Date.now(), store.settings.scheduler) : null), [card?.id, rev]);
   // Typed answers for language cards: the answer is whatever the back shows that the front did not.
+  const mcq = useMemo(() => (card && note && nt && nt.id === MCQ_ID ? shuffled(parseOptions(note.fields[1] ?? ""), card.id + ":" + card.reps) : null), [card?.id, card?.reps, rev]);
+  const mcqRight = picked !== null && !!mcq && !!mcq[picked]?.correct;
   const typing = !!card && store.settings.typeAnswers && card.source.startsWith("Languages") && !!nt && nt.kind === "standard";
   const answerText = useMemo(() => {
     if (!typing || !nt || !note) return "";
@@ -454,6 +458,14 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         style={flying ? { transform: flyTo[flying] } : { transform: drag ? `translate(${drag.dx * 0.45}px, ${drag.dy * 0.35}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag && showAnswer && (() => { const g = dirOf(drag); const near = g ?? dirOf({ dx: drag.dx * 1.6, dy: drag.dy * 1.6 }); if (!near) return null; const [t, col] = SWIPE_LABEL[near]; return <div className="swipe-label" style={{ color: col, opacity: g ? 1 : 0.55, left: Math.max(8, Math.min(window.innerWidth - 110, drag.x - 50)), top: Math.max(60, drag.y - 120), position: "fixed" }}>{t}</div>; })()}
         {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>
+          {mcq && mcq.length > 0 && <div className="mcq" onClick={(e) => e.stopPropagation()}>
+            {mcq.map((o, i) => { const done = showAnswer; const cls = "mcq-opt" + (done ? (o.correct ? " right" : picked === i ? " wrong" : " idle") : ""); return <div key={i}>
+              <button className={cls} disabled={done} onClick={() => { setPicked(i); setShowAnswer(true); }}><span className="mcq-key">{String.fromCharCode(65 + i)}</span><span>{o.text}</span>{done && o.correct && <b className="mcq-mark">✓</b>}{done && !o.correct && picked === i && <b className="mcq-mark">✗</b>}</button>
+              {done && o.why && (o.correct || picked === i) && <p className="mcq-why small">{o.why}</p>}
+            </div>; })}
+            {showAnswer && picked === null && <p className="small muted">You flipped the card without choosing.</p>}
+            {showAnswer && picked !== null && <p className="small muted" style={{ margin: "8px 0 0" }}>{mcqRight ? "Correct — Good is suggested." : "Not this one — Again is suggested."}</p>}
+          </div>}
           {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
           {!showAnswer && hint && hintText && <div className="hint-line" onClick={(e) => e.stopPropagation()}>{hintText}</div>}
           {showAnswer && (hookOpen || hookText) && (
@@ -474,9 +486,9 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <div className="show-bar row">{hintText && !hint && <button className="btn" onClick={() => setHint(true)} title="First letters (h)">Hint</button>}<button className="btn primary grow" onClick={() => setShowAnswer(true)}>Show answer</button></div>
       ) : (
         <div className="answer-bar">
-          <button className="again" {...holdAgain.bind} data-hint={`Again|Forgot it. Back in ${intervals?.[1] ?? "a minute"}. Swipe ←. Hold: Again and mark it "needs improving". Key 1.`} onClick={() => { if (holdAgain.wasHeld()) return; answer(1); }}>Again<small>{intervals?.[1]}</small></button>
+          <button className={"again" + (mcq && picked !== null && !mcqRight ? " suggest" : "")} {...holdAgain.bind} data-hint={`Again|Forgot it. Back in ${intervals?.[1] ?? "a minute"}. Swipe ←. Hold: Again and mark it "needs improving". Key 1.`} onClick={() => { if (holdAgain.wasHeld()) return; answer(1); }}>Again<small>{intervals?.[1]}</small></button>
           <button className="hard" data-hint={`Hard|Recalled with real effort. Next in ${intervals?.[2] ?? "…"}. Swipe ↓. Key 2.`} onClick={() => answer(2)}>Hard<small>{intervals?.[2]}</small></button>
-          <button className="good" {...holdGood.bind} data-hint={`Good|Recalled. Next in ${intervals?.[3] ?? "…"}. Swipe →. Hold: Good, and this note's other cards wait for another day. Key 3 or space.`} onClick={() => { if (holdGood.wasHeld()) return; answer(3); }}>Good<small>{intervals?.[3]}</small></button>
+          <button className={"good" + (mcq && picked !== null && mcqRight ? " suggest" : "")} {...holdGood.bind} data-hint={`Good|Recalled. Next in ${intervals?.[3] ?? "…"}. Swipe →. Hold: Good, and this note's other cards wait for another day. Key 3 or space.`} onClick={() => { if (holdGood.wasHeld()) return; answer(3); }}>Good<small>{intervals?.[3]}</small></button>
           <button className="easy" data-hint={`Easy|Instant and certain. Next in ${intervals?.[4] ?? "…"}. Swipe ↑. Key 4.`} onClick={() => answer(4)}>Easy<small>{intervals?.[4]}</small></button>
         </div>
       )}

@@ -1,5 +1,6 @@
 // Anki template renderer: fields, conditionals, cloze, FrontSide, media rewriting.
 import type { Note, Notetype } from "./model";
+import { IO_ID, parseMasks } from "./occlusion";
 
 export interface RenderCtx {
   note: Note;
@@ -118,7 +119,18 @@ export function rewriteCssUrls(css: string, resolve?: (name: string) => string |
   });
 }
 
+/** Image occlusion: the picture with this card's box hidden (front) or outlined with its label (back); the other boxes are only outlined. */
+function renderOcclusion(ctx: RenderCtx): { front: string; back: string } {
+  const f = ctx.note.fields; const masks = parseMasks(f[1] ?? ""); const img = /<img[^>]*>/i.exec(f[2] ?? "")?.[0] ?? "";
+  const box = (m: { x: number; y: number; w: number; h: number }, cls: string) => `<div class="io-box ${cls}" style="left:${m.x}%;top:${m.y}%;width:${m.w}%;height:${m.h}%"></div>`;
+  const draw = (side: "q" | "a") => `<div class="io">${img}${masks.map((m, i) => (i === ctx.ord ? box(m, side === "q" ? "io-hide" : "io-open") : box(m, "io-other"))).join("")}</div>`;
+  const title = f[0] && f[0] !== "Image occlusion" ? `<div>${f[0]}</div>` : "";
+  const label = masks[ctx.ord]?.label ?? ""; const extra = f[4] ? `<div class="extra">${f[4]}</div>` : ""; const src = f[3] ? `<div class="src">${f[3]}</div>` : "";
+  return { front: title + draw("q") + `<div class="small">What is hidden here?</div>`, back: title + draw("a") + (label ? `<div class="io-ans">${escapeHtml(label)}</div>` : "") + extra + src };
+}
+
 export function renderCard(ctx: RenderCtx): { front: string; back: string; css: string } {
+  if (ctx.notetype.id === IO_ID) { const o = renderOcclusion(ctx); return { front: rewriteMedia(o.front, ctx.resolveMedia), back: rewriteMedia(o.back, ctx.resolveMedia), css: ctx.notetype.css }; }
   const tmpl = ctx.notetype.templates[Math.min(ctx.ord, ctx.notetype.templates.length - 1)] ?? ctx.notetype.templates[0];
   const front = renderTemplate(tmpl?.qfmt ?? "{{Front}}", ctx, "q");
   const back = renderTemplate(tmpl?.afmt ?? "{{FrontSide}}<hr id=answer>{{Back}}", ctx, "a", front);

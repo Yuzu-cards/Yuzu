@@ -123,6 +123,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
             <div className="stat" data-hint="Learned|Cards in review: past their learning steps, with a real interval."><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
           {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
+          <Countdowns onStudy={onStudy} />
           <Coach missed={missed} weakest={weakest} bossReady={bossReady} overdue={overdue} onStudy={onStudy} onBoss={onBoss} onFilter={onFilter} onRecap={() => setRecap(true)} onTab={onTab} />
           <h2>Next 7 days</h2>
           <p className="small muted" style={{ margin: "-4px 0 8px" }}>Reviews falling due each day, so you see heavy days coming.{overdue > 0 ? <> Plus <b style={{ color: "var(--orange)" }}>{overdue.toLocaleString()} overdue</b>: about <b>{Math.ceil(overdue / 7).toLocaleString()} extra a day</b> clears them in a week.</> : null}</p>
@@ -205,5 +206,28 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
         <button className="stack grow" style={{ "--spine": t.spine, marginBottom: 8 } as any} data-hint={t.why} onClick={t.act}><span className="name">{t.title}<div className="meta">{t.meta}</div></span><span className="muted"><IconPlay /></span></button>
         <button className="coach-x" aria-label={`Dismiss: ${t.title}`} onClick={() => dismiss(t.id)}>✕</button>
       </div>))}
+  </>);
+}
+
+const dmy = (iso: string) => iso.split("-").reverse().join("/");
+/** Exam countdowns: days left, what's introduced, the new cards a day it needs, and drills on what you'd forget. Plus the mixed-system drill. */
+function Countdowns({ onStudy }: { onStudy: OnStudy }) {
+  const today = store.isoToday(); const list = (store.settings.deadlines ?? []).filter((d) => d.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const drill = useMemo(() => store.drillQueue(30), [store.cards.size, store.reviews.length, today]); const systems = store.drillSystems(drill);
+  return (<>
+    {list.map((d) => { const e = store.examStatus(d); const pct = Math.round(e.coverage * 100); return (
+      <div key={d.id} className="card-box" style={{ marginTop: 10 }}>
+        <div className="row"><b className="grow">{d.name}</b><span className={"chip" + (e.onTrack ? " yuzu" : " orange")}>{e.daysLeft === 0 ? "today" : e.daysLeft === 1 ? "tomorrow" : `${e.daysLeft} days`}</span></div>
+        <div className="small muted" style={{ margin: "4px 0 6px" }}>{dmy(d.date)} · {e.total.toLocaleString()} cards in scope</div>
+        <div className="bar" style={{ height: 8, background: "var(--line, #8883)", borderRadius: 4 }}><div style={{ width: pct + "%", height: "100%", background: "var(--yuzu, #f08a24)", borderRadius: 4 }} /></div>
+        <p className="small" style={{ margin: "8px 0 4px" }}>{pct}% introduced{e.unseen ? ` · ${e.unseen.toLocaleString()} still new` : " · everything seen"}{e.predicted !== null ? ` · you'd recall about ${Math.round(e.predicted * 100)}% on the day if you stopped reviewing now` : ""}.</p>
+        <p className="small" style={{ margin: "0 0 8px", color: e.onTrack ? undefined : "var(--again)" }}>{e.unseen === 0 ? "All new cards are in; the rest is review." : e.onTrack ? `${e.needPerDay} new a day finishes them with ${e.reviewDays} review-only days before the exam (your limit is ${store.settings.newPerDay}).` : `Needs ${e.needPerDay} new cards a day; your limit is ${store.settings.newPerDay}. At that pace the last new cards come in on ${dmy(e.finishOn!)}.`}</p>
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          <button className="btn grow" onClick={() => onStudy(d.path, d.view)}>Study this</button>
+          <button className="btn grow" disabled={!e.seen} onClick={() => onStudy(d.path, d.view, { preset: store.examWeakest(d), title: d.name + " · weakest" })}>Weakest 30</button>
+          {!e.onTrack && store.settings.newPerDay < e.needPerDay && <button className="btn grow" onClick={async () => { await store.saveSettings({ newPerDay: e.needPerDay }); snackbar(`New cards a day: ${e.needPerDay}`); }}>Set {e.needPerDay} a day</button>}
+        </div>
+      </div>); })}
+    {systems >= 2 && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginTop: 10 }} onClick={() => onStudy("", "decks", { preset: drill, title: "Mixed drill" })}><span className="grow"><b>Mixed drill</b><br /><span className="small muted">{drill.length} cards from {systems} systems, taken in turns — due and shakiest first. Switching topics is harder and sticks better.</span></span><IconPlay /></button>}
   </>);
 }

@@ -2,10 +2,10 @@
 // App shell is precached and served cache-first so Yuzu opens offline. Updates wait until the
 // user taps "Update" so a session is never interrupted. Third-party modules fetched at runtime
 // (the zstd decoder) are cached on first use.
-const VERSION = "1.1.4-bc4ea1ff6a";
+const VERSION = "1.2.0-e137bbc330";
 const CACHE = `yuzu-${VERSION}`;
 const RUNTIME = "yuzu-runtime";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./assets/app-e0459c5309.js","./assets/app-ad06795069.css","./icons/apple-touch-icon.png","./icons/favicon-32.png","./icons/icon-192.png","./icons/icon-512.png","./icons/maskable-512.png","./fonts/yuzu-pixel.woff"];
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./assets/app-4b7d198a86.js","./assets/app-bc093b19c1.css","./icons/apple-touch-icon.png","./icons/favicon-32.png","./icons/icon-192.png","./icons/icon-512.png","./icons/maskable-512.png","./fonts/yuzu-pixel.woff"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE.map((p) => new Request(p, { cache: "reload" })))));
