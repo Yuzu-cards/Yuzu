@@ -74,7 +74,7 @@ export async function whoAmI(): Promise<string> { try { const r = await gfetch("
 let retryScale = 1;
 /** Tests only: shrink the backoff waits (the waits themselves are what keeps a phone's sync alive on a bad connection). */
 export function setRetryScale(x: number) { retryScale = x; }
-export async function gfetch(url: string, init: RequestInit = {}, token = savedToken()): Promise<Response> {
+export async function gfetch(url: string, init: RequestInit = {}, token = savedToken(), tries = 6): Promise<Response> {
   if (!token?.access) throw new GoogleError("Not connected to Google.", 401, true);
   if (typeof navigator !== "undefined" && navigator.onLine === false) throw new GoogleError("You're offline. Nothing is lost; Yuzu carries on when you're back online.", 0, false, true);
   let res: Response; let m = "";
@@ -82,7 +82,7 @@ export async function gfetch(url: string, init: RequestInit = {}, token = savedT
   for (let attempt = 0; ; attempt++) {
     // A phone's connection drops mid-request now and then (and when the app goes to the background): retry for ~25 s.
     try { res = await fetch(url, { ...init, cache: "no-store", headers: { ...(init.headers as any), Authorization: `Bearer ${token.access}` } }); }
-    catch (e: any) { if (attempt < 5) { await wait(attempt); continue; } throw new GoogleError(`Google couldn't be reached — the connection dropped (${e?.message ?? "offline"}). Nothing is lost; Yuzu carries on from where it stopped.`, 0, false, true); }
+    catch (e: any) { if (attempt < tries - 1) { await wait(attempt); continue; } throw new GoogleError(`Google couldn't be reached — the connection dropped (${e?.message ?? "offline"}). Nothing is lost; Yuzu carries on from where it stopped.`, 0, false, true); }
     m = "";
     if (res.status === 403 || res.status === 429) { try { const j = await res.clone().json(); m = j?.error?.message ?? ""; m += " " + (j?.error?.errors?.map((x: any) => x.reason).join(" ") ?? ""); } catch { /* no body */ } }
     const slowDown = res.status === 429 || (res.status === 403 && /rate ?limit|ratelimit|quota|userRateLimitExceeded|rateLimitExceeded/i.test(m));
@@ -117,6 +117,10 @@ export async function listFiles(o: { parent?: string | null; name?: string | nul
   } while (page);
   return out;
 }
+/** A server-side copy of a Drive file into another folder (no bytes travel through this device). */
+export async function copyFile(id: string, parent: string, name: string, props?: Record<string, string>): Promise<string> {
+  const j = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}/copy?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, parents: [parent], ...(props ? { appProperties: props } : {}) }) }); return j.id;
+}
 export async function createFolder(name: string, parent: string | null): Promise<string> {
   const j = await gjson(`${DRIVE}/files?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: FOLDER, ...(parent ? { parents: [parent] } : {}) }) }); return j.id;
 }
@@ -140,13 +144,31 @@ export async function findFolders(path: string[], cache: Record<string, string>,
   }
   return parent;
 }
+// Partial downloads need Google to accept the Range header from a web page. If the first ranged read dies at the network level
+// while a plain read of the same file works, the Range header is what's refused: remember that (a week) and read whole files.
+const RB = "yuzu_range_broken"; let rangeVerified = false;
+let rangeBrokenAt = (() => { try { return Number(localStorage.getItem(RB)) || 0; } catch { return 0; } })();
+export function rangeSupported(): boolean { return !(rangeBrokenAt && Date.now() - rangeBrokenAt < 7 * 86400000); }
+/** Tests: forget what was learned about partial downloads. */
+export function resetRange() { rangeVerified = false; rangeBrokenAt = 0; try { localStorage.removeItem(RB); } catch { /* fine */ } }
 /** A file's bytes (a Google Sheet as .xlsx); `range` [start, end] (inclusive) fetches only that slice. null when it's gone. */
 export async function downloadBytes(f: DriveFile | string, range?: [number, number]): Promise<Uint8Array | null> {
   const file = typeof f === "string" ? { id: f } as DriveFile : f;
   const url = file.mimeType === GSHEET ? `${DRIVE}/files/${encodeURIComponent(file.id)}/export?mimeType=${encodeURIComponent(XLSX)}` : `${DRIVE}/files/${encodeURIComponent(file.id)}?alt=media`;
-  const r = await gfetch(url, range ? { headers: { Range: `bytes=${range[0]}-${range[1]}` } } : {}); if (r.status === 404) return null;
-  const b = new Uint8Array(await r.arrayBuffer());
-  return range && r.status === 200 && b.length > range[1] - range[0] + 1 ? b.slice(range[0], range[1] + 1) : b; // a server that ignored the Range
+  const whole = async () => { const r = await gfetch(url); return r.status === 404 ? null : new Uint8Array(await r.arrayBuffer()); };
+  const cut = (b: Uint8Array | null) => (b && range ? b.slice(range[0], range[1] + 1) : b);
+  if (!range) return whole();
+  if (!rangeSupported()) return cut(await whole());
+  try {
+    const r = await gfetch(url, { headers: { Range: `bytes=${range[0]}-${range[1]}` } }, savedToken(), rangeVerified ? 6 : 2); if (r.status === 404) return null;
+    rangeVerified = true; const b = new Uint8Array(await r.arrayBuffer());
+    return r.status === 200 && b.length > range[1] - range[0] + 1 ? b.slice(range[0], range[1] + 1) : b; // a server that ignored the Range
+  } catch (e) {
+    if (rangeVerified || !(e instanceof GoogleError) || !/couldn't be reached/.test(e.message)) throw e;
+    const all = await whole(); // a real outage throws here and nothing is learned
+    rangeBrokenAt = Date.now(); try { localStorage.setItem(RB, String(rangeBrokenAt)); } catch { /* fine */ }
+    return cut(all);
+  }
 }
 /** One metadata read (e.g. the manifest's appProperties) without downloading the file. */
 export async function fileMeta(id: string, fields = "id,name,modifiedTime,trashed,appProperties"): Promise<any | null> { return gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=${encodeURIComponent(fields)}`); }

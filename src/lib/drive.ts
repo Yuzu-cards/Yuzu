@@ -5,13 +5,13 @@
 // cards/*.json, reviews/<month>.json, settings.json …), one Drive file each. manifest.json carries a revision stamp;
 // a push re-reads it just before writing and stops when another device moved it. A lock.json file keeps two devices
 // from uploading at once (written, then read back: ours or not).
-import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, findFolders, listFiles, downloadBytes, putFile, deleteFile, gjson, fileMeta, type DriveFile } from "./google";
+import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, findFolders, listFiles, downloadBytes, putFile, deleteFile, copyFile, gjson, fileMeta, rangeSupported, type DriveFile } from "./google";
 import { mimeFor } from "../import/media";
 import { SyncError, gzip, gunzip, GZIP_ABOVE, sameDevice, pool, type Manifest, type SyncSnapshot, type Progress } from "./sync";
 
-export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"], rotasOrange: ["Citrus Maxima", "Rotas"] };
+export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"], rotasOrange: ["Citrus Maxima", "Rotas"], backups: [HUB_ROOT, "Yuzu", "backups"] };
 export interface DriveEntry { id: string; s: number; o?: number; m?: string } // o: offset inside a bundle (absent for a loose file), m: type
-export interface DriveIndex { media: string; files: Record<string, DriveEntry>; changes: string; at: number; complete: boolean; nextPage?: string; bundles?: Record<string, { n: string; t: number; s: number; read: boolean }> }
+export interface DriveIndex { media: string; files: Record<string, DriveEntry>; changes: string; at: number; complete: boolean; nextPage?: string; bundles?: Record<string, { n: string; t: number; s: number; read: boolean }>; tocs?: Record<string, string> }
 
 // ---------------------------------------------------------------- media
 // Media goes up and down in bundles: a few hundred files packed into one ~6 MB Drive file, so 47,000 images are ~300
@@ -37,7 +37,9 @@ export function parseBundleHeader(b: Uint8Array): { head: number; entries: [stri
   return { head, entries: (j.f ?? []).map(([name, o, s, m]: [string, number, number, string]) => [name, { s, o: head + o, ...(m ? { m } : {}) }]) };
 }
 const isBundle = (props?: Record<string, string>) => props?.yzb === "1";
+const isToc = (props?: Record<string, string>) => props?.yzt === "1";
 function addListed(idx: DriveIndex, f: { id: string; name: string; size?: number | string; props?: Record<string, string> }) {
+  if (isToc(f.props)) { idx.tocs ??= {}; idx.tocs[f.name] = f.id; return; } // a bundle's table of contents: small, readable without partial downloads
   if (isBundle(f.props)) { idx.bundles ??= {}; if (!idx.bundles[f.id]) idx.bundles[f.id] = { n: f.name, t: Number(f.props!.t) || 0, s: Number(f.size) || 0, read: false }; }
   else { const cur = idx.files[f.name]; if (!cur || cur.o === undefined) idx.files[f.name] = { id: f.id, s: Number(f.size) || 0 }; } // a loose copy never displaces a bundled one already known
 }
@@ -46,13 +48,15 @@ export function applyMediaChanges(idx: DriveIndex, changes: { id: string; remove
   let byId: Map<string, string[]> | null = null; let changed = false;
   const drop = (id: string) => {
     if (idx.bundles?.[id]) { delete idx.bundles[id]; changed = true; }
+    if (idx.tocs) for (const [n, t] of Object.entries(idx.tocs)) if (t === id) { delete idx.tocs[n]; changed = true; }
     byId ??= (() => { const m = new Map<string, string[]>(); for (const [n, v] of Object.entries(idx.files)) { const a = m.get(v.id); if (a) a.push(n); else m.set(v.id, [n]); } return m; })();
     for (const n of byId.get(id) ?? []) { delete idx.files[n]; changed = true; } byId.delete(id);
   };
   for (const c of changes) {
     const ours = !c.removed && !c.trashed && (c.parents ?? []).includes(idx.media);
     if (!ours) { drop(c.id); continue; }
-    if (isBundle(c.props)) { if (!idx.bundles?.[c.id]) { addListed(idx, { id: c.id, name: c.name ?? "", size: c.size, props: c.props }); changed = true; } }
+    if (isToc(c.props)) { if (c.name && idx.tocs?.[c.name] !== c.id) { idx.tocs ??= {}; idx.tocs[c.name] = c.id; changed = true; } }
+    else if (isBundle(c.props)) { if (!idx.bundles?.[c.id]) { addListed(idx, { id: c.id, name: c.name ?? "", size: c.size, props: c.props }); changed = true; } }
     else if (c.name) { const cur = idx.files[c.name]; if (!cur || cur.id !== c.id) { if (!cur || cur.o === undefined) { idx.files[c.name] = { id: c.id, s: c.size ?? 0 }; changed = true; } } }
   }
   return changed;
@@ -81,7 +85,12 @@ export class DriveMedia {
     const t0 = Date.now(); const todo = Object.entries(idx.bundles ?? {}).filter(([, b]) => !b.read);
     await pool(todo, 6, async ([id, b]) => {
       if (Date.now() - t0 > budgetMs) return;
-      const bytes = await downloadBytes(id, [0, Math.max(8, b.t) - 1]); if (!bytes) { delete idx.bundles![id]; return; }
+      const tocId = idx.tocs?.[b.n + ".toc"];
+      if (tocId) { // the table of contents beside the bundle: one small plain read
+        const t = await downloadBytes(tocId); const j = t ? JSON.parse(new TextDecoder().decode(t)) : null;
+        if (j?.f) { for (const [name, o, s, m] of j.f) idx.files[name] = { id, s, o, ...(m ? { m } : {}) }; b.read = true; return; }
+      }
+      const bytes = await downloadBytes(id, [0, Math.max(8, b.t) - 1]); if (!bytes) { delete idx.bundles![id]; return; } // (a bundle without one: its own header)
       const h = parseBundleHeader(bytes); if (!h) { b.read = true; return; }
       for (const [name, e] of h.entries) idx.files[name] = { id, ...e };
       b.read = true;
@@ -96,12 +105,23 @@ export class DriveMedia {
     const id = await putFile({ parent: idx.media, name, body: blob, mime: "application/octet-stream", isNew: true, props: { yzb: "1", t: String(head), n: String(items.length) } });
     idx.bundles ??= {}; idx.bundles[id] = { n: name, t: head, s: blob.size, read: true };
     for (const [n, e] of entries) idx.files[n] = { ...e, id };
+    // Its table of contents next to it ([name, offset, size, type]): another device reads this instead of a partial download.
+    const toc = JSON.stringify({ v: 1, f: entries.map(([n, e]) => [n, e.o, e.s, e.m ?? ""]) });
+    try { const tid = await putFile({ parent: idx.media, name: name + ".toc", body: toc, mime: "application/json", isNew: true, props: { yzt: "1" } }); idx.tocs ??= {}; idx.tocs[name + ".toc"] = tid; } catch { /* the bundle's own header still serves */ }
   }
   /** Upload one loose file. The index is complete and authoritative, so a name it lacks is created without a lookup first. */
   async upload(idx: DriveIndex, name: string, blob: Blob): Promise<string> { const cur = idx.files[name]; const id = cur && cur.o === undefined ? cur.id : null; return putFile({ parent: idx.media, name, body: blob, mime: blob.type || "application/octet-stream", id, isNew: !id && idx.complete }); }
   /** One file: a ranged read from its bundle, or the whole loose file. */
+  private lastBundle: { id: string; bytes: Uint8Array } | null = null;
   async fetchOne(e: DriveEntry, name = ""): Promise<Blob | null> {
-    const b = e.o !== undefined ? await downloadBytes(e.id, [e.o, e.o + e.s - 1]) : await downloadBytes(e.id); const type = e.m || (name ? mimeFor(name) : "");
+    let b: Uint8Array | null;
+    if (e.o === undefined) b = await downloadBytes(e.id);
+    else if (rangeSupported()) b = await downloadBytes(e.id, [e.o, e.o + e.s - 1]);
+    else { // partial downloads refused: the whole bundle (the last one is kept, so the next picture from it costs nothing)
+      if (this.lastBundle?.id !== e.id) { const all = await downloadBytes(e.id); this.lastBundle = all ? { id: e.id, bytes: all } : null; }
+      b = this.lastBundle ? this.lastBundle.bytes.slice(e.o, e.o + e.s) : null;
+    }
+    const type = e.m || (name ? mimeFor(name) : "");
     return b ? new Blob([b as BlobPart], type ? { type } : {}) : null;
   }
   /**
@@ -114,7 +134,7 @@ export class DriveMedia {
       if (stop()) return;
       if (g.length === 1) { const b = await this.fetchOne(g[0][1], g[0][0]); if (b) await got(g[0][0], b); return; }
       const lo = Math.min(...g.map(([, e]) => e.o!)), hi = Math.max(...g.map(([, e]) => e.o! + e.s)); const wanted = g.reduce((a, [, e]) => a + e.s, 0);
-      if (wanted >= (hi - lo) * 0.3) { // one request for the span that holds them
+      if (wanted >= (hi - lo) * 0.3 || !rangeSupported()) { // one request for the span that holds them (the whole bundle when partial reads are refused)
         const bytes = await downloadBytes(g[0][1].id, [lo, hi - 1]); if (!bytes) return;
         for (const [name, e] of g) await got(name, new Blob([bytes.slice(e.o! - lo, e.o! - lo + e.s) as BlobPart], e.m ? { type: e.m } : {}));
       } else for (const [name, e] of g) { if (stop()) return; const b = await this.fetchOne(e, name); if (b) await got(name, b); }
@@ -130,8 +150,8 @@ export class DriveSync {
   static LOCK_MS = 12 * 60000;
   private folder = ""; private listing: Listing | null = null; private seenRev: string | null | undefined = undefined; private holdsLock = false; private inboxId = "";
   /** memo: the last manifest this device read or wrote, kept by the caller across syncs (no download when Drive still has it). */
-  constructor(private cache: Record<string, string>, private device: string, private memo: { rev?: string; m?: Manifest } = {}) {}
-  private async open() { if (!this.folder) this.folder = await ensureFolders(PATHS.collection, this.cache); return this.folder; }
+  constructor(private cache: Record<string, string>, private device: string, private memo: { rev?: string; m?: Manifest } = {}, private path: string[] = PATHS.collection) {}
+  private async open() { if (!this.folder) this.folder = await ensureFolders(this.path, this.cache); return this.folder; }
   private dupes: DriveFile[] = [];
   /** The collection folder by name. Drive allows two files with one name (a create retried after its answer was lost): the newest wins, the rest are removed after the next good sync. */
   private async list(): Promise<Listing> {
@@ -243,6 +263,15 @@ export class DriveSync {
     this.after = tidy().catch(() => {}); // the lock is released and duplicates removed after the answer, not before it
     return { manifest, commit: rev, pushed: toWrite.length - kept, bytes };
   }
+  /** Copy every file of the current manifest into a backup folder (Drive copies server-side: nothing is uploaded). The manifest goes last, so a folder holding one is complete. */
+  async snapshot(name: string, progress?: Progress): Promise<{ files: number; rev: string | null } | null> {
+    const m = await this.pullManifest({ fresh: true }); if (!m) return null; const listing = this.listing!;
+    const dest = await ensureFolders([...PATHS.backups, name], this.cache); for (const f of await listFiles({ parent: dest })) await deleteFile(f.id); // a half-finished earlier try
+    const real = Object.keys(m.files).map((p) => m.stored?.[p] ?? p.replace(/\//g, "__")); let n = 0;
+    await pool([...real], 4, async (r) => { const f = listing.get(r); if (!f) throw new SyncError(`${r} is missing on Drive, backup stopped`, "other"); await copyFile(f.id, dest, r, f.props); n++; progress?.(`Backing up ${n} of ${real.length} files`); });
+    const mf = listing.get("manifest.json")!; await copyFile(mf.id, dest, "manifest.json", mf.props);
+    return { files: real.length, rev: (m as any).rev ?? null };
+  }
   async compact(): Promise<boolean> { return false; }
   async repoSizeMB(): Promise<number | null> { return null; }
   // Inbox: packs from Claude dropped into My Apps/Yuzu/collection/inbox
@@ -292,3 +321,33 @@ export async function trashStale(cache: Record<string, string>): Promise<void> {
   for (const f of await listFiles({ parent, name: "state.json" })) await gjson(`${DRIVE}/files/${encodeURIComponent(f.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
 }
 export { GoogleError };
+
+// ---------------------------------------------------------------- Rolling backups: My Apps/Yuzu/backups/<YYYY-MM-DD>/
+export interface BackupInfo { name: string; id: string; rev: string | null; at: number; counts?: Manifest["counts"] }
+/** Which backup folders to keep: the newest `days`, then the newest of each week for `weeks` more weeks. */
+export function backupsToKeep(names: string[], days = 7, weeks = 4): Set<string> {
+  const sorted = [...names].sort().reverse(); const keep = new Set(sorted.slice(0, days)); const seenWeek = new Set<number>();
+  for (const n of sorted.slice(days)) { const t = Date.parse(n.slice(0, 10)); if (!Number.isFinite(t)) continue; const wk = Math.floor(t / (7 * 86400000)); if (seenWeek.size < weeks && !seenWeek.has(wk)) { seenWeek.add(wk); keep.add(n); } }
+  return keep;
+}
+async function backupRoot(cache: Record<string, string>, create = false) { return findFolders(PATHS.backups, cache, create); }
+export async function listBackups(cache: Record<string, string>): Promise<BackupInfo[]> {
+  const root = await backupRoot(cache); if (!root) return []; const out: BackupInfo[] = [];
+  for (const f of await listFiles({ parent: root, folders: true, all: true })) {
+    const mf = (await listFiles({ parent: f.id, name: "manifest.json" }))[0]; if (!mf) continue; // still being written
+    out.push({ name: f.name, id: f.id, rev: mf.props?.rev ?? null, at: Date.parse(mf.modifiedTime ?? "") || 0 });
+  }
+  return out.sort((a, b) => (a.name < b.name ? 1 : -1));
+}
+export async function pruneBackups(cache: Record<string, string>, days = 7, weeks = 4): Promise<number> {
+  const root = await backupRoot(cache); if (!root) return 0; const all = await listFiles({ parent: root, folders: true, all: true });
+  const keep = backupsToKeep(all.map((f) => f.name), days, weeks); let n = 0;
+  for (const f of all) if (!keep.has(f.name) && /^\d{4}-\d{2}-\d{2}/.test(f.name)) { try { await deleteFile(f.id); n++; } catch { /* next time */ } }
+  return n;
+}
+/** Read a whole backup as a snapshot (the same shape a sync pull returns). */
+export async function readBackup(cache: Record<string, string>, name: string, progress?: Progress) {
+  const r = new DriveSync(cache, "restore", {}, [...PATHS.backups, name]); const m = await r.pullManifest(); if (!m) throw new SyncError("That backup has no manifest", "other");
+  return { manifest: m, snap: await r.pullChanged(m, {}, progress) };
+}
+export function todayName(d = new Date()): string { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }

@@ -18,8 +18,8 @@ const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: any, init?: any) => { const u = String(url); if (/googleapis\.com/.test(u)) return G.fetchImpl(u, init ?? {}); return realFetch(url, init); }) as any;
 const signIn = () => localStorage.setItem("yuzu-google", JSON.stringify({ access: "tok1", expires: Date.now() + 3600e3, email: "amro@example.com", scope: "drive" }));
 
-const { setRetryScale, changesSince, startToken } = await import("../src/lib/google.ts");
-const { DriveSync, DriveMedia, PATHS, applyMediaChanges, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE } = await import("../src/lib/drive.ts");
+const { setRetryScale, changesSince, startToken, resetRange, rangeSupported } = await import("../src/lib/google.ts");
+const { DriveSync, DriveMedia, PATHS, backupsToKeep, listBackups, pruneBackups, readBackup, applyMediaChanges, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE } = await import("../src/lib/drive.ts");
 const { GitHubSync } = await import("../src/lib/sync.ts");
 type Snap = Parameters<typeof GitHubSync.shard>[0];
 before(() => { setRetryScale(0.002); signIn(); });
@@ -148,12 +148,12 @@ test("media bundles: 3,000 files go up in a handful of requests and come back by
   if (batch.length) await A.uploadBundle(ia, batch);
   await A.uploadBundle(ia, [big]);
   const upReqs = G.stats.requests - r0; const nb = Object.keys(ia.bundles ?? {}).length;
-  assert.ok(nb >= 3 && nb <= 8, `bundles: ${nb}`); assert.equal(upReqs, nb + 1, `one request per bundle (+1 loose big file): ${upReqs}`);
+  assert.ok(nb >= 3 && nb <= 8, `bundles: ${nb}`); assert.equal(upReqs, 2 * nb + 1, `two requests per bundle (the bundle and its table of contents), +1 for the loose big file: ${upReqs}`);
   assert.equal(ia.files["lecture.mp4"].o, undefined, "a big file goes loose");
   // device B: list (bundles show up with their header size), read the headers with ranged requests, then fetch everything
   const B = new DriveMedia({}); let ib = await B.ensure(null); ib = await B.list(ib);
-  const r1 = G.stats.requests; const left = await B.readHeaders(ib); assert.equal(left, 0);
-  assert.equal(G.stats.requests - r1, nb, "one small ranged read per bundle header");
+  const r1 = G.stats.requests, rg1 = G.stats.ranged; const left = await B.readHeaders(ib); assert.equal(left, 0);
+  assert.equal(G.stats.requests - r1, nb, "one small read per bundle (its table of contents)"); assert.equal(G.stats.ranged - rg1, 0, "…and no partial download needed");
   assert.equal(Object.keys(ib.files).length, 3002, "every bundled file, the loose one and the big one are known");
   const want = Object.entries(ib.files); const got = new Map<string, Blob>(); const r2 = G.stats.requests;
   await B.fetchMany(want, (n, b) => { got.set(n, b); }, () => false);
@@ -182,4 +182,47 @@ test("media bundles through a connection that drops 1 request in 5: nothing lost
   assert.equal(Object.keys(ib.files).length, 1200);
   const got = new Map<string, Blob>(); await B.fetchMany(Object.entries(ib.files), (n, b) => { got.set(n, b); }, () => false);
   for (const f of files) assert.deepEqual(new Uint8Array(await got.get(f.name)!.arrayBuffer()), new Uint8Array(await f.blob.arrayBuffer()));
+});
+
+test("media bundles when Google refuses partial downloads: contents from the table of contents, whole bundles, and a bundle without one", { timeout: 120_000 }, async () => {
+  G = fakeGoogle(); signIn(); resetRange();
+  const files = Array.from({ length: 700 }, (_, i) => ({ name: `p${i}.webp`, blob: new Blob([new Uint8Array(2000 + (i % 500)).fill(i % 199)], { type: "image/webp" }) }));
+  const A = new DriveMedia({}); let ia = await A.ensure(null); ia = await A.list(ia);
+  for (let i = 0; i < files.length; i += 350) await A.uploadBundle(ia, files.slice(i, i + 350));
+  // a legacy bundle (no table of contents), made by hand
+  const legacy = [{ name: "old1.webp", blob: new Blob([new Uint8Array(100).fill(5)], { type: "image/webp" }) }, { name: "old2.webp", blob: new Blob([new Uint8Array(100).fill(6)], { type: "image/webp" }) }];
+  await A.uploadBundle(ia, legacy); const tocIds = Object.values(ia.tocs!); const lastToc = tocIds[tocIds.length - 1]; G.files.get(lastToc)!.trashed = true;
+  // the browser blocks the Range header (a CORS refusal looks like a dropped connection)
+  G.fail = (_u, _m, h) => (h.Range || h.range ? "network" : null); setRetryScale(0.01);
+  const B = new DriveMedia({}); let ib = await B.ensure(null); ib = await B.list(ib);
+  assert.equal(Object.keys(ib.tocs!).length, 2, "two tables of contents listed (the third bundle has none)");
+  assert.ok(rangeSupported(), "not yet known");
+  const left = await B.readHeaders(ib); assert.equal(left, 0); assert.equal(Object.keys(ib.files).length, 702, "all files known, the legacy bundle's header read the slow way");
+  assert.equal(rangeSupported(), false, "the refusal was noticed and remembered");
+  const r = G.stats.requests; const got = new Map<string, Blob>();
+  await B.fetchMany(Object.entries(ib.files), (n, b) => { got.set(n, b); }, () => false); assert.equal(got.size, 702);
+  assert.ok(G.stats.requests - r <= 4, `whole bundles, one request each (${G.stats.requests - r})`);
+  for (const f of [...files, ...legacy]) assert.deepEqual(new Uint8Array(await got.get(f.name)!.arrayBuffer()), new Uint8Array(await f.blob.arrayBuffer()), f.name);
+  // one picture: the whole bundle once, then the next picture from the same bundle costs nothing
+  const r2 = G.stats.requests; const x = await B.fetchOne(ib.files["p10.webp"], "p10.webp"); const y = await B.fetchOne(ib.files["p11.webp"], "p11.webp");
+  assert.equal(G.stats.requests - r2, 1); assert.equal(x!.size, files[10].blob.size); assert.equal(y!.size, files[11].blob.size);
+  G.fail = null; setRetryScale(0.002); resetRange();
+});
+
+test("backups: a dated copy made on Drive's side, listed, read back identical, old ones pruned", { timeout: 120_000 }, async () => {
+  G = fakeGoogle(); signIn(); const cache: Record<string, string> = {};
+  const snap = bigCollection(3000, 4000, 1000); const a = new DriveSync(cache, "A"); await push(a, snap); await a.releaseLock();
+  const up0 = G.stats.uploads; const s = new DriveSync(cache, "A"); const r = await s.snapshot("2026-11-07");
+  assert.ok(r && r.files > 3, "files copied"); assert.equal(G.stats.uploads, up0, "nothing is uploaded: Drive copies by itself"); assert.ok(G.stats.copies >= r.files + 1);
+  const list = await listBackups(cache); assert.equal(list.length, 1); assert.equal(list[0].name, "2026-11-07"); assert.ok(list[0].rev);
+  const { snap: back } = await readBackup(cache, "2026-11-07");
+  assert.equal(checksum(sortById(back.notes!)), checksum(sortById(snap.notes))); assert.equal(checksum(sortById(back.cards!)), checksum(sortById(snap.cards))); assert.equal(back.reviews!.length, snap.reviews.length);
+  // the collection moves on; the backup stays as it was
+  const live = await new DriveSync(cache, "A").pullManifest(); assert.ok(live);
+  const again = await s.snapshot("2026-11-07"); assert.ok(again, "same day again replaces the folder"); assert.equal((await listBackups(cache)).length, 1);
+  // retention: 7 newest days, then one per week for 4 weeks
+  const names = Array.from({ length: 40 }, (_, i) => new Date(Date.UTC(2026, 10, 7) - i * 86400000).toISOString().slice(0, 10));
+  const keep = backupsToKeep(names); assert.equal(keep.size, 7 + 4); for (const n of names.slice(0, 7)) assert.ok(keep.has(n));
+  for (const n of names.slice(1, 14)) await new DriveSync(cache, "A").snapshot(n);
+  assert.equal((await listBackups(cache)).length, 14); const pruned = await pruneBackups(cache, 7, 4); assert.ok(pruned >= 1); assert.equal((await listBackups(cache)).length, 14 - pruned);
 });

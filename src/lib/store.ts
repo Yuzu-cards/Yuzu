@@ -11,7 +11,7 @@ import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
 import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError } from "./google";
-import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
+import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
 declare const __VERSION__: string;
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
@@ -624,6 +624,7 @@ export class Store {
       // The rota may have arrived from another device with the settings; Citrus gets a fresh status after every sync that changed something.
       const rota = this.settings.google?.rota ?? {}; if (JSON.stringify(rota) !== JSON.stringify(this.rota)) { this.rota = rota; this.rebuildShiftWeights(); }
       if (tokenValid()) this.writeHubStatus(false).catch(() => {});
+      if (drive && tokenValid()) this.backupSoon();
       // New notes arrived (a new device's first sync, cards added elsewhere): fetch the media they use now, not at the next check.
       if (pulledNotes && tokenValid() && this.settings.google?.driveMedia) this.scheduleDrive(1500);
       this.autoMaster().catch(() => {});
@@ -1072,6 +1073,50 @@ export class Store {
     for (const n of notes) { this.notes.set(n.id, n); delete this.tombstones["n:" + n.id]; } for (const c of cards) { this.cards.set(c.id, c); delete this.tombstones["c:" + c.id]; }
     await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); })());
     this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
+  }
+  // ---- Rolling Drive backups: one dated copy a day (server-side), 7 days + 4 weeks kept; restore brings back what's missing -------------
+  backups: { list: BackupInfo[]; busy: boolean; message: string; at: string } = { list: [], busy: false, message: "", at: "" };
+  private backupTimer: ReturnType<typeof setTimeout> | null = null;
+  private backupSoon() { if (this.backupTimer || this.backups.busy) return; this.backupTimer = setTimeout(() => { this.backupTimer = null; this.backupNow(false).catch(() => {}); }, 20000); }
+  /** Take today's backup when the collection changed since the last one (`force`: now, whatever the day). */
+  async backupNow(force = true): Promise<string> {
+    if (this.backups.busy) return "A backup is already running";
+    if (this.syncBackend() !== "drive" || !tokenValid()) return "Connect Google first";
+    const last = await db.getMeta<{ day: string; rev: string | null } | null>("backupAt", null); const day = todayName();
+    if (!force && last?.day === day) return "Today's backup exists";
+    if (!force && (this.dirty || this.syncStatus.state === "syncing")) return "Waiting for the sync";
+    this.backups = { ...this.backups, busy: true, message: "Backing up…" }; this.bump();
+    const sync = new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo);
+    try {
+      const m = await sync.pullManifest(); const rev = m ? ((m as any).rev ?? String(m.updatedAt)) : null;
+      if (!m) return "Nothing on Drive to back up yet";
+      if (!force && last?.rev === rev) { await db.setMeta("backupAt", { day, rev }); return "Unchanged since the last backup"; }
+      const lock = await sync.acquireLock(this.settings.deviceName || "device", await this.deviceId()); if (!lock.held) return `${lock.by ?? "Another device"} is syncing; backup later`;
+      try { const r = await sync.snapshot(day, (t) => { this.backups = { ...this.backups, message: t }; this.bump(); }); await db.setMeta("backupAt", { day, rev: r?.rev ?? rev }); } finally { await sync.releaseLock(); }
+      await pruneBackups(this.gcache); this.backups.list = await listBackups(this.gcache);
+      this.log(true, `Backup ${day}`, 0); return `Backed up (${day})`;
+    } catch (e: any) { return "Backup failed: " + (e?.message ?? e); }
+    finally { this.backups = { ...this.backups, busy: false, message: "" }; this.bump(); }
+  }
+  async refreshBackups(): Promise<BackupInfo[]> { if (!tokenValid()) return this.backups.list; this.backups.list = await listBackups(this.gcache); this.bump(); return this.backups.list; }
+  /**
+   * Put a backup's records back. `missing`: notes, cards and reviews that were deleted since (their tombstones are lifted).
+   * `all`: also any note or card that now differs from the backup (progress made since is lost for those cards).
+   * Restored records get fresh change stamps, so they win over other devices at the next sync.
+   */
+  async restoreBackup(name: string, mode: "missing" | "all"): Promise<{ notes: number; cards: number; reviews: number }> {
+    if (!tokenValid()) throw new Error("Google needs a tap to reconnect first");
+    const { snap } = await readBackup(this.gcache, name); const now = stamp(); const out = { notes: 0, cards: 0, reviews: 0 };
+    const nts = (snap.notetypes ?? []).filter((nt) => !this.notetypes.has(nt.id)); for (const nt of nts) this.notetypes.set(nt.id, nt); if (nts.length) await db.putMany("notetypes", nts);
+    const notes: Note[] = [], cards: Card[] = [];
+    for (const n of snap.notes ?? []) { const l = this.notes.get(n.id); if (l ? mode === "all" && JSON.stringify([l.fields, l.tags, l.ntid]) !== JSON.stringify([n.fields, n.tags, n.ntid]) : true) notes.push({ ...n, modified: now }); }
+    const have = new Set([...notes.map((n) => n.id), ...this.notes.keys()]);
+    for (const c of snap.cards ?? []) { if (!have.has(c.nid)) continue; const l = this.cards.get(c.id); if (l ? mode === "all" && (l.due !== c.due || l.state !== c.state || l.stability !== c.stability) : true) cards.push({ ...c, mod: now }); }
+    for (const n of notes) { this.notes.set(n.id, n); delete this.tombstones["n:" + n.id]; } for (const c of cards) { this.cards.set(c.id, c); delete this.tombstones["c:" + c.id]; }
+    const rids = new Set(this.reviews.map((r) => r.id)); const revs = (snap.reviews ?? []).filter((r) => !rids.has(r.id) && this.cards.has(r.cid));
+    for (const r of revs) delete this.tombstones["r:" + r.id]; if (revs.length) { this.reviews = this.reviews.concat(revs); }
+    await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); if (revs.length) await db.putMany("reviews", revs); await db.setMeta("tombstones", this.tombstones); })());
+    out.notes = notes.length; out.cards = cards.length; out.reviews = revs.length; this.treeCache.clear(); this.bump(); this.touch(); return out;
   }
   // ---- Mastery: retire cards whose next review is years away ----------------------------------------
   mastery: { log: MasteredEntry[]; kept: Record<string, number> } = { log: [], kept: {} };

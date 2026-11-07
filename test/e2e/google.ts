@@ -109,6 +109,16 @@ try {
   await idle(A); await A.waitForTimeout(5000); await idle(A);
   const r0 = G.stats.requests; await A.evaluate(() => (window as any).yuzu.sync("manual")); await A.waitForTimeout(300); await idle(A); const used = G.stats.requests - r0;
   ok("pull to refresh with nothing new costs one request", used === 1, `${used} requests · ${await y(A, "window.yuzu.syncStatus.message")}`);
+  // Backups: a dated copy on Drive's side; delete a note, restore it from the backup
+  const bmsg = await A.evaluate(() => (window as any).yuzu.backupNow(true)); const copies0 = G.stats.copies;
+  ok("Back up now makes a dated copy on Drive (server-side copies)", /Backed up/.test(bmsg) && copies0 > 0, bmsg + " · " + copies0 + " copies");
+  const nid = await A.evaluate(async () => { const y = (window as any).yuzu; const id = [...y.notes.keys()][0]; await y.deleteNotes([id]); return id; });
+  ok("…the note is deleted here", !(await A.evaluate((id) => (window as any).yuzu.notes.has(id), nid)));
+  const day = await A.evaluate(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; });
+  const rest = await A.evaluate(async (d) => (window as any).yuzu.restoreBackup(d, "missing"), day);
+  ok("Bring back deleted restores the note and its cards", rest.notes === 1 && rest.cards >= 1 && (await A.evaluate((id) => (window as any).yuzu.notes.has(id), nid)), JSON.stringify(rest));
+  await A.evaluate(() => (window as any).yuzu.sync("test")); await waitSync(A);
+  ok("…and the restored note survives the next sync (its tombstone is gone)", await A.evaluate((id) => (window as any).yuzu.notes.has(id), nid));
   // Lock: A holds it, B is told to wait
   await A.evaluate(() => (window as any).yuzu._db.setMeta("x", 1));
   const held = await A.evaluate(async () => { const { DriveSync } = await import("./assets/" + [...document.scripts].map((s) => s.src.split("/").pop()).find((n) => n?.startsWith("app-"))!).catch(() => ({ DriveSync: null })); return !!DriveSync; }).catch(() => false);

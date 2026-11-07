@@ -4,7 +4,7 @@ export function fakeGoogle() {
   let tick = 0; const now = () => Date.now() * 1000 + tick++; // strictly increasing "modifiedTime" (µs), so newest-wins is deterministic
   const changes: { id: string; removed: boolean }[] = []; let seq = 0; let nextId = 1;
   const events: any[] = [];
-  const stats = { requests: 0, uploads: 0, dropped: 0, throttled: 0, downloads: 0, ranged: 0 };
+  const stats = { requests: 0, uploads: 0, dropped: 0, throttled: 0, downloads: 0, ranged: 0, copies: 0 };
   const mkId = () => "f" + nextId++;
   const add = (name: string, parents: string[], mime: string, bytes: Uint8Array, props?: Record<string, string>) => { const id = mkId(); files.set(id, { id, name, parents, mime, bytes, t: now(), props }); changes.push({ id, removed: false }); return id; };
   const mt = (f: { t?: number }) => new Date((f.t ?? 0) / 1000).toISOString().replace("Z", String((f.t ?? 0) % 1000).padStart(3, "0") + "Z");
@@ -18,10 +18,10 @@ export function fakeGoogle() {
     at(path: string[]): Map<string, string> { let parent = "root"; for (const seg of path) { const f = [...files.values()].find((x) => x.name === seg && x.mime.endsWith("folder") && x.parents.includes(parent) && !x.trashed); if (!f) return new Map(); parent = f.id; } const m = new Map<string, string>(); for (const f of files.values()) if (f.parents.includes(parent) && !f.trashed && !f.mime.endsWith("folder")) m.set(f.name, new TextDecoder().decode(f.bytes)); return m; },
     stats,
     /** Return "network" (the request dies like a dropped connection), a status (e.g. 503, or 403 for "slow down"), or null. */
-    fail: null as null | ((u: URL, method: string) => "network" | number | null),
+    fail: null as null | ((u: URL, method: string, headers: Record<string, string>) => "network" | number | null),
     async fetchImpl(url: string, init: RequestInit = {}): Promise<Response> {
       const u = new URL(url); const m = init.method ?? "GET"; stats.requests++;
-      const f = this.fail?.(u, m) ?? null;
+      const f = this.fail?.(u, m, (init.headers as any) ?? {}) ?? null;
       if (f === "network") { stats.dropped++; throw new TypeError("Failed to fetch"); }
       if (f === 403) { stats.throttled++; return json({ error: { code: 403, message: "User Rate Limit Exceeded", errors: [{ reason: "userRateLimitExceeded" }] } }, 403); }
       if (typeof f === "number") { stats.throttled++; return json({ error: { code: f, message: "Backend Error" } }, f); }
@@ -44,6 +44,8 @@ export function fakeGoogle() {
         return { meta, bytes: buf.slice(h2, end) };
       };
       if (u.pathname === "/upload/drive/v3/files" && m === "POST") { const { meta, bytes } = await multipart(); stats.uploads++; return json({ id: add(meta.name, meta.parents, meta.mimeType ?? "image/png", bytes, meta.appProperties) }); }
+      const cp = /^\/drive\/v3\/files\/([^/]+)\/copy$/.exec(u.pathname);
+      if (cp && m === "POST") { const f = files.get(cp[1]); if (!f || f.trashed) return json({ error: { message: "not found" } }, 404); const b = JSON.parse(await bodyText() || "{}"); stats.copies++; return json({ id: add(b.name ?? f.name, b.parents ?? f.parents, f.mime, f.bytes.slice(), b.appProperties ?? f.props) }); }
       const dl = /^\/drive\/v3\/files\/([^/]+)$/.exec(u.pathname);
       if (dl && u.searchParams.get("alt") === "media") {
         const f = files.get(dl[1]); if (!f || f.trashed) return json({ error: { message: "not found" } }, 404); stats.downloads++;
