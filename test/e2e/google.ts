@@ -119,6 +119,25 @@ try {
   ok("Bring back deleted restores the note and its cards", rest.notes === 1 && rest.cards >= 1 && (await A.evaluate((id) => (window as any).yuzu.notes.has(id), nid)), JSON.stringify(rest));
   await A.evaluate(() => (window as any).yuzu.sync("test")); await waitSync(A);
   ok("…and the restored note survives the next sync (its tombstone is gone)", await A.evaluate((id) => (window as any).yuzu.notes.has(id), nid));
+  // Capture + outbox: a note and a photo reach Drive's outbox; marked cards leave improve.json; another app's drop and a pack come in through the inbox
+  const OUT = ["My Apps", "Yuzu", "collection", "outbox"], INB = ["My Apps", "Yuzu", "collection", "inbox"];
+  await A.evaluate(async () => { const y = (window as any).yuzu; await y.addCapture({ text: "Digoxin toxicity: hyperK, yellow vision", image: "data:image/png;base64,iVBORw0KGgo=" }); });
+  await A.waitForTimeout(1500);
+  const outFiles = [...G.at(OUT).entries()]; const capF = outFiles.find(([n]) => /^capture-.*\.json$/.test(n));
+  const capJ = capF ? JSON.parse(capF[1]) : null;
+  ok("a capture is left in Drive's outbox for Claude", !!capJ && capJ.yuzu_capture === 1 && /Digoxin/.test(capJ.text) && /^data:image/.test(capJ.image) && /inbox/.test(capJ.for_claude), capF?.[0]);
+  ok("…and is marked as with Claude here", await A.evaluate(() => (window as any).yuzu.captures[0].sent === true));
+  await A.evaluate(async () => { const y = (window as any).yuzu; const nid = [...y.notes.keys()][1]; await y.markImprove([nid], ["unclear"], "split this"); await y.flushOutbox(); });
+  const imp = G.at(OUT).get("improve.json"); ok("cards marked to improve are written to the outbox", !!imp && JSON.parse(imp).yuzu_improve === 1 && JSON.parse(imp).count >= 1, imp?.slice(0, 60));
+  await A.evaluate(async () => { const y = (window as any).yuzu; for (const nid of Object.keys(y.improve)) await y.markImprove([nid], [], ""); await y.flushOutbox(); });
+  ok("clearing the marks removes it again", !G.at(OUT).has("improve.json"));
+  G.seedFile("orange-note.json", INB, new TextEncoder().encode(JSON.stringify({ yuzu_capture: 1, app: "Orange", text: "Squat depth cue: knees out" })), "application/json");
+  G.seedFile("claude-pack.json", INB, new TextEncoder().encode(JSON.stringify({ yuzu_pack: 1, id: "from-claude", name: "Digoxin", category: "Medicine::Pharmacology", cards: [{ id: "d1", type: "mcq", question: "Digoxin toxicity causes?", options: ["Yellow vision", "Blue vision"], answer: 0 }] })), "application/json");
+  await A.evaluate(() => (window as any).yuzu.sync("manual")); await waitSync(A); await A.waitForTimeout(1200);
+  ok("another app's capture drop is taken from the inbox", await A.evaluate(() => (window as any).yuzu.captures.some((c: any) => c.source === "Orange" && /Squat/.test(c.text))) && !G.at(INB).has("orange-note.json"));
+  ok("…and a pack from Claude waits in the Inbox", await A.evaluate(() => (window as any).yuzu.inbox.some((e: any) => e.pack.id === "from-claude")));
+  const accepted = await A.evaluate(async () => { const y = (window as any).yuzu; const e = y.inbox.find((x: any) => x.pack.id === "from-claude"); return y.acceptInbox(e.sha, "all"); });
+  ok("accepting the pack adds its card and removes the file from Drive", /1 cards? added/.test(accepted) && !G.at(INB).has("claude-pack.json"), accepted);
   // Lock: A holds it, B is told to wait
   await A.evaluate(() => (window as any).yuzu._db.setMeta("x", 1));
   const held = await A.evaluate(async () => { const { DriveSync } = await import("./assets/" + [...document.scripts].map((s) => s.src.split("/").pop()).find((n) => n?.startsWith("app-"))!).catch(() => ({ DriveSync: null })); return !!DriveSync; }).catch(() => false);

@@ -4,6 +4,7 @@ import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle } from "../lib/render";
 import { MCQ_ID, parseOptions, shuffled } from "../lib/mcq";
+import { voiceSupported, speak, stopSpeaking, listen, stopListening, spokenText, backOnly, RATING_WORDS, LETTER_WORDS } from "../lib/voice";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
 import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
 import { systemColor, stamp, tilt } from "./theme";
@@ -221,7 +222,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [planMin, setPlanMin] = useState(() => { if (minutes) return minutes; try { return Number(localStorage.getItem("yuzu-plan-min") ?? 25); } catch { return 25; } });
   const [hookText, setHookText] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
-  const [menu, setMenu] = useState(false);
+  const [menu, setMenu] = useState(false); const [hands, setHands] = useState(false);
   const [word, setWord] = useState<WordHit | null>(null);
   const holdMode = (() => { try { return localStorage.getItem("yuzu-hold") === "system" ? "system" : "yuzu"; } catch { return "yuzu"; } })();
   const total = queue.length;
@@ -267,6 +268,30 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   // Typed answers for language cards: the answer is whatever the back shows that the front did not.
   const mcq = useMemo(() => (card && note && nt && nt.id === MCQ_ID ? shuffled(parseOptions(note.fields[1] ?? ""), card.id + ":" + card.reps) : null), [card?.id, card?.reps, rev]);
   const mcqRight = picked !== null && !!mcq && !!mcq[picked]?.correct;
+  // Hands-free: read the question, give a moment to think, read the answer, then listen for again / hard / good / easy (or a letter for multiple choice).
+  useEffect(() => {
+    if (!hands || !card || !rendered) return; let dead = false; const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    // a beat first: when the card changes the answer side is still showing for one render, and must not be read
+    const t = setTimeout(() => { (async () => {
+      if (!showAnswer) {
+        const q = spokenText(rendered.front); const opts = mcq ? mcq.map((o, i) => `${String.fromCharCode(65 + i)}. ${o.text}`).join(". ") : "";
+        await speak(opts ? `${q}. ${opts}` : q); if (dead) return;
+        if (mcq) { const k = await listen(LETTER_WORDS, 12000); if (dead) return; if (k !== null && mcq[Number(k)]) { setPicked(Number(k)); setShowAnswer(true); return; } }
+        else await wait(Math.min(9000, 3000 + q.split(" ").length * 120));
+        if (dead) return; setShowAnswer(true);
+      } else {
+        const say = mcq && picked !== null ? `${mcqRight ? "Correct." : "Not quite."} ${mcq.find((o) => o.correct)?.text ?? ""}. ${backOnly(rendered.back)}` : backOnly(rendered.back);
+        await speak(say); if (dead) return;
+        for (let tryNo = 0; tryNo < 2; tryNo++) {
+          const g = await listen(RATING_WORDS, 12000); if (dead) return;
+          if (g) { answer(Number(g) as Rating); return; }
+          if (tryNo === 0) { await speak("Say again, hard, good or easy."); if (dead) return; }
+        }
+        setHands(false); flash("Hands-free paused — no answer heard");
+      }
+    })(); }, 40);
+    return () => { dead = true; clearTimeout(t); stopSpeaking(); stopListening(); };
+  }, [hands, card?.id, showAnswer]);
   const typing = !!card && store.settings.typeAnswers && card.source.startsWith("Languages") && !!nt && nt.kind === "standard";
   const answerText = useMemo(() => {
     if (!typing || !nt || !note) return "";
@@ -442,6 +467,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
         <div className="menu">
           <button onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
+          {voiceSupported() && <button onClick={() => { setMenu(false); setHands((h) => !h); flash(hands ? "Hands-free off" : "Hands-free on — say again, hard, good or easy"); }}>{hands ? "Stop hands-free" : "Hands-free (read aloud, answer by voice)"}</button>}
           <button onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
           <button onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
           <button onClick={() => { setMenu(false); setImproveOpen(true); }}><IconEdit /> {store.improveFor(card.nid) ? "Marked to improve — change" : "Needs improving…"}</button>

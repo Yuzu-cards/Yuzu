@@ -48,3 +48,28 @@ self.addEventListener("fetch", (event) => {
     })());
   }
 });
+
+// ---- Reminders. The app leaves { on, at, due, goalMet, light, notifiedOn … } in IndexedDB (meta "nudge"); periodic background sync
+// (installed Android Chrome) wakes this worker now and then, and it shows one notification a day when it's time and cards are due.
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function shouldNudge(n, now) {
+  if (!n || !n.on || !(n.due > 0)) return false;
+  const today = ymd(now); if (n.notifiedOn === today) return false;
+  const [h, m] = String(n.at || "19:00").split(":").map(Number); if (now.getHours() * 60 + now.getMinutes() < h * 60 + m) return false;
+  if (n.date === today && n.goalMet) return false; // already did today's goal
+  if (n.skipLight && n.light && n.light[today]) return false; // a night shift or the day after: Yuzu stays quiet
+  return true;
+}
+const metaDb = () => new Promise((res, rej) => { const r = indexedDB.open("yuzu"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function metaGet(key) { const db = await metaDb(); return new Promise((res) => { const q = db.transaction("meta").objectStore("meta").get(key); q.onsuccess = () => res(q.result ? q.result.value : undefined); q.onerror = () => res(undefined); }); }
+async function metaPut(key, value) { const db = await metaDb(); return new Promise((res) => { const tx = db.transaction("meta", "readwrite"); tx.objectStore("meta").put({ key, value }); tx.oncomplete = () => res(); tx.onerror = () => res(); }); }
+async function nudge() {
+  const n = await metaGet("nudge"); const now = new Date(); if (!shouldNudge(n, now)) return;
+  await self.registration.showNotification("Yuzu", { body: `${n.due.toLocaleString()} cards due${n.minutes ? ` (about ${n.minutes} min)` : ""}.`, tag: "yuzu-nudge", icon: "icons/icon-192.png", badge: "icons/favicon-32.png" });
+  await metaPut("nudge", { ...n, notifiedOn: ymd(now) });
+}
+self.addEventListener("periodicsync", (event) => { if (event.tag === "yuzu-nudge") event.waitUntil(nudge()); });
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil((async () => { const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true }); if (all[0]) return all[0].focus(); return self.clients.openWindow("./"); })());
+});

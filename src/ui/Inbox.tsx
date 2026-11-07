@@ -37,8 +37,8 @@ function Review({ sha, onDone }: { sha: string; onDone: () => void }) {
       </div>
       {cards.map((c, i) => (
         <button key={i} className="list-row" style={{ width: "100%", textAlign: "left", opacity: dropped.has(i) ? 0.4 : 1, flexDirection: "column", alignItems: "stretch", gap: 2 }} onClick={() => { const d = new Set(dropped); d.has(i) ? d.delete(i) : d.add(i); setDropped(d); }}>
-          <span style={{ whiteSpace: "normal" }}>{dropped.has(i) ? "✗ " : ""}{clean(c.text ?? c.front)}</span>
-          {(c.back || c.extra) && <span className="small muted" style={{ whiteSpace: "normal" }}>{clean(c.back ?? c.extra).slice(0, 160)}</span>}
+          <span style={{ whiteSpace: "normal" }}>{dropped.has(i) ? "✗ " : ""}{clean(c.text ?? c.front ?? c.question ?? (c.masks ? `${c.front ?? "Image"} (image occlusion, ${c.masks.length} boxes)` : ""))}</span>
+          {(c.back || c.extra || c.options || c.masks) && <span className="small muted" style={{ whiteSpace: "normal" }}>{clean(c.back ?? c.extra ?? (c.options ? c.options.map((o: any, i: number) => (typeof o === "string" ? (i === c.answer || String.fromCharCode(65 + i) === c.answer ? "✓ " : "") + o : (o.correct ? "✓ " : "") + o.text)).join(" · ") : (c.masks ?? []).map((m: any) => m.label).filter(Boolean).join(" · "))).slice(0, 160)}</span>}
         </button>
       ))}
       <div className="row" style={{ marginTop: 12, position: "sticky", bottom: "calc(76px + var(--safe-b))", background: "var(--ink)", padding: "8px 0" }}>

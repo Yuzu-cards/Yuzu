@@ -58,3 +58,31 @@ test("pack MCQ cards: options by index or object, bad ones skipped, revision kee
   const a = shuffled([1, 2, 3, 4, 5], "c1:0"), b = shuffled([1, 2, 3, 4, 5], "c1:0"); assert.deepEqual(a, b); assert.deepEqual([...a].sort(), [1, 2, 3, 4, 5]);
   assert.notDeepEqual(shuffled(Array.from({ length: 12 }, (_, i) => i), "x:0"), shuffled(Array.from({ length: 12 }, (_, i) => i), "x:1"));
 });
+
+test("voice helpers: what is spoken, what is heard", async () => {
+  const { spokenText, backOnly, matchWord, RATING_WORDS, LETTER_WORDS } = await import("../src/lib/voice.ts");
+  assert.equal(spokenText('<style>.a{}</style><div>K <b>above</b> 5.5 is <span class="cloze" data-cloze="1">[...]</span>&nbsp;&amp; ECG</div>'), "K above 5.5 is blank and ECG");
+  assert.equal(backOnly("<div>Question?</div><hr id=answer>Calcium <b>gluconate</b>"), "Calcium gluconate");
+  assert.equal(backOnly('<div>Q</div><hr id="answer">'), "Q", "an empty answer part falls back to the whole back");
+  assert.equal(matchWord("um I'd say good", RATING_WORDS), "3"); assert.equal(matchWord("that was hard", RATING_WORDS), "2"); assert.equal(matchWord("again please", RATING_WORDS), "1"); assert.equal(matchWord("easy", RATING_WORDS), "4");
+  assert.equal(matchWord("goodness", RATING_WORDS), null, "whole words only"); assert.equal(matchWord("it is option b", LETTER_WORDS), "1"); assert.equal(matchWord("blah", RATING_WORDS), null);
+});
+
+test("reminders: the service worker's decision (when it's time, due, goal met, light days, once a day)", async () => {
+  const vm = await import("node:vm"); const src = fs.readFileSync("src/sw.js", "utf8").replace("__VERSION__", "t").replace("__PRECACHE__", "[]");
+  const ctx: any = { self: { addEventListener() {}, registration: {} }, caches: {}, location: {}, indexedDB: {}, Request: class {}, URL }; vm.createContext(ctx); vm.runInContext(src + "\nthis.shouldNudge = shouldNudge;", ctx);
+  const at = (h: number, m = 0) => new Date(2026, 10, 7, h, m); const ymd = "2026-11-07";
+  const base = { on: true, at: "19:00", due: 200, goalMet: false, skipLight: true, light: { [ymd]: false }, date: ymd, notifiedOn: "" };
+  assert.equal(ctx.shouldNudge(base, at(19, 5)), true); assert.equal(ctx.shouldNudge(base, at(18, 59)), false, "not before the time");
+  assert.equal(ctx.shouldNudge({ ...base, on: false }, at(20)), false); assert.equal(ctx.shouldNudge({ ...base, due: 0 }, at(20)), false, "nothing due");
+  assert.equal(ctx.shouldNudge({ ...base, goalMet: true }, at(20)), false, "goal already met today"); assert.equal(ctx.shouldNudge({ ...base, goalMet: true, date: "2026-11-06" }, at(20)), true, "yesterday's goal doesn't count");
+  assert.equal(ctx.shouldNudge({ ...base, light: { [ymd]: true } }, at(20)), false, "a light day stays quiet"); assert.equal(ctx.shouldNudge({ ...base, light: { [ymd]: true }, skipLight: false }, at(20)), true);
+  assert.equal(ctx.shouldNudge({ ...base, notifiedOn: ymd }, at(21)), false, "once a day"); assert.equal(ctx.shouldNudge({ ...base, notifiedOn: "2026-11-06" }, at(21)), true);
+});
+
+test("roleplay prompt: facts, style, the way back into Yuzu", async () => {
+  const { buildRoleplayPrompt, STYLES } = await import("../src/lib/roleplay.ts");
+  const p = buildRoleplayPrompt({ style: "case", goal: "Step 1", facts: [{ q: "Antidote for digoxin toxicity?", a: "Fab fragments" }, { q: "Peaked T waves", a: "" }] });
+  assert.match(p, /1\. Antidote for digoxin toxicity\? → Fab fragments\n2\. Peaked T waves\n/); assert.match(p, /revising for Step 1/); assert.ok(p.includes(STYLES.case.role)); assert.match(p, /yuzu_pack/); assert.match(p, /current guidelines/);
+  assert.doesNotMatch(buildRoleplayPrompt({ style: "oral", facts: [] }), /revising for/);
+});

@@ -5,8 +5,10 @@ import { rate, replay, retrievability, DEFAULT_CONFIG, type SchedulerConfig, DAY
 import { fit as fitWeights, calibration as calib } from "../scheduler/optimize";
 import type { ImportResult } from "../import/anki";
 import { parsePack, describePack } from "../import/pack";
-import { noteTitle } from "./render";
+import { noteTitle, renderCard } from "./render";
 import { stamp, observe } from "./clock";
+import { MCQ_ID, parseOptions } from "./mcq";
+import { spokenText, backOnly } from "./voice";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
@@ -77,6 +79,7 @@ export const DEFAULT_SETTINGS: Settings = {
 export interface Deadline { id: string; name: string; /** yyyy-mm-dd */ date: string; view: View; /** deck path ("" = everything) */ path: string }
 export interface ExamStatus { daysLeft: number; total: number; seen: number; unseen: number; coverage: number; predicted: number | null; weak: number; needPerDay: number; finishOn: string | null; onTrack: boolean; reviewDays: number }
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
+export interface Capture { id: string; at: number; text: string; image?: string; source: string; sent: boolean }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
 export interface SyncLogEntry { at: number; ok: boolean; message: string; ms: number }
 
@@ -628,7 +631,8 @@ export class Store {
       // The rota may have arrived from another device with the settings; Citrus gets a fresh status after every sync that changed something.
       const rota = this.settings.google?.rota ?? {}; if (JSON.stringify(rota) !== JSON.stringify(this.rota)) { this.rota = rota; this.rebuildShiftWeights(); }
       if (tokenValid()) this.writeHubStatus(false).catch(() => {});
-      if (drive && tokenValid()) this.backupSoon();
+      if (this.reminders.on) this.updateNudge();
+      if (drive && tokenValid()) { this.backupSoon(); this.flushOutbox().catch(() => {}); }
       // New notes arrived (a new device's first sync, cards added elsewhere): fetch the media they use now, not at the next check.
       if (pulledNotes && tokenValid() && this.settings.google?.driveMedia) this.scheduleDrive(1500);
       this.autoMaster().catch(() => {});
@@ -742,6 +746,8 @@ export class Store {
       db.getMeta<Record<string, string>>("gcache", {}), db.getMeta<string[]>("dismissedPairs", []), db.getMeta<typeof this.inbox>("inbox", []), db.getMeta<typeof this.undoStack>("undoStack", []),
       db.getMeta<typeof this.hooks>("hooks", {}), db.getMeta<typeof this.improve>("improve", {}), db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} }), db.getMeta<typeof this.packLog>("packLog", []), db.getMeta<typeof this.mergeLog>("mergeLog2", []),
     ]);
+    this.captures = await db.getMeta<Capture[]>("captures", []); this.reminders = { ...this.reminders, ...(await db.getMeta<any>("reminders", {})) };
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden" && this.reminders.on) this.updateNudge(); });
     this.tombstones = tombstones; this.dirty = dirty; this.syncLog = syncLog; this.driveIndex = driveIndex;
     if (rs) { this.rotaSeen = rs.seen; this.rotaCheckedOn = rs.on; }
     if (pl) { this.plan = pl.plan; this.planAt = pl.at; }
@@ -1031,7 +1037,8 @@ export class Store {
     let changed = false;
     for (const f of files) {
       if (seen.has(f.sha) || this.inbox.some((x) => x.sha === f.sha)) continue;
-      try { const t = await gh.readInbox(f.name); if (!t) continue; const pack = JSON.parse(t); if (pack?.yuzu_pack === 1 || pack?.yuzu_curation === 1) { this.inbox.push({ file: f.name, sha: f.sha, at: Date.now(), pack }); changed = true; } seen.add(f.sha); }
+      try { const t = await gh.readInbox(f.name); if (!t) continue; const pack = JSON.parse(t); if (pack?.yuzu_capture === 1) { await this.takeCapture(pack, gh, f); }
+        else if (pack?.yuzu_pack === 1 || pack?.yuzu_curation === 1) { this.inbox.push({ file: f.name, sha: f.sha, at: Date.now(), pack }); changed = true; } seen.add(f.sha); }
       catch { /* skip unreadable file */ }
     }
     // Files removed from the repo (handled on another device) leave the local inbox too.
@@ -1058,8 +1065,43 @@ export class Store {
   async dismissInbox(sha: string) {
     const e = this.inbox.find((x) => x.sha === sha); if (!e) return;
     this.inbox = this.inbox.filter((x) => x.sha !== sha); await db.setMeta("inbox", this.inbox); this.bump();
-    if (this.syncConfigured()) { const cfg = this.settings.sync; await new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(e.file, e.sha).catch(() => {}); }
+    if (this.syncBackend() === "drive") { if (tokenValid()) await new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo).deleteInbox(e.file, e.sha).catch(() => {}); }
+    else if (this.syncConfigured()) { const cfg = this.settings.sync; await new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(e.file, e.sha).catch(() => {}); }
   }
+  // ---- Captures: a thought or a photo saved in a few seconds, left in Drive's outbox for Claude to turn into cards ------------------
+  captures: Capture[] = [];
+  /** Save a capture here at once; it goes to Drive's outbox (My Apps/Yuzu/collection/outbox) as soon as Google is connected. */
+  async addCapture(c: { text: string; image?: string; source?: string }): Promise<void> {
+    if (!c.text.trim() && !c.image) return;
+    const cap: Capture = { id: "cap" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now(), text: c.text.trim(), image: c.image, source: c.source ?? "yuzu", sent: false };
+    this.captures = [cap, ...this.captures]; await db.setMeta("captures", this.captures); this.bump();
+    if (tokenValid()) this.flushOutbox().catch(() => {});
+  }
+  async removeCapture(id: string) { this.captures = this.captures.filter((c) => c.id !== id); await db.setMeta("captures", this.captures); this.bump(); }
+  /** A capture another app dropped in the inbox as { yuzu_capture: 1, text, image?, app? }: kept here, the inbox file removed. */
+  private async takeCapture(p: any, gh: GitHubSync | DriveSync, f: { name: string; sha: string }) {
+    if (typeof p.text !== "string" && typeof p.image !== "string") return;
+    const cap: Capture = { id: "cap" + (p.id ? String(p.id).replace(/\W/g, "") : Date.now().toString(36) + Math.random().toString(36).slice(2, 6)), at: Date.now(), text: String(p.text ?? "").trim(), image: typeof p.image === "string" && /^data:image\//.test(p.image) ? p.image : undefined, source: String(p.app ?? "another app").slice(0, 40), sent: false };
+    if (!this.captures.some((x) => x.id === cap.id)) { this.captures = [cap, ...this.captures]; await db.setMeta("captures", this.captures); }
+    if (gh instanceof DriveSync) await gh.deleteInbox(f.name, f.sha).catch(() => {});
+  }
+  /** Leave pending captures and the improve list in Drive's outbox. Claude reads them, and answers through the inbox. */
+  async flushOutbox(): Promise<number> {
+    if (this.syncBackend() !== "drive" || !tokenValid() || this.outboxBusy) return 0; this.outboxBusy = true;
+    try {
+      const d = new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo); let n = 0;
+      for (const c of this.captures.filter((x) => !x.sent)) {
+        await d.putOutbox(`capture-${c.id}.json`, JSON.stringify({ yuzu_capture: 1, id: c.id, at: new Date(c.at).toISOString(), from: c.source, text: c.text, image: c.image, for_claude: "Turn this note or photo into Yuzu cards (a pack: {\"yuzu_pack\":1, ...}) and put the JSON file in ../inbox. Delete this file when done." }));
+        this.captures = this.captures.map((x) => (x.id === c.id ? { ...x, sent: true } : x)); n++;
+      }
+      if (n) await db.setMeta("captures", this.captures);
+      // The cards marked for improving, as Yuzu's own export: rewritten when the list changes, removed when it empties.
+      const list = this.improveList(); const fp = list.map((x) => x.note.id + ":" + x.mark.r.join(",") + x.mark.t + x.mark.m).sort().join("|"); const prev = await db.getMeta<string>("improveSent", "");
+      if (fp !== prev) { const have = (await d.listOutbox()).find((f) => f.name === "improve.json"); if (list.length) await d.putOutbox("improve.json", JSON.stringify(this.improveExport()), have?.id); else if (have) await d.deleteOutbox(have.id); await db.setMeta("improveSent", fp); n++; }
+      if (n) this.bump(); return n;
+    } finally { this.outboxBusy = false; }
+  }
+  private outboxBusy = false;
   /** Delete notes with all their cards (synced; later Anki imports don't bring them back). Returns the last deletion for undo. */
   lastDeleted: { notes: Note[]; cards: Card[] } | null = null;
   /** note id → its cards, built once (cardsOfNote scans all cards; fine for one note, not for thousands). */
@@ -1125,6 +1167,51 @@ export class Store {
     for (const r of revs) delete this.tombstones["r:" + r.id]; if (revs.length) { this.reviews = this.reviews.concat(revs); }
     await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); if (revs.length) await db.putMany("reviews", revs); await db.setMeta("tombstones", this.tombstones); })());
     out.notes = notes.length; out.cards = cards.length; out.reviews = revs.length; this.treeCache.clear(); this.bump(); this.touch(); return out;
+  }
+  // ---- Reminders: a notification at your time if cards are due and today's goal isn't met -------------------------------------------
+  // A web app has no server to push from. Yuzu leaves the facts (cards due, goal met, light days) where its service worker can read
+  // them, and Android Chrome's periodic background sync wakes the worker a few times a day; the worker decides (see sw.js). Where that
+  // isn't offered (iPhone, desktop Safari, Chrome not installed) nothing can wake Yuzu: Citrus Maxima's calendar block is the dependable one.
+  reminders: { on: boolean; at: string; skipLight: boolean } = { on: false, at: "19:00", skipLight: true };
+  /** Turn reminders on/off or change them. Call from a tap (the notification permission prompt needs one). Returns what to tell the user. */
+  async setReminders(patch: Partial<{ on: boolean; at: string; skipLight: boolean }>): Promise<string> {
+    this.reminders = { ...this.reminders, ...patch }; let msg = this.reminders.on ? "Reminders on." : "Reminders off.";
+    if (this.reminders.on) {
+      let perm: string = typeof Notification !== "undefined" ? Notification.permission : "denied";
+      if (perm === "default") perm = await Notification.requestPermission().catch(() => "denied");
+      if (perm !== "granted") { this.reminders.on = false; msg = "Notifications are blocked for Yuzu: allow them in the browser's site settings first."; }
+      else {
+        const reg = await navigator.serviceWorker?.ready.catch(() => null) as any;
+        let periodic = false; try { if (reg?.periodicSync) { await reg.periodicSync.register("yuzu-nudge", { minInterval: 3 * 3600e3 }); periodic = true; } } catch { /* not installed, or not allowed */ }
+        msg = periodic ? `Reminders on: around ${this.reminders.at} if cards are due and today's goal isn't met. Android decides the exact moment (usually within a few hours).` : "Notifications are allowed, but this browser can't wake Yuzu in the background (it needs the installed app on Android Chrome). Use Citrus Maxima's calendar block for an exact-time reminder.";
+      }
+    } else { try { const reg = await navigator.serviceWorker?.ready as any; await reg?.periodicSync?.unregister("yuzu-nudge"); } catch { /* fine */ } }
+    await db.setMeta("reminders", this.reminders); await this.updateNudge(); this.bump(); return msg;
+  }
+  /** Leave the numbers the service worker needs. Called when the app goes to the background and after a sync. */
+  async updateNudge(): Promise<void> {
+    try {
+      const r = this.reminders; const now = Date.now(); const today = this.isoToday(); const s = this.hubStatus(); const st = this.stats(now);
+      const light: Record<string, boolean> = {}; for (let i = 0; i < 3; i++) { const iso = this.isoToday(new Date(now + i * DAY)); light[iso] = (this.shiftWeights[iso] ?? 1) < 1; }
+      const prev = await db.getMeta<any>("nudge", {});
+      await db.setMeta("nudge", { on: r.on, at: r.at, skipLight: r.skipLight, due: s.due, minutes: s.estimatedMinutes, goalMet: st.goal > 0 && st.today >= st.goal, light, date: today, notifiedOn: prev.notifiedOn ?? "" });
+    } catch { /* best effort */ }
+  }
+  /** The facts behind cards (a question and its answer as plain text), for the "Practice with Claude" prompt. Image-only cards are left out. */
+  factsOf(cards: Card[]): { q: string; a: string }[] {
+    const out: { q: string; a: string }[] = [];
+    for (const c of cards) {
+      const note = this.notes.get(c.nid); const nt = note && this.notetypes.get(note.ntid); if (!note || !nt || nt.id === "yuzu-io") continue;
+      const r = renderCard({ note, notetype: nt, ord: c.ord, deck: c.source }); const q = spokenText(r.front).replace(/ blank /g, " … ").replace(/\bblank\b/g, "…"); const a = backOnly(r.back);
+      if (nt.id === MCQ_ID) { const opts = parseOptions(note.fields[1] ?? ""); out.push({ q: spokenText(note.fields[0] ?? ""), a: `${opts.find((o) => o.correct)?.text ?? ""}${note.fields[4] ? ". " + spokenText(note.fields[4]) : ""}` }); }
+      else if (nt.kind === "cloze") out.push({ q: a, a: "" }); else if (q) out.push({ q, a: a === q ? "" : a });
+    }
+    return out.filter((f) => f.q);
+  }
+  /** The cards you are most likely to have forgotten right now (lowest recall first), or the weakest for an exam. */
+  weakestCards(n = 10, exam?: Deadline, now = Date.now()): Card[] {
+    if (exam) return this.examWeakest(exam, n, now);
+    return [...this.cards.values()].filter((c) => !c.suspended && c.state !== "new" && c.lastReview).map((c) => ({ c, r: retrievability((now - c.lastReview) / DAY, c.stability) })).sort((a, b) => a.r - b.r).slice(0, n * 3).map((x) => x.c).filter((c, i, a) => a.findIndex((d) => d.nid === c.nid) === i).slice(0, n);
   }
   // ---- Exam countdown and mixed drills ---------------------------------------------------------------------------------------
   /** Where a deadline stands: how much of its scope is introduced, how many new cards a day it needs, and what you'd remember on the day if you stopped reviewing today. */

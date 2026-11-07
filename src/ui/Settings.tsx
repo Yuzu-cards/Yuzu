@@ -197,6 +197,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
 
       </details>
       <ExamSettings />
+      <ReminderSettings />
       {reversible.length > 0 && <details className="section"><summary>Language cards <span className="small muted">reverse and typed cards</span></summary>
         <div className="card-box">
           <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
@@ -557,6 +558,23 @@ function ExamSettings() {
         <div className="field"><label>Date</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
         <div className="field"><label>Covers</label><select value={path} onChange={(e) => setPath(e.target.value)}><option value="">Everything</option>{decks.map((d) => <option key={d.path} value={d.path}>{d.name}</option>)}</select></div>
         <button className="btn primary" disabled={!name.trim() || !date} onClick={async () => { await store.saveSettings({ deadlines: [...list, { id: "x" + Date.now().toString(36), name: name.trim(), date, view: "decks", path }] }); setName(""); setDate(""); setPath(""); }}>Add exam</button>
+      </div>
+    </details>
+  );
+}
+
+/** A daily reminder from Android's background sync (see the note in the store about what a web app can and can't do). */
+function ReminderSettings() {
+  const [msg, setMsg] = useState(""); const [busy, setBusy] = useState(false); store.getVersion(); const r = store.reminders;
+  const act = async (f: () => Promise<string>) => { setBusy(true); try { setMsg(await f()); } catch (e: any) { setMsg(e?.message ?? String(e)); } finally { setBusy(false); } };
+  return (
+    <details className="section"><summary>Reminders <span className="small muted">{r.on ? `around ${r.at}` : "off"}</span></summary>
+      <div className="card-box">
+        <p className="small muted" style={{ marginTop: 0 }}>One notification a day, after the time you choose, if cards are due and today's goal isn't met. It stays quiet on a night shift and the day after. Works in the installed app on Android Chrome; elsewhere Yuzu can't wake itself, so let Citrus Maxima put a calendar block in your day.</p>
+        <label className="row small"><input type="checkbox" checked={r.on} disabled={busy} onChange={(e) => act(() => store.setReminders({ on: e.target.checked }))} /> Remind me</label>
+        <div className="field"><label>After</label><input type="time" value={r.at} onChange={(e) => act(() => store.setReminders({ at: e.target.value || "19:00" }))} /></div>
+        <label className="row small"><input type="checkbox" checked={r.skipLight} onChange={(e) => act(() => store.setReminders({ skipLight: e.target.checked }))} /> Not on light days (night shifts)</label>
+        {msg && <p className="small" style={{ marginBottom: 0 }}>{msg}</p>}
       </div>
     </details>
   );

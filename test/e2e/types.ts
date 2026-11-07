@@ -72,9 +72,41 @@ try {
   await p3.click("nav.tabs >> text=Today"); await p3.waitForSelector("text=Step 1", { timeout: 5000 });
   ok("Today shows the countdown and its verdict", /10 days|9 days|11 days/.test(await p3.locator(".screen").innerText()) && /Needs \d+ new cards a day/.test(await p3.locator(".screen").innerText()));
   const hs = await p3.evaluate(async () => (await (window as any).yuzu.hubStatus())); ok("status.json asks about the exam when behind", hs.pending.some((t: string) => /Step 1 in \d+ days: needs/.test(t)) && hs.extra.exams?.[0]?.name === "Step 1", JSON.stringify(hs.pending));
+  await p3.click("text=Practice with Claude"); await p3.waitForSelector('textarea[aria-label="Prompt for Claude"]');
+  const pr = await p3.inputValue('textarea[aria-label="Prompt for Claude"]');
+  ok("Practice with Claude builds a prompt from the weak cards", /\n1\. (Cardio|Renal) question \d+ about topic/.test(pr) && /Step 1/.test(pr) === false && /yuzu_pack/.test(pr), pr.slice(0, 120).replace(/\n/g, " "));
+  await p3.click("button:has-text('Patient case')"); ok("…the style changes the role it plays", /emergency department consultant/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
+  await p3.selectOption("select >> nth=0", { label: "Step 1 (exam)" }); ok("…and an exam can be chosen as the source", /revising for Step 1/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
+  await p3.click('button[aria-label="Close practice"]');
   await p3.click("text=Mixed drill"); await p3.waitForSelector(".study .card-host", { timeout: 10000 });
   ok("the mixed drill opens as a study session", (await p3.locator(".study-top").count()) > 0);
   await p3.screenshot({ path: "test/e2e/shots/exam.png" });
+  // ---- Hands-free review (speech mocked: the card is "said", then the answer "heard")
+  const ctx4 = await browser.newContext({ viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true }); const p4 = await ctx4.newPage();
+  p4.on("pageerror", (e) => errors.push("voice: " + e.message)); p4.on("console", (m) => { if (m.type() === "error" && !/ERR_TUNNEL|ERR_FAILED|favicon/.test(m.text())) errors.push("voice console: " + m.text()); });
+  await p4.addInitScript(() => {
+    (window as any).__said = []; Object.defineProperty(window, "speechSynthesis", { configurable: true, value: { speak(u: any) { (window as any).__said.push(u.text); setTimeout(() => u.onend && u.onend(), 5); }, cancel() {} } });
+    (window as any).SpeechSynthesisUtterance = function (this: any, t: string) { this.text = t; };
+    (window as any).SpeechRecognition = function (this: any) { this.start = () => { setTimeout(() => this.onresult && this.onresult({ resultIndex: 0, results: [[{ transcript: "okay, good" }]] }), 30); }; this.abort = () => {}; };
+  });
+  await p4.goto(`http://127.0.0.1:${port}/`); await p4.waitForFunction(() => (window as any).yuzu?.loaded, null, { timeout: 20000 });
+  await p4.evaluate(() => (window as any).yuzu.importPack({ yuzu_pack: 1, id: "v", category: "Medicine::Voice", cards: [{ id: "a", front: "Antidote for digoxin toxicity?", back: "Digoxin-specific Fab fragments" }, { id: "b", front: "Antidote for paracetamol overdose?", back: "N-acetylcysteine" }] }));
+  await p4.reload(); await p4.waitForSelector("text=cards ready", { timeout: 20000 }); await p4.click(".hero >> text=Study"); await p4.waitForSelector(".study .card-host", { timeout: 15000 });
+  await p4.click('button[aria-label="More"]'); await p4.click("text=Hands-free (read aloud, answer by voice)");
+  await p4.waitForFunction(() => (window as any).yuzu.reviews.length >= 2, null, { timeout: 40000 }).catch(() => {});
+  const vs = await p4.evaluate(() => ({ said: (window as any).__said, ratings: (window as any).yuzu.reviews.map((r: any) => r.rating) }));
+  ok("hands-free reads the question, then the answer", vs.said.some((t: string) => /Antidote for (digoxin|paracetamol)/.test(t)) && vs.said.some((t: string) => /Fab fragments|acetylcysteine/.test(t)), JSON.stringify(vs.said).slice(0, 200));
+  ok("…and grades each card by what is heard (\"okay, good\" = Good)", vs.ratings.length >= 2 && vs.ratings.every((r: number) => r === 3), JSON.stringify(vs.ratings));
+  // ---- Reminders: permission asked from a tap, the facts the service worker reads are left in IndexedDB
+  const ctx5 = await browser.newContext({ viewport: { width: 412, height: 915 }, permissions: ["notifications"] }); const p5 = await ctx5.newPage();
+  p5.on("pageerror", (e) => errors.push("remind: " + e.message));
+  await p5.addInitScript(`Object.defineProperty(window, "Notification", { configurable: true, value: { permission: "granted", requestPermission: () => Promise.resolve("granted") } });`); // headless Chromium reports "denied" whatever is granted
+  await p5.goto(`http://127.0.0.1:${port}/`); await p5.waitForFunction(() => (window as any).yuzu?.loaded, null, { timeout: 20000 });
+  await p5.evaluate(() => (window as any).yuzu.importPack({ yuzu_pack: 1, id: "r", category: "Medicine::R", cards: [{ id: "a", front: "Q one", back: "A" }, { id: "b", front: "Q two", back: "B" }] }));
+  const rm = await p5.evaluate(() => (window as any).yuzu.setReminders({ on: true, at: "18:30" })); const nudge = await p5.evaluate(() => (window as any).yuzu._db.getMeta("nudge", null));
+  ok("reminders turn on and say honestly what this browser can do", /Reminders on|can't wake Yuzu/.test(rm), rm);
+  ok("…the facts for the service worker are stored", !!nudge && nudge.on === true && nudge.at === "18:30" && nudge.due >= 2 && nudge.goalMet === false && typeof nudge.light === "object", JSON.stringify(nudge).slice(0, 160));
+  const off = await p5.evaluate(async () => { const y = (window as any).yuzu; await y.setReminders({ on: false }); return (await y._db.getMeta("nudge", null)).on; }); ok("…and turning them off clears the flag", off === false);
 } finally {
   console.log("errors:", errors.length ? errors : "none"); if (fails.length || errors.length) { console.log("FAILED:", fails); process.exitCode = 1; }
   await browser.close(); server.kill();

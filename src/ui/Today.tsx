@@ -6,6 +6,8 @@ import { systemColor } from "./theme";
 import { useMemo, useRef, useState } from "react";
 import { ActionSheet, DragHandle, HoldRow, PullToSync, useDragReorder, snackbar, type SheetItem } from "./kit";
 import { Recap } from "./Recap";
+import { CaptureSheet } from "./Capture";
+import { PracticeSheet } from "./Practice";
 import { sendImproveToClaude } from "./Improve";
 
 /** A yuzu cut in half, drawn on a 30×30 pixel grid: 8 segments fill (yellow; orange while partly done) toward the daily goal. */
@@ -82,7 +84,7 @@ function derive() {
 function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, overdue, top, missed, weakest, bossReady, onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
   const [q, setQ] = useState("");
   const [sheet, setSheet] = useState<{ title: string; sub?: string; items: SheetItem[] } | null>(null);
-  const [recap, setRecap] = useState(false);
+  const [recap, setRecap] = useState(false); const [capture, setCapture] = useState(false);
   const pinList = useRef<HTMLDivElement>(null);
   const { handle } = useDragReorder({ listRef: pinList, onMove: (a, b) => { const p = [...store.settings.pins]; const [x] = p.splice(a, 1); p.splice(b, 0, x); store.saveSettings({ pins: p }); } });
   const unpin = (path: string, view: View) => { const before = store.settings.pins; store.saveSettings({ pins: before.filter((x) => !(x.path === path && x.view === view)) }); snackbar("Unpinned", () => store.saveSettings({ pins: before })); };
@@ -99,8 +101,9 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
     <div className="screen">
       <PullToSync enabled={store.syncConfigured()} onSync={() => store.sync()} />
       {sheet && <ActionSheet title={sheet.title} sub={sheet.sub} items={sheet.items} onClose={() => setSheet(null)} />}
+      {capture && <CaptureSheet onClose={() => setCapture(false)} />}
       {recap && <Recap initial={new Date().getDate() <= 7 ? "last-month" : "month"} onClose={() => setRecap(false)} />}
-      <div className="brand"><YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" />
+      <div className="brand"><YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" /><button className="chip" aria-label="Capture" onClick={() => setCapture(true)}>＋ Capture</button>
         {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} data-hint={`Sync|${store.syncStatus.message || "Ready"}. Tap to sync now, or pull the page down.`} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing…" : store.syncStatus.state === "error" ? "sync failed" : store.hasUnsynced() ? "unsynced" : "synced"}</span>}
       </div>
       {store.inbox.length > 0 && onInbox && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginBottom: 10, borderColor: "var(--yuzu)" }} onClick={onInbox}><span className="grow"><b>{store.inbox.length} new pack{store.inbox.length === 1 ? "" : "s"} from Claude</b><div className="small muted">Review the cards before they join your collection</div></span><span className="chip yuzu">Review</span></button>}
@@ -212,9 +215,11 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
 const dmy = (iso: string) => iso.split("-").reverse().join("/");
 /** Exam countdowns: days left, what's introduced, the new cards a day it needs, and drills on what you'd forget. Plus the mixed-system drill. */
 function Countdowns({ onStudy }: { onStudy: OnStudy }) {
+  const [practice, setPractice] = useState(false);
   const today = store.isoToday(); const list = (store.settings.deadlines ?? []).filter((d) => d.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1));
   const drill = useMemo(() => store.drillQueue(30), [store.cards.size, store.reviews.length, today]); const systems = store.drillSystems(drill);
   return (<>
+    {practice && <PracticeSheet onClose={() => setPractice(false)} />}
     {list.map((d) => { const e = store.examStatus(d); const pct = Math.round(e.coverage * 100); return (
       <div key={d.id} className="card-box" style={{ marginTop: 10 }}>
         <div className="row"><b className="grow">{d.name}</b><span className={"chip" + (e.onTrack ? " yuzu" : " orange")}>{e.daysLeft === 0 ? "today" : e.daysLeft === 1 ? "tomorrow" : `${e.daysLeft} days`}</span></div>
@@ -229,5 +234,6 @@ function Countdowns({ onStudy }: { onStudy: OnStudy }) {
         </div>
       </div>); })}
     {systems >= 2 && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginTop: 10 }} onClick={() => onStudy("", "decks", { preset: drill, title: "Mixed drill" })}><span className="grow"><b>Mixed drill</b><br /><span className="small muted">{drill.length} cards from {systems} systems, taken in turns — due and shakiest first. Switching topics is harder and sticks better.</span></span><IconPlay /></button>}
+    {drill.length >= 5 && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginTop: 10 }} onClick={() => setPractice(true)}><span className="grow"><b>Practice with Claude</b><br /><span className="small muted">An oral exam, a patient case or a teach-back built from the cards you're weakest on.</span></span></button>}
   </>);
 }

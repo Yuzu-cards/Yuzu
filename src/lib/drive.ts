@@ -9,7 +9,7 @@ import { HUB_ROOT, DRIVE, GoogleError, ensureFolders, findFolders, listFiles, do
 import { mimeFor } from "../import/media";
 import { SyncError, gzip, gunzip, GZIP_ABOVE, sameDevice, pool, type Manifest, type SyncSnapshot, type Progress } from "./sync";
 
-export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"], rotasOrange: ["Citrus Maxima", "Rotas"], backups: [HUB_ROOT, "Yuzu", "backups"] };
+export const PATHS = { media: [HUB_ROOT, "Yuzu", "media"], collection: [HUB_ROOT, "Yuzu", "collection"], inbox: [HUB_ROOT, "Yuzu", "collection", "inbox"], hub: [HUB_ROOT, "hub", "yuzu"], plan: [HUB_ROOT, "hub", "scheduler"], planCitrus: [HUB_ROOT, "hub", "citrus"], rotas: [HUB_ROOT, "Rotas"], rotasOrange: ["Citrus Maxima", "Rotas"], backups: [HUB_ROOT, "Yuzu", "backups"], outbox: [HUB_ROOT, "Yuzu", "collection", "outbox"] };
 export interface DriveEntry { id: string; s: number; o?: number; m?: string } // o: offset inside a bundle (absent for a loose file), m: type
 export interface DriveIndex { media: string; files: Record<string, DriveEntry>; changes: string; at: number; complete: boolean; nextPage?: string; bundles?: Record<string, { n: string; t: number; s: number; read: boolean }>; tocs?: Record<string, string> }
 
@@ -279,6 +279,12 @@ export class DriveSync {
   async listInbox(): Promise<{ name: string; sha: string; size: number }[]> { const id = await this.inbox(); return (await listFiles({ parent: id })).filter((f) => /\.json$/i.test(f.name)).map((f) => ({ name: f.name, sha: f.id, size: f.size ?? 0 })); }
   async readInbox(name: string): Promise<string | null> { const id = await this.inbox(); const f = (await listFiles({ parent: id, name }))[0]; if (!f) return null; const b = await downloadBytes(f); return b ? toText(b) : null; }
   async deleteInbox(_name: string, id: string): Promise<void> { await deleteFile(id); }
+  // Outbox: what Yuzu leaves for Claude (or any app) to pick up — captured notes and photos, the cards marked for improving.
+  private outboxId = ""; private async outbox() { if (!this.outboxId) this.outboxId = await ensureFolders(PATHS.outbox, this.cache); return this.outboxId; }
+  async listOutbox(): Promise<{ name: string; id: string }[]> { const id = await this.outbox(); return (await listFiles({ parent: id, all: true })).map((f) => ({ name: f.name, id: f.id })); }
+  /** Write (or replace) one outbox file. */
+  async putOutbox(name: string, text: string, known?: string): Promise<string> { const parent = await this.outbox(); const id = known ?? (await listFiles({ parent, name }))[0]?.id ?? null; return putFile({ parent, name, body: text, mime: "application/json", id, isNew: !id }); }
+  async deleteOutbox(id: string): Promise<void> { await deleteFile(id); }
   async readBinary(): Promise<Uint8Array | null> { return null; } // media goes through DriveMedia, not the collection
 }
 
