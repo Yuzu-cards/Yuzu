@@ -194,7 +194,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   // Resuming: the same cards in the same order, minus any deleted meanwhile (cards are re-read, so their schedule is current).
   const resumed = useMemo(() => (resume ? resume.ids.map((id) => store.cards.get(id)).filter((c): c is Card => !!c) : null), []);
   const fullQueue = useMemo(() => resumed ?? preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
-  const [plan, setPlan] = useState<number | null>(resume ? resume.plan : preset || fullQueue.length <= 15 ? fullQueue.length : null);
+  const [plan, setPlan] = useState<number | null>(resume ? resume.plan : preset || fullQueue.length <= 15 || !store.settings.planScreen ? fullQueue.length : null);
   const startedAt = useRef(resume?.startedAt ?? Date.now());
   const [results, setResults] = useState<{ id: string; g: Rating; ms: number; sure?: boolean }[]>(resume?.results ?? []);
   const [queue, setQueue] = useState<Card[]>(fullQueue);
@@ -321,7 +321,12 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     setResults((r) => [...r, { id: card.id, g, ms, sure }]);
     if (store.lastMatured === card.id) { flash("Matured ★ — next review 3+ weeks away"); setTimeout(() => sfx.goal(), 120); }
     setDoneCount((d) => d + 1);
-    if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) setLeech({ cardId: card.id, lapses: store.lastAnswer.lapses });
+    if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) {
+      const act = store.settings.leechAction ?? "claude"; const lapses = store.lastAnswer.lapses;
+      if (act === "ask") setLeech({ cardId: card.id, lapses });
+      else if (act === "pause") { store.bulk([card.id], { suspended: true }); flash(`Forgotten ${lapses} times — paused (Library → Leeches)`); }
+      else flash(`Forgotten ${lapses} times — sent to Claude to rewrite`); // marked by the store
+    }
     setIdx((i) => i + 1);
     buzz(g === 1 ? [30, 40, 30] : g === 4 ? [8, 30, 8] : 12); // a pattern per rating (switch off in Settings)
   }

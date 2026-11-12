@@ -75,6 +75,7 @@ try {
   await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; }));
   const [dl] = await Promise.all([page.waitForEvent("download"), page.click("text=Full backup")]);
   const bpath = await dl.path(); const bsize = bpath ? fs.statSync(bpath).size : 0; console.log("backup bytes:", bsize);
+  await page.evaluate(() => (window as any).yuzu.saveSettings({ planScreen: true })); // the "how long?" screen is off by default since 12/11/2026
   await page.click("nav.tabs >> text=Today");
   await page.click(".hero >> text=Study");
   await page.waitForSelector("text=cards ready");
@@ -107,7 +108,7 @@ try {
   console.log("after undo", afterUndo);
   await page.click('[aria-label="Close"]');
   await page.click("nav.tabs >> text=Progress");
-  await page.waitForSelector("text=day streak");
+  await page.waitForSelector("text=retention, 30 days");
   await page.screenshot({ path: `${shots}/07-progress.png` });
   // Persisted after reload?
   await page.reload(); await page.waitForSelector("text=cards ready");

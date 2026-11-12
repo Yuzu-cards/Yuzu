@@ -48,7 +48,7 @@ try {
   // ---- Today: hold to explain, hold menus, pins drag, coach
   await page.evaluate(async () => { const y = (window as any).yuzu; await y.saveSettings({ pins: [{ path: "Medicine", view: "decks" }, { path: "Medicine::Emergency Medicine", view: "decks" }] }); });
   await page.click("nav.tabs >> text=Today"); await page.waitForTimeout(800); // let the tab switch finish scrolling (a scroll dismisses bubbles)
-  await hold(page, ".stat:has-text('day streak')"); ok("hold a stat → explanation bubble", await page.locator("[data-testid=hint]").count() === 1, await page.locator("[data-testid=hint]").textContent().catch(() => "") ?? "");
+  await hold(page, ".stat:has-text('reviews today')"); ok("hold a stat → explanation bubble", await page.locator("[data-testid=hint]").count() === 1, await page.locator("[data-testid=hint]").textContent().catch(() => "") ?? "");
   await page.waitForTimeout(100);
   await hold(page, ".stack:has-text('Medicine')"); ok("hold a pinned deck → action sheet", await page.locator(".kit-sheet").count() === 1);
   await page.screenshot({ path: `${shots}/h-sheet.png` });

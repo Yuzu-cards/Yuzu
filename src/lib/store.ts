@@ -45,6 +45,16 @@ export interface Settings {
   leechThreshold: number;
   /** Mastered: offer cards whose next review is more than this many years away; retire automatically past `retireAutoYears` (0 = never). */
   retireAskYears: number; retireAutoYears: number;
+  /** Ask "how long?" before a session (off: start straight away with everything ready). */
+  planScreen: boolean;
+  /** Show the day streak (the goal ring stays either way). */
+  showStreak: boolean;
+  /** A card forgotten `leechThreshold` times: send it to Claude to rewrite (outbox), pause it, or ask. */
+  leechAction: "claude" | "pause" | "ask";
+  /** Let Citrus plan Yuzu time (asks / next minutes in status.json); off = report numbers only. */
+  citrusPlans: boolean;
+  /** One-time changes already applied, by id (synced, so every device applies each once). */
+  applied: string[];
   /** Boss fight results per node key (view:path). */
   bosses: Record<string, { at: number; score: number; best: number; passed: boolean }>;
   typeAnswers: boolean;
@@ -75,7 +85,7 @@ export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [], deadlines: [],
   google: { clientId: "", shiftDays: true, driveMedia: true, rotaName: "Amro", rota: {} },
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", planScreen: false, showStreak: false, leechAction: "claude", citrusPlans: false, applied: [], retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface Deadline { id: string; name: string; /** yyyy-mm-dd */ date: string; view: View; /** deck path ("" = everything) */ path: string }
 export interface ExamStatus { daysLeft: number; total: number; seen: number; unseen: number; coverage: number; predicted: number | null; weak: number; needPerDay: number; finishOn: string | null; onTrack: boolean; reviewDays: number }
@@ -371,12 +381,12 @@ export class Store {
     return {
       contract: 2, metrics, progress, inbox: inbox.slice(0, 25), actions: actions.slice(0, 6),
       app: "yuzu", title: "Yuzu", icon: "🍋", color: "#f2d34b", url: typeof location !== "undefined" ? location.origin + location.pathname : "", version: (typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev"), device: this.settings.deviceName || "device", updatedAt: new Date(now).toISOString(), summary,
-      estimatedMinutes: needMin, due, streak, nextDue: due ? "now" : "",
+      ...(this.settings.citrusPlans ? { estimatedMinutes: needMin } : {}), due, ...(this.settings.showStreak ? { streak } : {}), nextDue: due ? "now" : "",
       today: { date: today, done: todayRevs.length >= Math.min(this.settings.dailyGoal, Math.max(10, due + todayRevs.length)), items: todayRevs.length ? [{ title: "Reviews", minutes, cards: todayRevs.length }] : [] },
       week: { start: (days as any[])[0].date, end: (days as any[])[6].date, done, target, need: Math.max(0, target - done), days: days as any },
-      next: due ? { title: `Yuzu: ${due.toLocaleString()} cards`, minutes: needMin } : null,
-      asks, pending,
-      extra: { due, overdue: this.overdueCount(), newPerDay: this.settings.newPerDay, goal: this.settings.dailyGoal, reviewedToday: todayRevs.length, totalCards: this.cards.size, streak, knownNow: Math.round(this.knowledgeNow(now).known), retention30: all ? Math.round((ok / all) * 100) : null, cards: this.cards.size, rota: Object.keys(this.rota).sort().slice(-1)[0] ?? null, exams: (this.settings.deadlines ?? []).filter((d) => d.date >= today).map((d) => { const e = this.examStatus(d, now); return { name: d.name, date: d.date, daysLeft: e.daysLeft, needNewPerDay: e.needPerDay, covered: Math.round(e.coverage * 100), predictedRecall: e.predicted === null ? null : Math.round(e.predicted * 100), onTrack: e.onTrack }; }) },
+      next: due && this.settings.citrusPlans ? { title: `Yuzu: ${due.toLocaleString()} cards`, minutes: needMin } : null,
+      asks: this.settings.citrusPlans ? asks : [], pending,
+      extra: { due, minutesNeeded: needMin, overdue: this.overdueCount(), newPerDay: this.settings.newPerDay, goal: this.settings.dailyGoal, reviewedToday: todayRevs.length, totalCards: this.cards.size, streak, knownNow: Math.round(this.knowledgeNow(now).known), retention30: all ? Math.round((ok / all) * 100) : null, cards: this.cards.size, rota: Object.keys(this.rota).sort().slice(-1)[0] ?? null, exams: (this.settings.deadlines ?? []).filter((d) => d.date >= today).map((d) => { const e = this.examStatus(d, now); return { name: d.name, date: d.date, daysLeft: e.daysLeft, needNewPerDay: e.needPerDay, covered: Math.round(e.coverage * 100), predictedRecall: e.predicted === null ? null : Math.round(e.predicted * 100), onTrack: e.onTrack }; }) },
     };
   }
   async writeHubStatus(force = false): Promise<boolean> {
@@ -803,6 +813,8 @@ export class Store {
     if (/^amaerys$/i.test(this.settings.sync.owner)) { this.settings = { ...this.settings, sync: { ...this.settings.sync, owner: "Yuzu-cards" } }; this.syncOwnerMoved = true; await db.setMeta("settings", this.settings); }
     // FSRS-6 (28/10/2026): 19 saved weights → 21; re-tune on the user's history under FSRS-6 shortly after start.
     if ((this.settings.scheduler.w?.length ?? 0) < 21) { this.settings = { ...this.settings, scheduler: { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }, fit: null }; await db.setMeta("settings", this.settings); }
+    // 12/11/2026, the user's answers in the Q&A: no "how long?" screen, no streak, retiring only on a tap, leeches to Claude, Citrus only reads numbers.
+    if (!(this.settings.applied ?? []).includes("qa-2026-11-12")) { this.settings = { ...this.settings, planScreen: false, showStreak: false, retireAutoYears: 0, leechAction: "claude", citrusPlans: false, applied: [...(this.settings.applied ?? []), "qa-2026-11-12"] }; await db.setMeta("settings", this.settings); }
     setActiveWeights(this.settings.scheduler.w);
     this.rota = this.settings.google?.rota ?? {}; this.rebuildShiftWeights();
     await this.migrations(); mark("meta");
@@ -894,6 +906,7 @@ export class Store {
     onProgress?.("Saving reviews", 0.8);
     await db.putMany("reviews", addedReviews, 5000, (f) => onProgress?.("Saving reviews", 0.8 + f * 0.2));
     await db.setMeta("lastImport", { at: Date.now(), summary: res.summary });
+    if (!this.keepSketchy) await this.stripSketchy(); // an Anki update must not bring Sketchy back
     this.bump(); this.touch();
     return { newNotes, newCards, updated, organized, reviews: addedReviews.length };
   }
@@ -1243,7 +1256,7 @@ export class Store {
       const r = this.reminders; const now = Date.now(); const today = this.isoToday(); const s = this.hubStatus(); const st = this.stats(now);
       const light: Record<string, boolean> = {}; for (let i = 0; i < 3; i++) { const iso = this.isoToday(new Date(now + i * DAY)); light[iso] = (this.shiftWeights[iso] ?? 1) < 1; }
       const prev = await db.getMeta<any>("nudge", {});
-      await db.setMeta("nudge", { on: r.on, at: r.at, skipLight: r.skipLight, due: s.due, minutes: s.estimatedMinutes, goalMet: st.goal > 0 && st.today >= st.goal, light, date: today, notifiedOn: prev.notifiedOn ?? "" });
+      await db.setMeta("nudge", { on: r.on, at: r.at, skipLight: r.skipLight, due: s.due, minutes: s.estimatedMinutes ?? (s.extra as any).minutesNeeded, goalMet: st.goal > 0 && st.today >= st.goal, light, date: today, notifiedOn: prev.notifiedOn ?? "" });
     } catch { /* best effort */ }
   }
   /** The facts behind cards (a question and its answer as plain text), for the "Practice with Claude" prompt. Image-only cards are left out. */
@@ -1276,6 +1289,54 @@ export class Store {
     if (f.kind === "reminders") { const m = await this.setReminders({ on: true }); return { message: m, undo: this.reminders.on ? async () => { await this.setReminders({ on: false }); } : undefined }; }
     return { message: "" };
   }
+
+  // ---- Sketchy out (12/11/2026, the user's call): empty every field named "Sketchy…" and drop every tag with "sketchy" in it.
+  // The notes' previous fields and tags are kept on this device (meta "sketchyUndo") so "Put Sketchy back" can restore them.
+  private static isSketchyTag(t: string) { return /sketchy/i.test(t); }
+  sketchyCount(): { notes: number; tags: number } {
+    let notes = 0, tags = 0; const idx = this.sketchyFieldIdx();
+    for (const n of this.notes.values()) { const fi = idx.get(n.ntid) ?? []; const hasF = fi.some((i) => (n.fields[i] ?? "").trim()); const ts = n.tags.filter(Store.isSketchyTag).length; if (hasF || ts) notes++; tags += ts; }
+    return { notes, tags };
+  }
+  private sketchyFieldIdx(): Map<string, number[]> {
+    const m = new Map<string, number[]>();
+    for (const nt of this.notetypes.values()) { const ids = nt.fields.map((f: any, i: number) => [String(typeof f === "string" ? f : f?.name ?? ""), i] as const).filter(([name]) => /sketchy/i.test(name)).map(([, i]) => i); if (ids.length) m.set(nt.id, ids); }
+    return m;
+  }
+  async stripSketchy(): Promise<{ notes: number; tags: number }> {
+    if (this.keepSketchy) await this.saveSettings({ applied: (this.settings.applied ?? []).filter((x) => x !== "keep-sketchy") });
+    const idx = this.sketchyFieldIdx(); const now = stamp(); const changed: Note[] = []; const undo: { id: string; fields: string[]; tags: string[] }[] = []; let tags = 0;
+    for (const n of this.notes.values()) {
+      const fi = idx.get(n.ntid) ?? []; const hasF = fi.some((i) => (n.fields[i] ?? "").trim()); const keep = n.tags.filter((t) => !Store.isSketchyTag(t));
+      if (!hasF && keep.length === n.tags.length) continue;
+      undo.push({ id: n.id, fields: n.fields, tags: n.tags }); tags += n.tags.length - keep.length;
+      const fields = n.fields.map((f, i) => (fi.includes(i) ? "" : f)); changed.push({ ...n, fields, tags: keep, modified: now, edited: now });
+    }
+    if (!changed.length) return { notes: 0, tags: 0 };
+    const prev = await db.getMeta<{ id: string; fields: string[]; tags: string[] }[]>("sketchyUndo", []); const seen = new Set(prev.map((x) => x.id));
+    await db.setMeta("sketchyUndo", [...prev, ...undo.filter((x) => !seen.has(x.id))]); // the first copy of a note wins: it's the one with Sketchy in it
+    for (const n of changed) this.notes.set(n.id, n);
+    await this.persist("removing Sketchy", db.putMany("notes", changed)); this.treeCache.clear(); this.touch(); this.bump();
+    return { notes: changed.length, tags };
+  }
+  async sketchyBackupSize(): Promise<number> { return (await db.getMeta<any[]>("sketchyUndo", [])).length; }
+  /** Put the Sketchy fields and tags back from this device's copy. */
+  async restoreSketchy(): Promise<number> {
+    const prev = await db.getMeta<{ id: string; fields: string[]; tags: string[] }[]>("sketchyUndo", []); const now = stamp(); const back: Note[] = [];
+    for (const p of prev) { const n = this.notes.get(p.id); if (!n) continue; const idx = this.sketchyFieldIdx().get(n.ntid) ?? []; back.push({ ...n, fields: n.fields.map((f, i) => (idx.includes(i) ? p.fields[i] ?? f : f)), tags: [...new Set([...n.tags, ...p.tags.filter(Store.isSketchyTag)])], modified: now }); }
+    for (const n of back) this.notes.set(n.id, n);
+    if (!this.keepSketchy) await this.saveSettings({ applied: [...(this.settings.applied ?? []), "keep-sketchy"] });
+    if (back.length) await this.persist("putting Sketchy back", db.putMany("notes", back)); this.treeCache.clear(); this.touch(); this.bump(); return back.length;
+  }
+  /** Sketchy stays out unless the user put it back (synced "keep-sketchy"): checked after start-up and after every import.
+   *  The first real strip on a Drive-connected device takes a Drive backup first. */
+  get keepSketchy() { return (this.settings.applied ?? []).includes("keep-sketchy"); }
+  async stripSketchyOnce(): Promise<{ notes: number; tags: number } | null> {
+    if (this.keepSketchy || !this.sketchyCount().notes) return null;
+    if (this.syncBackend() === "drive" && tokenValid() && !(await db.getMeta<any[]>("sketchyUndo", [])).length) await this.backupNow(true).catch(() => "");
+    return this.stripSketchy();
+  }
+
 
   // ---- Exam countdown and mixed drills ---------------------------------------------------------------------------------------
   /** Where a deadline stands: how much of its scope is introduced, how many new cards a day it needs, and what you'd remember on the day if you stopped reviewing today. */
@@ -1862,6 +1923,9 @@ export class Store {
     if (g === 1 && note && next.lapses >= this.settings.leechThreshold && next.lapses % this.settings.leechThreshold === 0) {
       leech = true;
       if (!note.tags.includes("leech")) { const m = { ...note, tags: [...note.tags, "leech"], modified: now }; this.notes.set(note.id, m); await this.persist("tagging a leech", db.putOne("notes", m)); }
+      // what the user chose (Settings → Studying): Claude rewrites it (marked to improve → outbox), or it's paused; "ask" leaves it to the sheet
+      const act = this.settings.leechAction ?? "claude";
+      if (act === "claude") { const prev = this.improveFor(note.id); this.markImprove([note.id], [...new Set([...(prev?.r ?? []), "confusion"])], prev?.t || `Forgotten ${next.lapses} times`).catch(() => {}); }
     }
     this.lastAnswer = { cardId, leech, lapses: next.lapses };
     this.undoStack = [...this.undoStack.slice(-19), { reviewId: review.id, card }];

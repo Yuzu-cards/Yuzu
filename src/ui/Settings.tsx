@@ -186,6 +186,11 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.nightCards} onChange={(e) => store.saveSettings({ nightCards: e.target.checked })} /> Slate cards (dark card paper, easier at night)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to rate (← Again · ↓ Hard · → Good · ↑ Easy)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.planScreen} onChange={(e) => store.saveSettings({ planScreen: e.target.checked })} /> Ask how long before a session (off: start straight away)</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.showStreak} onChange={(e) => store.saveSettings({ showStreak: e.target.checked })} /> Show the day streak</label>
+        <div className="row small" style={{ margin: "10px 0 4px" }}><span className="grow">A card forgotten {s.leechThreshold} times</span></div>
+        <div className="seg" role="radiogroup" aria-label="Leech action">{([["claude", "Send to Claude"], ["pause", "Pause it"], ["ask", "Ask me"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={s.leechAction === k} className={s.leechAction === k ? "on" : ""} onClick={() => store.saveSettings({ leechAction: k })}>{l}</button>)}</div>
+        <p className="small muted" style={{ margin: "-6px 0 8px" }}>{s.leechAction === "claude" ? "It's marked to improve and goes to Claude through the Drive outbox; Claude's rewrite comes back through the Inbox." : s.leechAction === "pause" ? "It's suspended until you look at it (Library → Leeches)." : "A sheet asks what went wrong each time."}</p>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
         <Slider label="Offer to retire as mastered when the next review is more than" value={s.retireAskYears ?? 5} min={1} max={10} format={(v) => `${v} y`} onCommit={(v) => store.saveSettings({ retireAskYears: v, ...((s.retireAutoYears ?? 20) && (s.retireAutoYears ?? 20) <= v ? { retireAutoYears: 0 } : {}) })} sub="Those cards are listed in Progress → Mastered for you to decide." />
         <Slider label="Retire automatically when the next review is more than" value={s.retireAutoYears ?? 20} min={0} max={30} step={5} format={(v) => (v ? `${v} y` : "never")} sub={`Must be above the offer line (${s.retireAskYears ?? 5} y). Retired cards are deleted and kept in the Mastered log.`}
@@ -348,6 +353,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </details>
       <details className="section" id="s-data"><summary>Data <span className="small muted">back up, restore, wipe</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
+        <SketchyRow />
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device. A quick backup holds only what cannot be rebuilt (reviews, scheduling, settings, your hooks; about 1 MB); the full one includes every card's text.</div>
         <div className="row" style={{ marginTop: 10 }}>
           <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.quickBackup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
@@ -542,6 +548,7 @@ function GoogleSection() {
             <button className="btn" disabled={busy} onClick={() => { if (!confirm(`Roll back every note and card that changed since ${b.name.split("-").reverse().join("/")}? Progress on those cards since then is lost.`)) return; act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const r = await store.restoreBackup(b.name, "all"); return `Restored ${r.notes} notes, ${r.cards} cards, ${r.reviews} reviews`; }); }}>Roll back</button>
           </div>)}
         </details>}
+        <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={!!store.settings.citrusPlans} onChange={(e) => store.saveSettings({ citrusPlans: e.target.checked })} /> Let Citrus plan Yuzu time (off: Citrus only sees your numbers)</label>
         <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
           <button className="btn" disabled={busy || !signed} onClick={() => act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; return (await store.writeHubStatus(true)) ? "Sent to Citrus" : "Nothing new to tell Citrus"; })}>Tell Citrus now</button>
           <span className="small muted">Yuzu also tells Citrus after every sync that changes something.</span>
@@ -595,4 +602,18 @@ const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"],
 function JumpRow() {
   const go = (id: string) => { const d = document.getElementById(id) as HTMLDetailsElement | null; if (!d) return; d.open = true; d.scrollIntoView({ block: "start", behavior: "smooth" }); };
   return <nav className="jump-row" aria-label="Settings groups">{GROUPS.map(([id, l]) => <button key={id} className="chip" onClick={() => go(id)}>{l}</button>)}</nav>;
+}
+
+/** Sketchy fields and tags: removed on the user's call (12/11/2026); a copy stays on this device to put them back. */
+function SketchyRow() {
+  const [kept, setKept] = useState<number | null>(null); const [busy, setBusy] = useState(false); store.getVersion();
+  useEffect(() => { store.sketchyBackupSize().then(setKept).catch(() => setKept(0)); }, [store.getVersion()]);
+  const left = useMemo(() => store.sketchyCount(), [store.notes.size, store.getVersion()]);
+  return (<div className="small" style={{ marginBottom: 10 }}>
+    <b>Sketchy</b>: {left.notes ? `${left.notes.toLocaleString()} notes still have Sketchy fields or tags.` : "none left on your cards."}{kept ? ` A copy of ${kept.toLocaleString()} notes is kept on this device.` : ""}
+    <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+      {left.notes > 0 && <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { const r = await store.stripSketchy(); snackbar(`Sketchy removed from ${r.notes.toLocaleString()} notes`); } finally { setBusy(false); } }}>Remove Sketchy</button>}
+      {!!kept && <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { const n = await store.restoreSketchy(); snackbar(`Sketchy put back on ${n.toLocaleString()} notes`); } finally { setBusy(false); } }}>Put Sketchy back</button>}
+    </div>
+  </div>);
 }

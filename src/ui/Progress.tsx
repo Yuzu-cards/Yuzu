@@ -80,7 +80,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
       <RecapButton />
       <Mastered />
       <div className="stat-grid">
-        <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>
+        {store.settings.showStreak && <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>}
         <div className="stat"><b>{retention === null ? "–" : retention + "%"}</b><span>retention, 30 days</span></div>
         <div className="stat"><b>{store.reviews.length.toLocaleString()}</b><span>reviews all time</span></div>
       </div>

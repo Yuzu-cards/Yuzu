@@ -127,7 +127,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
             </div>
           </div>
           <div className="stat-grid">
-            <div className="stat" data-hint={`Streak|Days in a row with at least one review. ${store.settings.restDays === 1 ? "1 rest day a week doesn't" : `${store.settings.restDays} rest days a week don't`} break it.`}><b>{stats.streak}</b><span>day streak</span></div>
+{store.settings.showStreak &&             <div className="stat" data-hint={`Streak|Days in a row with at least one review. ${store.settings.restDays === 1 ? "1 rest day a week doesn't" : `${store.settings.restDays} rest days a week don't`} break it.`}><b>{stats.streak}</b><span>day streak</span></div>}
             <div className="stat" data-hint="Reviews today|Every answer counts, including Again and repeats."><b>{stats.today}</b><span>reviews today</span></div>
             {store.mastery.log.length > 0 && <div className="stat" data-hint="Mastered|Cards retired because their next review was years away. Their details are in Progress → Mastered → Log."><b>{store.mastery.log.length.toLocaleString()}</b><span>mastered</span></div>}
             <div className="stat" data-hint="Learned|Cards in review: past their learning steps, with a real interval."><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>

@@ -71,6 +71,27 @@ try {
   const rail = await L.evaluate(() => { const n = (document.querySelector("nav.tabs") as HTMLElement).getBoundingClientRect(); const c = document.querySelector(".today-cols"); return { w: Math.round(n.width), h: Math.round(n.height), cols: c ? getComputedStyle(c).gridTemplateColumns.split(" ").length : 0 }; });
   ok("on a desktop the tabs become a side rail and Today has two columns", rail.w === 96 && rail.h >= 800 && rail.cols === 2, JSON.stringify(rail));
   await c5.close();
+  // ---- A card forgotten again and again goes to Claude by itself (the default since 12/11/2026)
+  const c6 = await browser.newContext({ viewport: { width: 412, height: 915 } }); const LC = await open(c6, "LC"); await LC.evaluate((p) => (window as any).yuzu.importPack(p), pack);
+  const lch = await LC.evaluate(async () => { const y = (window as any).yuzu; await y.saveSettings({ leechThreshold: 2 }); const c = [...y.cards.values()][0];
+    for (let i = 0; i < 3; i++) { const cur = y.cards.get(c.id); y.cards.set(c.id, { ...cur, state: "review", step: 0, stability: 5, reps: Math.max(3, cur.reps), due: Date.now() - 1000, lastReview: Date.now() - 5 * 86400000 }); await y.answer(c.id, 1, 1500); }
+    await new Promise((r) => setTimeout(r, 200)); const m = y.improveFor(c.nid); return { lapses: y.cards.get(c.id).lapses, reasons: m?.r, text: m?.t, inList: y.improveList().some((x: any) => x.note.id === c.nid), plan: y.settings.planScreen, streak: y.settings.showStreak, citrus: y.settings.citrusPlans, retire: y.settings.retireAutoYears }; });
+  ok("a leech is marked for Claude to rewrite (it goes out through the Drive outbox)", lch.lapses >= 2 && lch.inList && lch.reasons?.includes("confusion") && /Forgotten \d+ times/.test(lch.text ?? ""), JSON.stringify(lch));
+  ok("the Q&A defaults: no 'how long?' screen, no streak, Citrus reads only, retiring on a tap", lch.plan === false && lch.streak === false && lch.citrus === false && lch.retire === 0);
+  await c6.close();
+  // ---- Sketchy out: fields named Sketchy… emptied, sketchy tags dropped, a copy kept to put back; an import can't bring it back
+  const c7 = await browser.newContext({ viewport: { width: 412, height: 915 } }); await c7.addInitScript("window.__name = (f) => f"); /* tsx names inner arrow functions */ const SK = await open(c7, "SK");
+  const sk = await SK.evaluate(async () => { const y = (window as any).yuzu; const now = Date.now();
+    const nt = { id: "ak", name: "AnKingOverhaul", kind: "cloze", css: "", fields: ["Text", "Extra", "Sketchy", "Sketchy 2", "Pathoma"], templates: [{ name: "Cloze", qfmt: "{{cloze:Text}}", afmt: "{{cloze:Text}}<br>{{Extra}}" }] };
+    y.notetypes.set("ak", nt); await y._db.putMany("notetypes", [nt]);
+    const mk = (i: number, sketchy: boolean) => ({ id: "n" + i, ntid: "ak", guid: "g" + i, fields: [`Fact {{c1::${i}}}`, "extra", sketchy ? "<img src=sk.jpg> Sketchy story" : "", sketchy ? "more" : "", "pathoma"], tags: sketchy ? ["#AK_Step1_v12::^Resources::Sketchy::Micro", "cardio"] : ["cardio"], created: now, modified: now });
+    const notes = [mk(1, true), mk(2, true), mk(3, false)]; for (const n of notes) y.notes.set(n.id, n); await y._db.putMany("notes", notes);
+    const before = y.sketchyCount(); const r = await y.stripSketchyOnce(); const n1 = y.notes.get("n1");
+    const after = y.sketchyCount(); const kept = await y.sketchyBackupSize(); const back = await y.restoreSketchy(); const n1b = y.notes.get("n1");
+    return { before, r, after, kept, n1: { f2: n1.fields[2], f3: n1.fields[3], f4: n1.fields[4], tags: n1.tags }, back, n1b: { f2: n1b.fields[2], tags: n1b.tags }, keep: y.keepSketchy, again: await y.stripSketchyOnce() }; });
+  ok("Sketchy fields are emptied and sketchy tags dropped; other fields and tags untouched", sk.before.notes === 2 && sk.r?.notes === 2 && sk.after.notes === 0 && sk.n1.f2 === "" && sk.n1.f3 === "" && sk.n1.f4 === "pathoma" && sk.n1.tags.join() === "cardio", JSON.stringify(sk).slice(0, 300));
+  ok("…a copy stays on this device, and Put Sketchy back restores it (and keeps it from being stripped again)", sk.kept === 2 && sk.back === 2 && /Sketchy story/.test(sk.n1b.f2) && sk.n1b.tags.some((t: string) => /Sketchy/.test(t)) && sk.keep === true && sk.again === null);
+  await c7.close();
 } finally {
   console.log("errors:", errors.length ? errors : "none"); if (fails.length || errors.length) { console.log("FAILED:", fails); process.exitCode = 1; }
   await browser.close(); server.kill();

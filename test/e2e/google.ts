@@ -92,7 +92,9 @@ try {
   // ---- status.json for the scheduler
   const st = G.at(["My Apps", "hub", "yuzu"]); const status = st.has("status.json") ? JSON.parse(st.get("status.json")!) : null;
   ok("status.json written in the hub shape", !!status && status.app === "yuzu" && typeof status.summary === "string" && Array.isArray(status.asks) && status.week?.days?.length === 7 && status.today?.date === today, JSON.stringify(status)?.slice(0, 160));
-  ok("status asks for time today with a slot", status?.asks?.[0]?.date === today && /free|before|early|postnight|tough/.test(status.asks[0].slot) && status.asks[0].minutes > 0, JSON.stringify(status?.asks?.[0]));
+  ok("by default Citrus only gets the numbers: no asks, no planning minutes", Array.isArray(status?.asks) && status.asks.length === 0 && status.next === null && status.estimatedMinutes === undefined && status.extra?.minutesNeeded >= 0, JSON.stringify({ asks: status?.asks, next: status?.next }));
+  const planned = await A.evaluate(async () => { const y = (window as any).yuzu; await y.saveSettings({ citrusPlans: true }); const s = y.hubStatus(); await y.saveSettings({ citrusPlans: false }); return s; });
+  ok("with 'Let Citrus plan' on, status asks for time today with a slot", planned?.asks?.[0]?.date === today && /free|before|early|postnight|tough/.test(planned.asks[0].slot) && planned.asks[0].minutes > 0 && planned.estimatedMinutes > 0, JSON.stringify(planned?.asks?.[0]));
   // ---- Device B joins from Drive
   const B = await device("B");
   await B.click("button:has-text('Connect Google')"); await B.waitForFunction(() => (window as any).yuzu?.syncBackend?.() === "drive", null, { timeout: 20000 });

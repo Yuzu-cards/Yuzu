@@ -85,10 +85,13 @@ try {
   const rt = await page.evaluate(async () => {
     const y = (window as any).yuzu; const DAY = 86400000; const now = Date.now(); const [a, b] = [...y.cards.values()].filter((c: any) => c.state === "review").slice(-2);
     y.cards.set(a.id, { ...a, lastReview: now - 2 * DAY, due: now + 25 * 365 * DAY }); y.cards.set(b.id, { ...b, lastReview: now - 2 * DAY, due: now + 6 * 365 * DAY });
+    const offOnly = y.settings.retireAutoYears === 0; const before0 = y.mastery.log.length; await y.autoMaster(); const noneByDefault = y.mastery.log.length === before0; // since 12/11/2026 retiring waits for a tap
+    await y.saveSettings({ retireAutoYears: 20 });
     const offered = y.countBeyond(5); const logBefore = y.mastery.log.length; await y.autoMaster();
-    return { offered, retiredA: !y.cards.has(a.id), keptB: y.cards.has(b.id), logged: y.mastery.log.length - logBefore, logHasA: y.mastery.log.some((e: any) => e.id === a.id) };
+    return { offOnly, noneByDefault, offered, retiredA: !y.cards.has(a.id), keptB: y.cards.has(b.id), logged: y.mastery.log.length - logBefore, logHasA: y.mastery.log.some((e: any) => e.id === a.id) };
   });
-  ok("a card past 20 years is retired and logged", rt.retiredA && rt.logHasA && rt.logged >= 1, JSON.stringify(rt));
+  ok("by default nothing is retired without a tap", rt.offOnly && rt.noneByDefault, JSON.stringify(rt));
+  ok("with automatic retiring on, a card past 20 years is retired and logged", rt.retiredA && rt.logHasA && rt.logged >= 1, JSON.stringify(rt));
   ok("a card past 5 years is offered, not retired", rt.keptB && rt.offered >= 2, JSON.stringify(rt));
 } finally {
   console.log("errors:", errors.length ? errors : "none"); if (fails.length || errors.length) { console.log("FAILED:", fails); process.exitCode = 1; }

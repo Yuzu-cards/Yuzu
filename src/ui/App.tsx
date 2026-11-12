@@ -8,7 +8,7 @@ import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./
 import { Progress } from "./Progress";
 import { Boss } from "./Boss";
 import { Inbox } from "./Inbox";
-import { ConfirmHost, HintLayer, SnackbarHost, confirmSheet, tellSheet } from "./kit";
+import { ConfirmHost, HintLayer, SnackbarHost, confirmSheet, tellSheet, snackbar } from "./kit";
 
 type Tab = "today" | "library" | "progress" | "settings";
 const TAB_HINTS: Record<Tab, string> = {
@@ -91,6 +91,13 @@ function AppInner() {
     else if (tag.startsWith("auto::Exam::")) browse("exams", tag.slice(12));
     else browse("tags", tag);
   };
+
+  // Sketchy out, once (the user's call, 12/11/2026): after start-up settles, with Undo while the app is open.
+  useEffect(() => {
+    if (!store.loaded || store.keepSketchy) return;
+    const t = setTimeout(async () => { const r = await store.stripSketchyOnce().catch(() => null); if (r && r.notes) snackbar(`Sketchy removed from ${r.notes.toLocaleString()} notes (${r.tags.toLocaleString()} tags)`, async () => { const n = await store.restoreSketchy(); snackbar(`Sketchy put back on ${n.toLocaleString()} notes`); }); }, 4000);
+    return () => clearTimeout(t);
+  }, [store.loaded]);
 
   // Deep links from Citrus (HUB.md): ?from=citrus&do=<id> jumps straight there, then the address is cleaned up.
   useEffect(() => {
