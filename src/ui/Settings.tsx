@@ -11,7 +11,7 @@ import { useEffect } from "react";
 import { GitHubSync } from "../lib/sync";
 import { repairApp } from "./App";
 import { noteTitle } from "../lib/render";
-import { THEMES, sfx } from "./sfx";
+import { THEMES, sfx, setUi, setTextSize, uiMode, textSize } from "./sfx";
 import { holdAwake } from "../lib/wake";
 import { ZipFile } from "../lib/zipfile";
 
@@ -143,11 +143,20 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
     } finally { setBusy(false); setMsg(""); if (fileRef.current) fileRef.current.value = ""; }
   }
 
+  const [ui, setUiState] = useState(uiMode()); const [size, setSizeState] = useState(textSize());
   return (
     <div className="screen">
       <h1>Settings</h1>
-      <details className="section" open><summary>Look and sound <span className="small muted">on this device</span></summary>
+      <JumpRow />
+      <div className="settings-cols">
+      <details className="section" id="s-look" open><summary>Look and sound <span className="small muted">interface, colours, sound</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
         <div className="card-box">
+          <div className="row" style={{ gap: 8, margin: "0 0 4px" }}><span className="small grow">Interface</span></div>
+          <div className="seg" role="radiogroup" aria-label="Interface">{([["arcade", "Arcade"], ["clean", "Clean"], ["paper", "Paper"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={ui === k} className={ui === k ? "on" : ""} onClick={() => { setUi(k); setUiState(k); sfx.tap(); }}>{l}</button>)}</div>
+          <p className="small muted" style={{ margin: "-6px 0 10px" }}>{ui === "arcade" ? "8-bit: pixel type, square notched panels." : ui === "clean" ? "Dark, soft corners, plain type." : "Light, for daylight and long reading."}</p>
+          <div className="row" style={{ gap: 8, margin: "0 0 4px" }}><span className="small grow">Text size</span></div>
+          <div className="seg" role="radiogroup" aria-label="Text size">{([["small", "Small"], ["normal", "Normal"], ["large", "Large"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={size === k} className={size === k ? "on" : ""} onClick={() => { setTextSize(k); setSizeState(k); }}>{l}</button>)}</div>
+          <div className="row" style={{ gap: 8, margin: "4px 0 4px" }}><span className="small grow">Colours</span></div>
           <div className="themes">{THEMES.map((t) => <button key={t.id} className={s.theme === t.id ? "on" : ""} onClick={() => { store.saveSettings({ theme: t.id }); sfx.tap(); }}><span className="sw">{t.sw.map((c) => <i key={c} style={{ background: c }} />)}</span>{t.name}</button>)}</div>
           <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={s.sfx} onChange={(e) => { store.saveSettings({ sfx: e.target.checked }); if (e.target.checked) setTimeout(() => sfx.answer(3), 50); }} /> Sound effects (short 8-bit blips on answers, goal and boss fights)</label>
           <div className="row" style={{ marginTop: 12, gap: 8 }}><span className="small grow">Card look</span>
@@ -156,7 +165,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <DeviceToggles />
         </div>
       </details>
-      <details className="section" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span></summary>
+      <details className="section" id="s-study" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
       <div className="card-box">
         <Slider label="New cards per day" value={s.newPerDay} min={0} max={100} step={1} onCommit={(v) => store.saveSettings({ newPerDay: v })} sub="Each new card brings about 10 reviews over its first year." />
         <Slider label="Daily review goal" value={Math.min(s.dailyGoal, 500)} min={10} max={500} step={10} onCommit={(v) => store.saveSettings({ dailyGoal: v })} />
@@ -198,7 +207,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </details>
       <ExamSettings />
       <ReminderSettings />
-      {reversible.length > 0 && <details className="section"><summary>Language cards <span className="small muted">reverse and typed cards</span></summary>
+      {reversible.length > 0 && <details className="section" id="s-lang"><summary>Language cards <span className="small muted">reverse and typed cards</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
         <div className="card-box">
           <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
           {reversible.map(({ nt, notes, on }) => (
@@ -207,10 +216,10 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
         </div>
       </details>}
-      <details className="section"><summary>Cards to improve <span className="small muted">send to Claude</span></summary>
+      <details className="section" id="s-improve"><summary>Cards to improve <span className="small muted">send to Claude</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
       <ImproveSection />
       </details>
-      <details className="section"><summary>Import from Anki <span className="small muted">collection, packs, curation</span></summary>
+      <details className="section" id="s-import"><summary>Import from Anki <span className="small muted">collection, packs, curation</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) with scheduling included; if it includes media, the images and sounds are added right after the cards. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> and <b>curation files</b> (.json) made by Claude: duplicates are skipped or merged, cards move to their categories, similar cards get the tag <i>needs-review::similar</i>. Large collections: import on a PC first, then sync to the phone.</p>
         <label className="row small" style={{ marginBottom: 10 }}><input type="checkbox" checked={skipLanguages} onChange={(e) => setSkipLanguages(e.target.checked)} /> Skip the Languages decks</label>
@@ -222,7 +231,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
-      <details className="section" open><summary>Images and sounds <span className="small muted">kept on this device</span></summary>
+      <details className="section" id="s-media" open><summary>Images and sounds <span className="small muted">files for your cards</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         {(() => { const m = mediaStat; const pct = m.total ? Math.round((m.stored / m.total) * 100) : 100; return (<>
           <div className="stat-grid" style={{ marginTop: 0 }}>
@@ -288,7 +297,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
-      <details className="section"><summary>Inbox <span className="small muted">packs from Claude</span></summary>
+      <details className="section" id="s-inbox"><summary>Inbox <span className="small muted">packs from Claude</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Packs placed in the <b>inbox</b> folder {store.syncBackend() === "drive" ? <>on Drive (My Apps › Yuzu › collection › inbox)</> : <>of your sync repository</>} arrive here on the next sync and wait for your review. {store.inbox.length ? `${store.inbox.length} waiting.` : "Nothing waiting."}{store.packLog.length ? ` ${store.packLog.length} packs added so far (removable).` : ""}</p>
         <button className="btn block" onClick={onInbox}>Open inbox</button>
@@ -296,7 +305,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
 
       </details>
       <GoogleSection />
-      <details className="section" open><summary>Sync between devices</summary>
+      <details className="section" id="s-sync" open><summary>Sync between devices<span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         {store.syncBackend() === "drive"
           ? <p className="small muted" style={{ marginTop: 0 }}>Cards sync through <b>Google Drive</b> (My Apps › Yuzu › collection), with your Google sign-in — no tokens to manage. Change it under Google above.</p>
@@ -337,7 +346,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
-      <details className="section"><summary>Data <span className="small muted">back up, restore, wipe</span></summary>
+      <details className="section" id="s-data"><summary>Data <span className="small muted">back up, restore, wipe</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device. A quick backup holds only what cannot be rebuilt (reviews, scheduling, settings, your hooks; about 1 MB); the full one includes every card's text.</div>
         <div className="row" style={{ marginTop: 10 }}>
@@ -349,10 +358,11 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <button className="btn danger block" style={{ marginTop: 10 }} onClick={async () => { if (await confirmSheet({ title: "Delete everything on this device?", sub: "All cards and reviews here are deleted. A backup or a sync can bring them back.", yes: "Delete everything" })) await store.wipe(); }}>Delete everything on this device</button>
       </div>
       </details>
-      <details className="section"><summary>Diagnostics <span className="small muted">storage, errors, repair</span></summary>
+      <details className="section" id="s-diag"><summary>Diagnostics <span className="small muted">storage, errors, repair</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <Diagnostics />
       </details>
       <p className="small muted" style={{ textAlign: "center", marginTop: 24 }}>Yuzu {__VERSION__}</p>
+      </div>
     </div>
   );
 }
@@ -503,7 +513,7 @@ function GoogleSection() {
   for (let i = 0; i < 10; i++) { const iso = store.isoToday(d); const sh = store.shiftOn(iso); if (sh && sh.kind !== "off") coming.push(`${iso.slice(8, 10)}/${iso.slice(5, 7)} ${sh.kind === "night" ? "🌙" : sh.kind === "leave" ? "✈" : "☀️"} ${sh.code}`); d.setDate(d.getDate() + 1); }
   const plan = store.planToday(); const months = Object.keys(g.rota ?? {}).sort();
   return (
-    <details className="section" open><summary>Google <span className="small muted">Drive home · Citrus Maxima</span></summary>
+    <details className="section" id="s-google" open><summary>Google <span className="small muted">Drive home · Citrus Maxima</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared with Citrus Maxima, Orange and your other apps. <b>Drive</b> keeps the collection and the master copy of every image and sound (<b>My Apps › Yuzu</b>). Yuzu reports what it needs to <b>Citrus</b> (My Apps › hub › yuzu) and reads back Citrus's plan and your shifts, so nights become light days.</p>
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
@@ -550,7 +560,7 @@ function ExamSettings() {
   const decks = store.tree("decks").children.flatMap((c) => [c, ...c.children.map((g) => ({ ...g, name: c.name + " › " + g.name }))]);
   const list = [...(store.settings.deadlines ?? [])].sort((a, b) => (a.date < b.date ? -1 : 1));
   return (
-    <details className="section"><summary>Exam countdown <span className="small muted">{list.length ? `${list.length} set` : "dates and scope"}</span></summary>
+    <details className="section" id="s-exam"><summary>Exam countdown <span className="small muted">{list.length ? `${list.length} set` : "dates and scope"}</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Set an exam date and which decks it covers. Today then shows how many new cards a day you need, how much you'd remember on the day, and a drill on the cards most likely to slip. It also tells Citrus when you're behind.</p>
         {list.map((d) => <div key={d.id} className="row small" style={{ gap: 8, margin: "6px 0" }}><b className="grow">{d.name}</b><span className="muted">{d.date.split("-").reverse().join("/")} · {d.path ? d.path.split("::").slice(-1)[0] : "everything"}</span><button className="btn" onClick={() => store.saveSettings({ deadlines: list.filter((x) => x.id !== d.id) })}>Remove</button></div>)}
@@ -568,7 +578,7 @@ function ReminderSettings() {
   const [msg, setMsg] = useState(""); const [busy, setBusy] = useState(false); store.getVersion(); const r = store.reminders;
   const act = async (f: () => Promise<string>) => { setBusy(true); try { setMsg(await f()); } catch (e: any) { setMsg(e?.message ?? String(e)); } finally { setBusy(false); } };
   return (
-    <details className="section"><summary>Reminders <span className="small muted">{r.on ? `around ${r.at}` : "off"}</span></summary>
+    <details className="section" id="s-remind"><summary>Reminders <span className="small muted">{r.on ? `around ${r.at}` : "off"}</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>One notification a day, after the time you choose, if cards are due and today's goal isn't met. It stays quiet on a night shift and the day after. Works in the installed app on Android Chrome; elsewhere Yuzu can't wake itself, so let Citrus Maxima put a calendar block in your day.</p>
         <label className="row small"><input type="checkbox" checked={r.on} disabled={busy} onChange={(e) => act(() => store.setReminders({ on: e.target.checked }))} /> Remind me</label>
@@ -578,4 +588,11 @@ function ReminderSettings() {
       </div>
     </details>
   );
+}
+
+/** Jump row (Orange 8.11.0): one tap to a group; it opens the group and scrolls to it. */
+const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"], ["s-exam", "Exams"], ["s-remind", "Reminders"], ["s-google", "Google"], ["s-sync", "Sync"], ["s-media", "Media"], ["s-import", "Import"], ["s-inbox", "Inbox"], ["s-improve", "Improve"], ["s-lang", "Languages"], ["s-data", "Data"], ["s-diag", "Diagnostics"]];
+function JumpRow() {
+  const go = (id: string) => { const d = document.getElementById(id) as HTMLDetailsElement | null; if (!d) return; d.open = true; d.scrollIntoView({ block: "start", behavior: "smooth" }); };
+  return <nav className="jump-row" aria-label="Settings groups">{GROUPS.map(([id, l]) => <button key={id} className="chip" onClick={() => go(id)}>{l}</button>)}</nav>;
 }

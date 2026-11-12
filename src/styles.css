@@ -325,3 +325,120 @@ details.how code { font-size: 12px; background: var(--ink-2); padding: 0 4px; }
 .mcq-mark { margin-left: auto; }
 .mcq-why { margin: 4px 0 2px 34px; opacity: .85; }
 .answer-bar button.suggest { outline: 3px solid var(--orange, #f08a24); outline-offset: 2px; }
+
+/* ======================================================================================================================
+   Interfaces (from Orange 8.12.0, per device, data-ui on <html> before first paint):
+   Arcade = everything above (8-bit). Clean = dark, soft corners, plain type, flat. Paper = Clean's shapes in light colours.
+   Text size (data-size): the reading areas scale; the tab bar stays put.
+   ====================================================================================================================== */
+:root[data-ui="clean"], :root[data-ui="paper"] { --px: var(--sans); --r: 10px; --r-s: 8px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.card-box, .stat, .stack, .hero, .sheet, .seg, .btn, .chip, .answer-bar button, .field input, .field select, .typeans, .sheet textarea, .paper, .paper-under, .notch, .menu, .toast, .kit-item, .kit-snack, .bulk-bar, .mcq-opt, .themes button, .progress, .bar, .mastery-bar, .kit-date input[type=text], .seg button, .kit-hint, .stamp, .tree-row, .list-row) { clip-path: none; }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.card-box, .stat, .stack, .hero, .paper, .paper-under, .menu, .kit-hint, .mcq-opt) { border-radius: var(--r) !important; }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.btn, .chip, .seg, .field input, .field select, .typeans, .sheet textarea, .toast, .kit-item, .kit-snack, .bulk-bar, .themes button, .answer-bar button, .kit-date input[type=text], .progress, .bar, .mastery-bar, .stamp) { border-radius: var(--r-s) !important; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .seg button { border-radius: 6px !important; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .chip { border-radius: 999px !important; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .sheet { border-radius: 16px 16px 0 0 !important; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .sheet::before { border-radius: 2px !important; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .px-range::-webkit-slider-thumb { border-radius: 50% !important; box-shadow: 0 0 0 3px var(--orange); }
+:root:is([data-ui="clean"], [data-ui="paper"]) .px-range::-webkit-slider-runnable-track { border-radius: 6px !important; border-width: 0; height: 8px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .px-range::-webkit-slider-thumb { margin-top: -7px; }
+/* plain type where Arcade uses the pixel font; sizes chosen for a proportional face */
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.px, h1, h2, .big, .stat b, .tab, .stamp, .answer-bar button, .boss-score, .seg button, details.section > summary, .px-num, .kit-num, .themes button, .show-bar .btn, .swipe-hint, .study-top .num, .forecast > div > span:first-child, .kit-hint b, .hook-text .small) { font-family: var(--sans); -webkit-font-smoothing: auto; font-smooth: auto; letter-spacing: -0.01em; }
+:root:is([data-ui="clean"], [data-ui="paper"]) h1 { font-size: 28px; line-height: 1.15; font-weight: 750; }
+:root:is([data-ui="clean"], [data-ui="paper"]) h2 { font-size: 18px; line-height: 1.2; font-weight: 700; letter-spacing: 0; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .big, :root:is([data-ui="clean"], [data-ui="paper"]) .boss-score { font-weight: 750; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .stat b { font-size: 22px; font-weight: 700; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .tab { font-size: 11.5px; line-height: 12px; font-weight: 600; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .seg button { font-size: 13.5px; line-height: 14px; font-weight: 600; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .answer-bar button { font-size: 17px; line-height: 18px; font-weight: 700; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .show-bar .btn { font-size: 17px; font-weight: 700; }
+:root:is([data-ui="clean"], [data-ui="paper"]) details.section > summary { font-size: 18px; line-height: 1.2; font-weight: 700; }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.stamp, .study-top .num, .forecast > div > span:first-child, .kit-hint b, .hook-text .small, .themes button) { font-size: 11.5px; line-height: 12px; font-weight: 650; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .kit-num { font-size: 18px; font-weight: 700; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .brand h1 { font-size: 26px; }
+/* flat: no bevels; cards lift a little; buttons keep one hard edge underneath (Bassiet) */
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.card-box, .hero, .stat, .stack, .btn, .field input, .field select, .paper, .paper.slate, .answer-bar button, .seg button.on, .menu) { box-shadow: none; }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.card-box, .hero, .stack, .stat) { border-width: 1px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .btn { border-width: 1px; box-shadow: 0 2px 0 var(--line); }
+:root:is([data-ui="clean"], [data-ui="paper"]) .btn.primary { box-shadow: 0 2px 0 var(--accent-lo); }
+:root:is([data-ui="clean"], [data-ui="paper"]) .btn:active:not(:disabled) { box-shadow: none; transform: translateY(2px); }
+:root:is([data-ui="clean"], [data-ui="paper"]) .answer-bar button { border-width: 2px; box-shadow: 0 2px 0 color-mix(in srgb, currentColor 45%, transparent); }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.progress i, .bar i) { background: var(--accent); border-radius: inherit; transition: width .25s ease; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .bar i { background: var(--yuzu); }
+:root:is([data-ui="clean"], [data-ui="paper"]) .forecast i { background: var(--ink-3); border-radius: 4px 4px 0 0 !important; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .forecast .today i { background: var(--accent); }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.stack::before, .paper::before) { background: var(--spine, var(--orange)); border-radius: var(--r) 0 0 var(--r); width: 5px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .paper { padding-left: 22px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .paper-under { display: none; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .tabs { border-top-width: 1px; box-shadow: none; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .tab.active svg { filter: none; }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.tree-row, .list-row) { border-bottom-width: 1px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .goal-done .ring { animation: none; }
+:root[data-ui="clean"] :is(.card-box, .hero, .stack) { box-shadow: 0 1px 0 rgba(0,0,0,.35); }
+
+/* Paper: light colours (Bassiet tokens). Wins over every colour theme; the theme only changes the accent. */
+:root[data-ui="paper"], :root[data-ui="paper"][data-theme] {
+  --ink: #F3F4F9; --ink-2: #FFFFFF; --ink-3: #ECEEF5; --line: #C6CCDC; --line-soft: #DDE1EB; --slate: #E8EBF3;
+  --text: #15182A; --muted: #566079;
+  --paper: #FFFFFF; --paper-2: #F3EEE2; --paper-ink: #15182A; --paper-edge: #C6CCDC;
+  --orange: #F28A1B; --orange-2: #A24B00; --orange-dark: #A24B00;
+  --yuzu: #8A6400; --yuzu-dark: #6B4D00; --leaf: #2F7A1F; --clay: #C2412B; --amber: #A86200; --sky: #1F6F8B;
+  --accent: #F28A1B; --accent-hi: #FFA040; --accent-lo: #C66A0B; --on-accent: #1B0D03;
+  color-scheme: light;
+}
+:root[data-ui="paper"][data-theme="gameboy"] { --accent: #4C8A12; --accent-hi: #6DAA2A; --accent-lo: #33630A; --on-accent: #FFFFFF; --orange: #4C8A12; --orange-2: #33630A; }
+:root[data-ui="paper"][data-theme="night"] { --accent: #2E7BD6; --accent-hi: #5A9BE6; --accent-lo: #1D5AA3; --on-accent: #FFFFFF; --orange: #2E7BD6; --orange-2: #1D5AA3; }
+:root[data-ui="paper"] .brand h1 { color: var(--orange-2); }
+:root[data-ui="paper"] h2 { color: var(--orange-2); }
+:root[data-ui="paper"] .sheet-backdrop { background: rgba(21,24,42,.45); }
+:root[data-ui="paper"] :is(.card-box, .hero, .stack, .stat) { box-shadow: 0 1px 2px rgba(21,24,42,.08); }
+:root[data-ui="paper"] .hint-line { color: #8a4a12; }
+:root[data-ui="paper"] .kit-hint { background: #15182A; color: #ECEEF7; border-color: #15182A; }
+:root[data-ui="paper"] .kit-hint b { color: #FFB566; }
+:root[data-ui="paper"] .mcq-opt.right { border-color: #2F7A1F; background: rgba(47,122,31,.12); }
+:root[data-ui="paper"] .mcq-opt.wrong { border-color: #C2412B; background: rgba(194,65,43,.1); }
+:root[data-ui="clean"] { color-scheme: dark; }
+
+/* Text size: reading areas scale (Small 90%, Large 115%); fixed bars stay where the thumb expects them */
+:root[data-size="small"] :is(.screen, .study-body, .sheet, .study-meta) { zoom: 0.9; }
+:root[data-size="large"] :is(.screen, .study-body, .sheet, .study-meta) { zoom: 1.15; }
+:root[data-size="large"] .answer-bar button small { font-size: 13px; }
+/* "Dark cards" stays a dark card in the light interface (the card's own text colours are for a dark card) */
+:root[data-ui="paper"] .paper.slate { background: #1B1E2D; color: #ECEEF7; border-color: #383E57; }
+:root[data-ui="paper"] .slate :is(.mcq-opt, .typeans) { background: #262A3D; border-color: #383E57; color: #ECEEF7; }
+
+/* ---- Today: "More for today" fold; Settings: jump row and where-it-lives tags */
+.more-today { margin-top: 10px; }
+.more-today > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 10px; padding: 12px 14px; background: var(--ink-2); border: 2px dashed var(--line); font-weight: 600; min-height: 48px; }
+.more-today > summary::-webkit-details-marker { display: none; }
+.more-today > summary::after { content: "+"; font-family: var(--px); color: var(--muted); }
+.more-today[open] > summary::after { content: "-"; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .more-today > summary { border-radius: var(--r) !important; border-width: 1px; }
+.jump-row { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; overflow-x: auto; padding: 8px 0 10px; margin: -6px 0 6px; background: var(--ink); scrollbar-width: none; }
+.jump-row::-webkit-scrollbar { display: none; }
+.jump-row .chip { flex: none; }
+details.section > summary .where { font-family: var(--sans); font-size: 11px; line-height: 11px; padding: 3px 6px; border: 1px solid var(--line); color: var(--muted); letter-spacing: 0; text-transform: none; }
+details.section > summary .where.sync { color: var(--leaf); border-color: color-mix(in srgb, var(--leaf) 50%, transparent); }
+:root:is([data-ui="clean"], [data-ui="paper"]) details.section > summary .where { border-radius: 999px !important; }
+details.section { scroll-margin-top: 56px; }
+
+/* ---- Desktop and wide tablets (≥1100 px): a side rail instead of the bottom bar, wider screens, Today in two columns,
+   Settings groups in two columns. Phones and portrait tablets keep the bottom bar. */
+@media (min-width: 1100px) {
+  .app { padding-bottom: 24px; padding-left: 96px; }
+  .tabs { top: 0; bottom: 0; left: 0; right: auto; width: 96px; transform: none; flex-direction: column; justify-content: flex-start; gap: 6px; padding: calc(18px + var(--safe-t)) 8px; border: 0; border-right: 2px solid var(--line); box-shadow: none; }
+  .tab { min-width: 0; width: 100%; padding: 12px 0; font-size: 10px; }
+  .toast, .kit-snack, .bulk-bar { bottom: 24px; }
+  .screen { max-width: 1180px; padding-left: 28px; padding-right: 28px; }
+  .today-cols { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+  .today-cols .col-side > h2:first-child { margin-top: 0; }
+  .col-side { position: sticky; top: 14px; }
+  .settings-cols { columns: 2; column-gap: 28px; }
+  .settings-cols > details.section { break-inside: avoid; display: block; }
+  .sheet { max-width: 640px; border-bottom: 2px solid var(--line); margin-bottom: 4vh; }
+  .sheet-backdrop { align-items: center; }
+}
+:root:is([data-ui="clean"], [data-ui="paper"]) .tabs { border-right-width: 1px; }
+@media (min-width: 1100px) { :root:is([data-ui="clean"], [data-ui="paper"]) .sheet { border-radius: 16px !important; } }
+@media (min-width: 900px) { .show-bar { width: 100%; max-width: 900px; margin-left: auto; margin-right: auto; border-left: 2px solid var(--line-soft); border-right: 2px solid var(--line-soft); } }
+@media (min-width: 1100px) { .heat-grid { max-width: 620px; } }

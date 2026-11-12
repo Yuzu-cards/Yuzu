@@ -72,13 +72,13 @@ try {
   await p3.click("nav.tabs >> text=Today"); await p3.waitForSelector("text=Step 1", { timeout: 5000 });
   ok("Today shows the countdown and its verdict", /10 days|9 days|11 days/.test(await p3.locator(".screen").innerText()) && /Needs \d+ new cards a day/.test(await p3.locator(".screen").innerText()));
   const hs = await p3.evaluate(async () => (await (window as any).yuzu.hubStatus())); ok("status.json asks about the exam when behind", hs.pending.some((t: string) => /Step 1 in \d+ days: needs/.test(t)) && hs.extra.exams?.[0]?.name === "Step 1", JSON.stringify(hs.pending));
-  await p3.click("text=Practice with Claude"); await p3.waitForSelector('textarea[aria-label="Prompt for Claude"]');
+  await p3.click("text=More for today"); await p3.click("button:has-text('Practice with Claude')"); await p3.waitForSelector('textarea[aria-label="Prompt for Claude"]');
   const pr = await p3.inputValue('textarea[aria-label="Prompt for Claude"]');
   ok("Practice with Claude builds a prompt from the weak cards", /\n1\. (Cardio|Renal) question \d+ about topic/.test(pr) && /Step 1/.test(pr) === false && /yuzu_pack/.test(pr), pr.slice(0, 120).replace(/\n/g, " "));
   await p3.click("button:has-text('Patient case')"); ok("…the style changes the role it plays", /emergency department consultant/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
   await p3.selectOption("select >> nth=0", { label: "Step 1 (exam)" }); ok("…and an exam can be chosen as the source", /revising for Step 1/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
   await p3.click('button[aria-label="Close practice"]');
-  await p3.click("text=Mixed drill"); await p3.waitForSelector(".study .card-host", { timeout: 10000 });
+  if (!(await p3.locator("button:has-text('Mixed drill')").isVisible())) await p3.click("text=More for today"); await p3.click("button:has-text('Mixed drill')"); await p3.waitForSelector(".study .card-host", { timeout: 10000 });
   ok("the mixed drill opens as a study session", (await p3.locator(".study-top").count()) > 0);
   await p3.screenshot({ path: "test/e2e/shots/exam.png" });
   // ---- Hands-free review (speech mocked: the card is "said", then the answer "heard")

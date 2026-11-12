@@ -85,10 +85,10 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
       </div>
       <div className="card-box" style={{ marginTop: 12 }}>
         <b>This week</b>
-        <div className="small muted" style={{ marginTop: 4 }}>{week.n.toLocaleString()} reviews in {week.mins} min{week.recall !== null ? `, ${week.recall}% recalled` : ""}. {lastWeek.n ? `Last week: ${lastWeek.n.toLocaleString()} in ${lastWeek.mins} min${lastWeek.recall !== null ? `, ${lastWeek.recall}%` : ""}.` : "No reviews the week before."}</div>
+        <div className="small muted" style={{ marginTop: 4 }}>{week.n.toLocaleString()} reviews in {week.mins < 1 && week.n ? "under a minute" : `${week.mins} min`}{week.recall !== null ? `, ${week.recall}% recalled` : ""}. {lastWeek.n ? `Last week: ${lastWeek.n.toLocaleString()} in ${lastWeek.mins} min${lastWeek.recall !== null ? `, ${lastWeek.recall}%` : ""}.` : "No reviews the week before."}</div>
       </div>
       <h2>Last 12 weeks</h2>
-      <div className="card-box" style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 1fr)", gap: 3 }}>
+      <div className="card-box heat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 1fr)", gap: 3 }}>
         {perDay.map((n, i) => (
           <div key={i} title={`${n} reviews`} style={{ aspectRatio: "1", background: n === 0 ? "var(--ink-3)" : n / maxD > 0.66 ? "var(--yuzu)" : n / maxD > 0.33 ? "var(--orange)" : "color-mix(in srgb, var(--orange) 45%, var(--ink-3))" }} />
         ))}

@@ -34,7 +34,13 @@ export const THEMES: { id: "yuzu" | "orange" | "gameboy" | "night"; name: string
   { id: "night", name: "Night", sw: ["#0b1022", "#5ee0ff", "#ff7a1a"] },
 ];
 export function applyTheme(id: string) {
-  document.documentElement.dataset.theme = id;
+  document.documentElement.dataset.theme = id; try { localStorage.setItem("yuzu-theme", id); } catch { /* fine */ }
   const meta = document.querySelector('meta[name="theme-color"]'); const t = THEMES.find((x) => x.id === id) ?? THEMES[0];
-  meta?.setAttribute("content", t.sw[0]);
+  meta?.setAttribute("content", document.documentElement.dataset.ui === "paper" ? "#F3F4F9" : t.sw[0]);
 }
+/** The interface (Arcade: 8-bit; Clean: dark, soft corners, system type; Paper: light) and text size, per device. */
+export type UiMode = "arcade" | "clean" | "paper"; export type TextSize = "small" | "normal" | "large";
+export function uiMode(): UiMode { return (document.documentElement.dataset.ui as UiMode) || "arcade"; }
+export function textSize(): TextSize { return (document.documentElement.dataset.size as TextSize) || "normal"; }
+export function setUi(m: UiMode) { document.documentElement.dataset.ui = m; try { localStorage.setItem("yuzu-ui", m); } catch { /* fine */ } applyTheme(document.documentElement.dataset.theme || "yuzu"); }
+export function setTextSize(z: TextSize) { document.documentElement.dataset.size = z; try { localStorage.setItem("yuzu-size", z); } catch { /* fine */ } }

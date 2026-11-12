@@ -40,7 +40,7 @@ export function YuzuGoal({ value, max, size = 150, center, sub }: { value: numbe
   return (
     <svg width={size} height={size} viewBox="0 0 30 30" className="ring" shapeRendering="crispEdges" aria-label={`${value} of ${max} reviews today`}>
       {cells.map(([x, y, c], i) => <rect key={i} x={x} y={y} width={1} height={1} fill={c} />)}
-      <text x={15} y={sub ? 15.6 : 17} textAnchor="middle" fontSize={fs} fill="var(--text)" style={{ fontFamily: "var(--px)" }}>{label}</text>
+      <text x={15} y={sub ? 15.6 : 17} textAnchor="middle" fontSize={fs} fill="#f1e9d6" style={{ fontFamily: "var(--px)" }}>{label}</text>{/* the hole is always dark */}
       {sub && <text x={15} y={19.4} textAnchor="middle" fontSize={2} fill="#a99e86" style={{ fontFamily: "var(--px)" }}>{sub}</text>}
     </svg>
   );
@@ -113,7 +113,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
       {store.cards.size === 0 ? (
         <div className="card-box"><div style={{ fontWeight: 700, marginBottom: 6 }}>Nothing to study yet</div><div className="muted small">Go to Settings and import your Anki collection. Review history comes with it, so nothing starts over.</div></div>
       ) : (
-        <>
+        <div className="today-cols"><div className="col-main">
           <div className={"hero" + (goalDone ? " goal-done" : "")}>
             <span data-hint={`Goal yuzu|${stats.today} of today's ${stats.goal} reviews done; the segments fill toward the goal. The number in the middle: ${queue.length} cards ready now.`}><YuzuGoal value={stats.today} max={stats.goal} size={150} center={queue.length} sub="ready" /></span>
             <div>
@@ -131,6 +131,8 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
           {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
           <Countdowns onStudy={onStudy} />
           <Coach missed={missed} weakest={weakest} bossReady={bossReady} overdue={overdue} onStudy={onStudy} onBoss={onBoss} onFilter={onFilter} onRecap={() => setRecap(true)} onTab={onTab} />
+          <MoreForToday onStudy={onStudy} />
+          </div><div className="col-side">
           <h2>Next 7 days</h2>
           <p className="small muted" style={{ margin: "-4px 0 8px" }}>Reviews falling due each day, so you see heavy days coming.{overdue > 0 ? <> Plus <b style={{ color: "var(--orange)" }}>{overdue.toLocaleString()} overdue</b>: about <b>{Math.ceil(overdue / 7).toLocaleString()} extra a day</b> clears them in a week.</> : null}</p>
           <div className="card-box forecast" style={{ height: 108 }}>
@@ -160,7 +162,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
                 <span className="muted"><IconPlay /></span>
               </HoldRow>
             ))}</>)}
-        </>
+        </div></div>
       )}
     </div>
   );
@@ -218,11 +220,8 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
 const dmy = (iso: string) => iso.split("-").reverse().join("/");
 /** Exam countdowns: days left, what's introduced, the new cards a day it needs, and drills on what you'd forget. Plus the mixed-system drill. */
 function Countdowns({ onStudy }: { onStudy: OnStudy }) {
-  const [practice, setPractice] = useState(false);
   const today = store.isoToday(); const list = (store.settings.deadlines ?? []).filter((d) => d.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1));
-  const drill = useMemo(() => store.drillQueue(30), [store.cards.size, store.reviews.length, today]); const systems = store.drillSystems(drill);
   return (<>
-    {practice && <PracticeSheet onClose={() => setPractice(false)} />}
     {list.map((d) => { const e = store.examStatus(d); const pct = Math.round(e.coverage * 100); return (
       <div key={d.id} className="card-box" style={{ marginTop: 10 }}>
         <div className="row"><b className="grow">{d.name}</b><span className={"chip" + (e.onTrack ? " yuzu" : " orange")}>{e.daysLeft === 0 ? "today" : e.daysLeft === 1 ? "tomorrow" : `${e.daysLeft} days`}</span></div>
@@ -236,7 +235,21 @@ function Countdowns({ onStudy }: { onStudy: OnStudy }) {
           {!e.onTrack && store.settings.newPerDay < e.needPerDay && <button className="btn grow" onClick={async () => { await store.saveSettings({ newPerDay: e.needPerDay }); snackbar(`New cards a day: ${e.needPerDay}`); }}>Set {e.needPerDay} a day</button>}
         </div>
       </div>); })}
-    {systems >= 2 && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginTop: 10 }} onClick={() => onStudy("", "decks", { preset: drill, title: "Mixed drill" })}><span className="grow"><b>Mixed drill</b><br /><span className="small muted">{drill.length} cards from {systems} systems, taken in turns — due and shakiest first. Switching topics is harder and sticks better.</span></span><IconPlay /></button>}
-    {drill.length >= 5 && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginTop: 10 }} onClick={() => setPractice(true)}><span className="grow"><b>Practice with Claude</b><br /><span className="small muted">An oral exam, a patient case or a teach-back built from the cards you're weakest on.</span></span></button>}
+  </>);
+}
+
+/** "More for today" (Citrus 2.x: the home screen stays short): the extra ways to study, folded under one line. */
+function MoreForToday({ onStudy }: { onStudy: OnStudy }) {
+  const [practice, setPractice] = useState(false); const today = store.isoToday();
+  const [open, setOpen] = useState(() => { try { return localStorage.getItem("yuzu-more-today") === "open"; } catch { return false; } });
+  const drill = useMemo(() => store.drillQueue(30), [store.cards.size, store.reviews.length, today]); const systems = store.drillSystems(drill);
+  if (systems < 2 && drill.length < 5) return null;
+  return (<>
+    {practice && <PracticeSheet onClose={() => setPractice(false)} />}
+    <details className="more-today" open={open} onToggle={(e) => { const o = (e.target as HTMLDetailsElement).open; setOpen(o); try { localStorage.setItem("yuzu-more-today", o ? "open" : "closed"); } catch { /* fine */ } }}>
+      <summary><span className="grow">More for today</span><span className="small muted">{systems >= 2 ? "mixed drill · " : ""}practice with Claude</span></summary>
+      {systems >= 2 && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginTop: 10 }} onClick={() => onStudy("", "decks", { preset: drill, title: "Mixed drill" })}><span className="grow"><b>Mixed drill</b><br /><span className="small muted">{drill.length} cards from {systems} systems, taken in turns — due and shakiest first. Switching topics is harder and sticks better.</span></span><IconPlay /></button>}
+      {drill.length >= 5 && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginTop: 10 }} onClick={() => setPractice(true)}><span className="grow"><b>Practice with Claude</b><br /><span className="small muted">An oral exam, a patient case or a teach-back built from the cards you're weakest on.</span></span></button>}
+    </details>
   </>);
 }

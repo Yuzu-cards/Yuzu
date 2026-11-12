@@ -56,6 +56,21 @@ try {
   await M.click("nav.tabs >> text=Today"); const txt = await M.locator(".screen").innerText();
   ok("…and Today shows the new day (0 reviews today)", /\b0\s*\n?\s*reviews today/.test(txt), txt.slice(0, 160).replace(/\n/g, " | "));
   await c4.close();
+  // ---- Interfaces and layout: Paper sticks from the first paint; the jump row opens a group; a desktop gets the side rail
+  const c5 = await browser.newContext({ viewport: { width: 412, height: 915 } }); const L = await open(c5, "L"); await L.evaluate((p) => (window as any).yuzu.importPack(p), pack);
+  await L.click("nav.tabs >> text=Settings"); await L.click('[aria-label="Interface"] >> text=Paper');
+  ok("choosing Paper switches the interface at once", (await L.evaluate(() => document.documentElement.dataset.ui)) === "paper");
+  await L.reload(); const first = await L.evaluate(() => ({ ui: document.documentElement.dataset.ui, bg: getComputedStyle(document.body).backgroundColor }));
+  ok("…and it is there from the first paint after a reload (light background)", first.ui === "paper" && first.bg === "rgb(243, 244, 249)", JSON.stringify(first));
+  await L.waitForFunction(() => (window as any).yuzu?.loaded); await L.click("nav.tabs >> text=Settings"); await L.click('[aria-label="Text size"] >> text=Large');
+  ok("text size Large scales the reading area", (await L.evaluate(() => getComputedStyle(document.querySelector(".screen")!).zoom)) === "1.15");
+  await L.click('.jump-row >> text=Reminders'); await L.waitForTimeout(600);
+  ok("the jump row opens and scrolls to a group", await L.evaluate(() => { const d = document.getElementById("s-remind") as HTMLDetailsElement; const r = d.getBoundingClientRect(); return d.open && r.top < innerHeight - 150 && r.top > -5; }), String(await L.evaluate(() => { const d = document.getElementById("s-remind") as HTMLDetailsElement; return d.open + " " + Math.round(d.getBoundingClientRect().top) + " " + scrollY; })));
+  ok("each group says whether it syncs or stays on this device", (await L.locator("details.section > summary .where").count()) >= 10);
+  await L.setViewportSize({ width: 1280, height: 860 }); await L.click("nav.tabs >> text=Today"); await L.waitForTimeout(200);
+  const rail = await L.evaluate(() => { const n = (document.querySelector("nav.tabs") as HTMLElement).getBoundingClientRect(); const c = document.querySelector(".today-cols"); return { w: Math.round(n.width), h: Math.round(n.height), cols: c ? getComputedStyle(c).gridTemplateColumns.split(" ").length : 0 }; });
+  ok("on a desktop the tabs become a side rail and Today has two columns", rail.w === 96 && rail.h >= 800 && rail.cols === 2, JSON.stringify(rail));
+  await c5.close();
 } finally {
   console.log("errors:", errors.length ? errors : "none"); if (fails.length || errors.length) { console.log("FAILED:", fails); process.exitCode = 1; }
   await browser.close(); server.kill();
