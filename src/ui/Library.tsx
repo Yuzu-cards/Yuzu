@@ -194,7 +194,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
       </div>
       {view !== "smart" && (
         <div className="crumbs">
-          <button onClick={() => go("")}>All</button>
+          <button style={{ minWidth: 44, minHeight: 32 }} onClick={() => go("")}>All</button>
           {crumbs.map((c, i) => (<span key={i} className="row" style={{ gap: 4 }}><span className="muted">›</span><button onClick={() => go(crumbs.slice(0, i + 1).join("::"))}>{c}</button></span>))}
         </div>
       )}

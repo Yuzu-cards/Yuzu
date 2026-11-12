@@ -6,7 +6,12 @@ import * as db from "./lib/db";
 import * as fsrs from "./scheduler/fsrs";
 
 import { applyTheme } from "./ui/sfx";
-store.load().then(() => { applyTheme(store.settings.theme); setHiddenFields(store.settings.hiddenFields ?? []); }).catch(() => { /* shown by the recovery screen */ });
+import { claimTab } from "./lib/tabs";
+// Another tab took over: this copy stops (it reloads into the "open elsewhere" screen, so nothing stale can be written).
+const lost = () => { store.handedOff(); };
+const start = () => store.load().then(() => { applyTheme(store.settings.theme); setHiddenFields(store.settings.hiddenFields ?? []); }).catch(() => { /* shown by the recovery screen */ });
+store.startAfterTakeover = start; store.lostTab = lost;
+claimTab(lost).then((r) => { if (r === "mine") start(); else store.setTabBusy(true); });
 try { document.documentElement.dataset.effects = localStorage.getItem("yuzu-effects") === "off" ? "off" : "on"; } catch { /* fine */ }
 store.subscribe(() => { if (store.loaded) setHiddenFields(store.settings.hiddenFields ?? []); if (store.loaded && document.documentElement.dataset.theme !== store.settings.theme) applyTheme(store.settings.theme); });
 createRoot(document.getElementById("root")!).render(<App />);

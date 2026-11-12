@@ -692,6 +692,23 @@ export class Store {
 
   loadError: string | null = null;
   saveError: string | null = null;
+  // ---- One writing tab (see lib/tabs.ts)
+  storagePersisted: boolean | null = null;
+  /** When the study day turns over (the "new day starts at" hour) everything that counts "today" redraws, without reopening the app.
+   *  A timer for the open app, plus a check on return (phones pause timers in the background). */
+  private dayTurnTimer: ReturnType<typeof setTimeout> | null = null; private shownDay = 0;
+  private watchDayTurn() {
+    const check = () => { const d = this.dayStart(); if (d !== this.shownDay) { const first = !this.shownDay; this.shownDay = d; if (!first) { this.dueByDay = null; this.bump(); } } };
+    const arm = () => { if (this.dayTurnTimer) clearTimeout(this.dayTurnTimer); const next = this.dayStart() + DAY - Date.now(); this.dayTurnTimer = setTimeout(() => { check(); arm(); }, Math.max(1000, Math.min(next + 500, 6 * 3600e3))); };
+    check(); arm();
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { check(); arm(); } });
+  }
+  tabBusy = false; movedAway = false; startAfterTakeover: (() => Promise<void>) | null = null; lostTab: (() => void) | null = null;
+  setTabBusy(v: boolean) { this.tabBusy = v; this.bump(); }
+  /** "Use Yuzu here": take the lock from the other tab, then open the collection. */
+  async useHere() { const { takeTab } = await import("./tabs"); this.tabBusy = false; this.movedAway = false; this.bump(); await takeTab(() => this.lostTab?.()); await this.startAfterTakeover?.(); }
+  /** Another tab took over: stop writing. Reload, so this copy shows the "open elsewhere" screen with nothing stale in memory. */
+  handedOff() { this.movedAway = true; this.bump(); setTimeout(() => location.reload(), 400); /* lets a save already under way finish */ }
   /** Problems found while loading (orphan cards dropped, bad values fixed). Shown in Settings → Diagnostics. */
   loadNotes: string[] = [];
 
@@ -711,7 +728,8 @@ export class Store {
   protected async persist<T>(what: string, p: Promise<T>): Promise<T | undefined> {
     try { const r = await p; if (this.saveError) { this.saveError = null; this.bump(); } return r; }
     catch (e: any) {
-      this.saveError = `${what}: ${e?.message ?? e}`; console.error("save failed", what, e); this.bump();
+      const full = e?.name === "QuotaExceededError" || /quota|storage.*full|disk.*full/i.test(String(e?.message ?? ""));
+      this.saveError = full ? `this device's storage for Yuzu is full (${what}). Free some space on the phone; until then, Back up now saves everything as a file` : `${what}: ${e?.message ?? e}`; console.error("save failed", what, e); this.bump();
       db.setMeta("lastError", { at: Date.now(), where: what, message: String(e?.message ?? e) }).catch(() => {});
       return undefined;
     }
@@ -761,6 +779,9 @@ export class Store {
     this.rota = this.settings.google?.rota ?? {}; this.rebuildShiftWeights();
     await this.migrations(); mark("meta");
     this.loaded = true;
+    this.watchDayTurn();
+    // Ask the browser to keep Yuzu's storage when the device runs low (granted to installed apps); without it a full phone may clear it.
+    try { (navigator as any).storage?.persist?.().then((ok: boolean) => { this.storagePersisted = ok; }).catch(() => {}); } catch { /* fine */ }
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
     this.bump();
     this.mediaReady = this.loadMedia();

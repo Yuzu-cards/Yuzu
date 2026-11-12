@@ -91,7 +91,7 @@ button.chip:active:not(:disabled) { transform: translateY(1px); }
 .tab.active { color: var(--accent); }
 .tab svg { width: 24px; height: 24px; }
 .tab.active svg { filter: drop-shadow(0 2px 0 var(--accent-lo)); }
-@media (min-width: 720px) { .tabs { max-width: 760px; left: 50%; transform: translateX(-50%); border: 2px solid var(--line); border-bottom: 0; } }
+@media (min-width: 720px) { .tabs { width: min(760px, 100%); left: 50%; right: auto; transform: translateX(-50%); border: 2px solid var(--line); border-bottom: 0; } }
 
 /* Header */
 .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }

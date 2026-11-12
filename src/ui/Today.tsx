@@ -82,6 +82,9 @@ function derive() {
 }
 
 function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, overdue, top, missed, weakest, bossReady, onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
+  // the headline counts what the session holds, so its parts add up to the number in the ring
+  const parts = { review: 0, learning: 0, fresh: 0 }; for (const c of queue) { if (c.state === "new") parts.fresh++; else if (c.state === "review") parts.review++; else parts.learning++; }
+  const held = Math.max(0, tree.due - parts.review - parts.learning); // tree.due already counts learning cards that are due
   const [q, setQ] = useState("");
   const [sheet, setSheet] = useState<{ title: string; sub?: string; items: SheetItem[] } | null>(null);
   const [recap, setRecap] = useState(false); const [capture, setCapture] = useState(false);
@@ -114,7 +117,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
           <div className={"hero" + (goalDone ? " goal-done" : "")}>
             <span data-hint={`Goal yuzu|${stats.today} of today's ${stats.goal} reviews done; the segments fill toward the goal. The number in the middle: ${queue.length} cards ready now.`}><YuzuGoal value={stats.today} max={stats.goal} size={150} center={queue.length} sub="ready" /></span>
             <div>
-              <div className="lead"><b data-hint="Ready|Everything this session would hold: due reviews, cards in learning steps and today's new cards.">{queue.length.toLocaleString()} cards</b> ready: <span data-hint="Due|Learned cards whose recall is predicted to have dropped to your target — review them today.">{tree.due.toLocaleString()} due</span>, <span data-hint="Learning|Cards in their first short steps (minutes) or relearning after a lapse.">{tree.learning} learning</span> and <span data-hint={`New|Cards you haven't seen; up to ${store.settings.newPerDay} a day (Settings → Studying).`}>{Math.min(tree.newCount, Math.max(0, store.settings.newPerDay - store.reviewedToday().newCards))} new</span> for today.</div>
+              <div className="lead"><b data-hint="Ready|Everything this session would hold: due reviews, cards in learning steps and today's new cards.">{queue.length.toLocaleString()} cards</b> ready: <span data-hint="Due|Learned cards whose recall is predicted to have dropped to your target — review them today.">{parts.review.toLocaleString()} due</span>, <span data-hint="Learning|Cards in their first short steps (minutes) or relearning after a lapse.">{parts.learning.toLocaleString()} learning</span> and <span data-hint={`New|Cards you haven't seen; up to ${store.settings.newPerDay} a day (Settings → Studying).`}>{parts.fresh.toLocaleString()} new</span> for today.{held > 0 && <span className="muted" data-hint={`Held back|${held.toLocaleString()} more are due but wait for another day: a card whose sibling (another card of the same note) is in today's session waits, and so does anything past your daily cap (Settings → Studying).`}> {held.toLocaleString()} more wait for another day.</span>}</div>
               <div className="lead" style={{ marginTop: 6 }}>Goal <b>{stats.today} / {stats.goal}</b>{stats.today >= stats.goal ? ", done for today" : ""}.</div>
               <button className="btn primary" style={{ marginTop: 14 }} onClick={() => onStudy("")} disabled={queue.length === 0}><IconPlay /> Study</button>
             </div>

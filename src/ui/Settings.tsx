@@ -555,7 +555,7 @@ function ExamSettings() {
         <p className="small muted" style={{ marginTop: 0 }}>Set an exam date and which decks it covers. Today then shows how many new cards a day you need, how much you'd remember on the day, and a drill on the cards most likely to slip. It also tells Citrus when you're behind.</p>
         {list.map((d) => <div key={d.id} className="row small" style={{ gap: 8, margin: "6px 0" }}><b className="grow">{d.name}</b><span className="muted">{d.date.split("-").reverse().join("/")} · {d.path ? d.path.split("::").slice(-1)[0] : "everything"}</span><button className="btn" onClick={() => store.saveSettings({ deadlines: list.filter((x) => x.id !== d.id) })}>Remove</button></div>)}
         <div className="field"><label>Name</label><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Step 1" /></div>
-        <div className="field"><label>Date</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+        <div className="field"><label>Date</label><DateField label="Exam date" value={date} min={store.isoToday()} onChange={setDate} /></div>
         <div className="field"><label>Covers</label><select value={path} onChange={(e) => setPath(e.target.value)}><option value="">Everything</option>{decks.map((d) => <option key={d.path} value={d.path}>{d.name}</option>)}</select></div>
         <button className="btn primary" disabled={!name.trim() || !date} onClick={async () => { await store.saveSettings({ deadlines: [...list, { id: "x" + Date.now().toString(36), name: name.trim(), date, view: "decks", path }] }); setName(""); setDate(""); setPath(""); }}>Add exam</button>
       </div>

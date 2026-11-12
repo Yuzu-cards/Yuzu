@@ -100,6 +100,7 @@ function AppInner() {
 
   const [slow, setSlow] = useState(false);
   useEffect(() => { const t = setTimeout(() => setSlow(true), 8000); return () => clearTimeout(t); }, []);
+  if (store.tabBusy || store.movedAway) return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "center", justifyContent: "center", minHeight: "80dvh", textAlign: "center" }}><YuzuMark size={56} /><h1 style={{ margin: 0 }}>Open in another tab</h1><p className="muted" style={{ maxWidth: 340, margin: 0 }}>Yuzu is already open in another tab or window on this device. One copy at a time keeps your reviews and edits from overwriting each other.</p><button className="btn primary" disabled={store.movedAway} onClick={() => store.useHere()}>Use Yuzu here</button></div>;
   if (store.loadError) return <Recovery error={store.loadError} />;
   if (!store.loaded) {
     return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={64} /><div className="px muted" style={{ fontSize: 10, lineHeight: "10px" }}>loading…</div>{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
