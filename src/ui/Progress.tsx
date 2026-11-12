@@ -77,6 +77,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
   return (
     <div className="screen">
       <h1>Progress</h1>
+      <Areas />
       <RecapButton />
       <Mastered />
       <div className="stat-grid">
@@ -209,5 +210,27 @@ function RecapButton() {
       <button className="btn primary" onClick={() => setOpen(true)}>Recap</button>
     </div>
     {open && <Recap onClose={() => setOpen(false)} />}
+  </>);
+}
+
+/** Your top-level decks side by side: what's due, what's left to start, how well you recall it and how much is mastered. */
+function Areas() {
+  const v = store.getVersion(); const all = useMemo(() => store.areaStats(), [Math.floor(v / 10), store.cards.size]); const [more, setMore] = useState(false);
+  if (all.length < 2) return null; const rows = more ? all : all.slice(0, 8);
+  return (<>
+    <h2 style={{ marginTop: 0 }}>Areas</h2>
+    <div className="areas" role="table" aria-label="Areas side by side">
+      <div className="area-row head" role="row"><span role="columnheader">Area</span><span role="columnheader" data-hint="Due|Learned cards due by the end of today.">Due</span><span role="columnheader" data-hint="New|Cards not started yet.">New left</span><span role="columnheader" data-hint="Recall|Share of reviews (not first sight) answered Hard, Good or Easy in the last 30 days.">Recall</span><span role="columnheader" data-hint="Mastered|Learned cards with a memory of at least the 'mastered' days in Settings.">Mastered</span></div>
+      {rows.map((a) => { const pm = a.learned ? Math.round((a.mastered / a.total) * 100) : 0; const pl = Math.round((a.learned / a.total) * 100); return (
+        <div className="area-row" role="row" key={a.name}>
+          <span role="cell"><b>{a.name}</b><br /><span className="small muted">{a.total.toLocaleString()} cards · {a.minutes30} min in 30 days</span>
+            <span className="area-bar" aria-hidden="true"><i style={{ width: pm + "%" }} className="m" /><i style={{ width: Math.max(0, pl - pm) + "%" }} className="l" /></span></span>
+          <span role="cell" className="num">{a.due.toLocaleString()}</span>
+          <span role="cell" className="num">{a.fresh.toLocaleString()}</span>
+          <span role="cell" className="num">{a.recall === null ? "–" : a.recall + "%"}</span>
+          <span role="cell" className="num">{pm}%</span>
+        </div>); })}
+    </div>
+    <p className="small muted" style={{ margin: "6px 0 14px" }}>{all.length > 8 && <button className="btn" style={{ marginRight: 8 }} onClick={() => setMore(!more)}>{more ? "Show fewer" : `All ${all.length} areas`}</button>}Bar: mastered (dark) and started (light) out of each area's cards.</p>
   </>);
 }

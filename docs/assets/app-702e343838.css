@@ -442,3 +442,36 @@ details.section { scroll-margin-top: 56px; }
 @media (min-width: 1100px) { :root:is([data-ui="clean"], [data-ui="paper"]) .sheet { border-radius: 16px !important; } }
 @media (min-width: 900px) { .show-bar { width: 100%; max-width: 900px; margin-left: auto; margin-right: auto; border-left: 2px solid var(--line-soft); border-right: 2px solid var(--line-soft); } }
 @media (min-width: 1100px) { .heat-grid { max-width: 620px; } }
+
+/* ---- Card editor: one column on a phone; on wide screens the fields and a live preview side by side */
+.editor-preview .paper { min-height: 160px; }
+.editor-preview { margin-top: 12px; }
+@media (min-width: 900px) {
+  .sheet.sheet-wide { max-width: 1040px; }
+  .editor-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  .editor-preview { position: sticky; top: 0; margin-top: 8px; }
+}
+
+/* ---- Progress → Areas: one row per top-level deck */
+.areas { background: var(--ink-2); border: 2px solid var(--line); }
+.area-row { display: grid; grid-template-columns: minmax(0, 1.9fr) repeat(4, minmax(0, .8fr)); gap: 6px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--line-soft); }
+.area-row.head { border-top: 0; font-size: 12px; color: var(--muted); padding-top: 8px; padding-bottom: 6px; }
+.area-row .num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.area-row.head span:not(:first-child) { text-align: right; }
+.area-bar { display: flex; height: 6px; margin-top: 6px; background: var(--ink-3); overflow: hidden; }
+.area-bar i { display: block; height: 100%; }
+.area-bar i.m { background: var(--orange); } .area-bar i.l { background: color-mix(in srgb, var(--orange) 35%, transparent); }
+:root:is([data-ui="clean"], [data-ui="paper"]) .areas { border-radius: var(--r) !important; border-width: 1px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .area-bar { border-radius: 3px !important; }
+@media (max-width: 420px) { .area-row { grid-template-columns: minmax(0, 1.5fr) repeat(4, minmax(0, .7fr)); font-size: 14px; padding: 9px 8px; } }
+
+/* ---- Keyboard / gamepad: a clear focus ring, the "?" list */
+.pad-focus, :focus-visible { outline: 3px solid var(--orange, #f08a24) !important; outline-offset: 2px; }
+.keys { border: 2px solid var(--line); background: var(--ink-2); margin-bottom: 8px; }
+.keys-row { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line-soft); align-items: center; font-size: 14px; }
+.keys-row.head { border-top: 0; font-size: 12px; color: var(--muted); }
+kbd { font-family: var(--sans); font-size: 12.5px; padding: 2px 6px; border: 1px solid var(--line); background: var(--ink-3); color: var(--text); white-space: normal; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .keys { border-radius: var(--r) !important; border-width: 1px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) kbd { border-radius: 5px !important; }
+.tab.rail-only { display: none; }
+@media (min-width: 1100px) { .tab.rail-only { display: flex; margin-top: auto; } }

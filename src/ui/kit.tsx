@@ -82,10 +82,19 @@ export function HintLayer() {
     const up = () => { clear(); if (swallow) setTimeout(() => (swallow = false), 400); };
     const ctx = (e: Event) => { if ((e.target as Element | null)?.closest?.("[data-hint]")) e.preventDefault(); };
     const scroll = () => { clear(); setHint(null); };
+    // A mouse: hovering a hint shows it after a moment (no hold needed); leaving hides it.
+    let hoverEl: HTMLElement | null = null; let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+    const over = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse") return; const el = (e.target as Element | null)?.closest?.("[data-hint]") as HTMLElement | null; if (el === hoverEl) return;
+      hoverEl = el; clearTimeout(hoverTimer); if (!el) { setHint(null); return; }
+      hoverTimer = setTimeout(() => { if (hoverEl !== el || !el.isConnected) return; const r = el.getBoundingClientRect(); const below = r.top < 110; const raw = el.getAttribute("data-hint") ?? ""; const [t, ...rest] = raw.split("|");
+        setHint({ title: rest.length ? t : "", text: rest.length ? rest.join("|") : t, x: Math.min(Math.max(r.left + r.width / 2, 130), window.innerWidth - 130), y: below ? r.bottom + 8 : r.top - 8, below }); }, 650);
+    };
+    document.addEventListener("pointerover", over, true);
     document.addEventListener("pointerdown", down, true); document.addEventListener("pointermove", move, true); document.addEventListener("pointerup", up, true);
     document.addEventListener("pointercancel", clear, true); document.addEventListener("click", click, true); document.addEventListener("contextmenu", ctx, true); window.addEventListener("scroll", scroll, true);
     return () => {
-      clearTimeout(timer); clearTimeout(hideTimer);
+      clearTimeout(timer); clearTimeout(hideTimer); clearTimeout(hoverTimer); document.removeEventListener("pointerover", over, true);
       document.removeEventListener("pointerdown", down, true); document.removeEventListener("pointermove", move, true); document.removeEventListener("pointerup", up, true);
       document.removeEventListener("pointercancel", clear, true); document.removeEventListener("click", click, true); document.removeEventListener("contextmenu", ctx, true); window.removeEventListener("scroll", scroll, true);
     };

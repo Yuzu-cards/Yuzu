@@ -9,6 +9,7 @@ import { Recap } from "./Recap";
 import { CaptureSheet } from "./Capture";
 import { PracticeSheet } from "./Practice";
 import { DiagnoseSheet } from "./Diagnose";
+import { CardEditor } from "./CardEditor";
 import { sendImproveToClaude } from "./Improve";
 
 /** A yuzu cut in half, drawn on a 30×30 pixel grid: 8 segments fill (yellow; orange while partly done) toward the daily goal. */
@@ -88,8 +89,8 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
   const held = Math.max(0, tree.due - parts.review - parts.learning); // tree.due already counts learning cards that are due
   const [q, setQ] = useState("");
   const [sheet, setSheet] = useState<{ title: string; sub?: string; items: SheetItem[] } | null>(null);
-  const [recap, setRecap] = useState(false); const [capture, setCapture] = useState(false); const [work, setWork] = useState(false);
-  useEffect(() => { if (store.takePendingOpen("capture")) setCapture(true); if (store.takePendingOpen("workload")) setWork(true); });
+  const [recap, setRecap] = useState(false); const [capture, setCapture] = useState(false); const [work, setWork] = useState(false); const [quick, setQuick] = useState(false);
+  useEffect(() => { if (store.takePendingOpen("capture")) setCapture(true); if (store.takePendingOpen("workload")) setWork(true); if (store.takePendingOpen("add")) setQuick(true); });
   const fromCitrus = (() => { try { return sessionStorage.getItem("yuzu-from") === "citrus"; } catch { return false; } })();
   const pinList = useRef<HTMLDivElement>(null);
   const { handle } = useDragReorder({ listRef: pinList, onMove: (a, b) => { const p = [...store.settings.pins]; const [x] = p.splice(a, 1); p.splice(b, 0, x); store.saveSettings({ pins: p }); } });
@@ -109,8 +110,9 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
       {sheet && <ActionSheet title={sheet.title} sub={sheet.sub} items={sheet.items} onClose={() => setSheet(null)} />}
       {capture && <CaptureSheet onClose={() => setCapture(false)} />}
       {work && <DiagnoseSheet onClose={() => setWork(false)} />}
+      {quick && <CardEditor onClose={() => setQuick(false)} />}
       {recap && <Recap initial={new Date().getDate() <= 7 ? "last-month" : "month"} onClose={() => setRecap(false)} />}
-      <div className="brand">{fromCitrus && <a className="chip back-citrus" href="https://amaerys.github.io/Citrus-Maxima/?from=yuzu" aria-label="Back to Citrus">← Citrus</a>}<YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" /><button className="chip" aria-label="Capture" onClick={() => setCapture(true)}>＋ Capture</button>
+      <div className="brand">{fromCitrus && <a className="chip back-citrus" href="https://amaerys.github.io/Citrus-Maxima/?from=yuzu" aria-label="Back to Citrus">← Citrus</a>}<YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" /><button className="chip" aria-label="Quick add a card" onClick={() => setQuick(true)}>＋ Card</button><button className="chip" aria-label="Capture" onClick={() => setCapture(true)}>＋ Capture</button>
         {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} data-hint={`Sync|${store.syncStatus.message || "Ready"}. Tap to sync now, or pull the page down.`} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing…" : store.syncStatus.state === "error" ? "sync failed" : store.hasUnsynced() ? "unsynced" : "synced"}</span>}
       </div>
       {store.inbox.length > 0 && onInbox && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginBottom: 10, borderColor: "var(--yuzu)" }} onClick={onInbox}><span className="grow"><b>{store.inbox.length} new pack{store.inbox.length === 1 ? "" : "s"} from Claude</b><div className="small muted">Review the cards before they join your collection</div></span><span className="chip yuzu">Review</span></button>}

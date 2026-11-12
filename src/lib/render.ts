@@ -88,6 +88,8 @@ export function rewriteMedia(html: string, resolve?: (name: string) => string | 
     if (url) return `<img${attrs} src="${url}"`;
     return `<img${attrs} data-missing="${escapeHtml(src)}" alt="" class="missing-media" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='60'%3E%3Crect width='120' height='60' rx='8' fill='%23222'/%3E%3Ctext x='60' y='35' font-size='11' fill='%23888' text-anchor='middle' font-family='sans-serif'%3Eimage not loaded%3C/text%3E%3C/svg%3E"`;
   });
+  // [tts:de-DE:Wort] → the same play button, spoken by the device's voice (no recording needed)
+  out = out.replace(/\[tts:([a-zA-Z-]{2,10}):([^\]]+)\]/g, (_, lang, text) => `<button type="button" class="yz-sound tts" data-src="tts:${lang}:${encodeURIComponent(stripHtml(text).trim())}" aria-label="Say it"><svg viewBox="0 0 12 12" width="18" height="18" shape-rendering="crispEdges" fill="currentColor"><path d="M1 4h2v4H1zM3 4h1V3h1V2h1v8H5V9H4V8H3zM8 3h1v1h1v4H9v1H8V8h1V4H8z"/></svg></button>`);
   out = out.replace(/\[sound:([^\]]+)\]/g, (_, name) => {
     const url = resolve?.(name.trim());
     return url ? `<button type="button" class="yz-sound" data-src="${url}" aria-label="Play sound"><svg viewBox="0 0 12 12" width="18" height="18" shape-rendering="crispEdges" fill="currentColor"><path d="M2 1h2v1h2v1h2v1h2v1h1v2h-1v1h-2v1h-2v1h-2v1h-2z"/></svg></button>`

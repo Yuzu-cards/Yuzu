@@ -122,6 +122,36 @@ try {
   ok("reminders turn on and say honestly what this browser can do", /Reminders on|can't wake Yuzu/.test(rm), rm);
   ok("…the facts for the service worker are stored", !!nudge && nudge.on === true && nudge.at === "18:30" && nudge.due >= 2 && nudge.goalMet === false && typeof nudge.light === "object", JSON.stringify(nudge).slice(0, 160));
   const off = await p5.evaluate(async () => { const y = (window as any).yuzu; await y.setReminders({ on: false }); return (await y._db.getMeta("nudge", null)).on; }); ok("…and turning them off clears the flag", off === false);
+  // ---- Writing cards: quick add (cloze with Make gap), full editor (MCQ with live preview), German vocab spoken by the device
+  const ctx8 = await browser.newContext({ viewport: { width: 1280, height: 900 } }); const W = await ctx8.newPage();
+  W.on("pageerror", (e) => errors.push("editor: " + e.message));
+  await W.addInitScript(`window.__said = []; Object.defineProperty(window, "speechSynthesis", { configurable: true, value: { speak(u) { window.__said.push(u.lang + "|" + u.text); setTimeout(() => u.onend && u.onend(), 5); }, cancel() {}, getVoices() { return []; } } }); window.SpeechSynthesisUtterance = function (t) { this.text = t; };`);
+  await W.goto(`http://127.0.0.1:${port}/`); await W.waitForFunction(() => (window as any).yuzu?.loaded, null, { timeout: 20000 });
+  await W.click('button[aria-label="Quick add a card"]'); await W.fill('textarea[aria-label="Cloze text"]', "First-line for anaphylaxis is IM adrenaline");
+  await W.evaluate(() => { const t = document.querySelector('textarea[aria-label="Cloze text"]') as HTMLTextAreaElement; const i = t.value.indexOf("IM adrenaline"); t.focus(); t.setSelectionRange(i, i + "IM adrenaline".length); });
+  await W.click("button:has-text('Make gap')");
+  ok("Make gap wraps the selection as the next cloze", (await W.inputValue('textarea[aria-label="Cloze text"]')) === "First-line for anaphylaxis is {{c1::IM adrenaline}}");
+  await W.fill('input[aria-label="Deck"]', "Medicine::Emergency"); await W.click("button:has-text('Save card')"); await W.waitForTimeout(400);
+  const q1 = await W.evaluate(() => { const y = (window as any).yuzu; const n = [...y.notes.values()].find((n: any) => /anaphylaxis/.test(n.fields[0])); return n ? { cards: y.cardsOfNote(n.id).length, deck: y.cardsOfNote(n.id)[0].source } : null; });
+  ok("quick add saves the card into the chosen deck, and the sheet stays open for the next", !!q1 && q1.cards === 1 && /Medicine::Emergency/.test(q1.deck) && (await W.inputValue('textarea[aria-label="Cloze text"]')) === "", JSON.stringify(q1));
+  await W.click('button[aria-label="Close editor"]');
+  await W.click("nav.tabs >> text=Library"); await W.click("button:has-text('＋ Card')"); await W.click('[aria-label="Card type"] >> text=MCQ');
+  await W.fill('textarea[aria-label="Question"]', "Peaked T waves suggest?"); await W.fill('input[aria-label="Option A"]', "Hypokalaemia"); await W.fill('input[aria-label="Option B"]', "Hyperkalaemia"); await W.click('button[aria-label="Option B is right"]');
+  await W.waitForTimeout(300); const pv = await W.evaluate(() => (document.querySelector(".editor-preview .card-host") as any)?.shadowRoot?.textContent ?? "");
+  ok("the full editor previews the card as it will study", /Peaked T waves suggest/.test(pv), pv.slice(0, 80));
+  await W.click("button:has-text('Save card')"); await W.waitForTimeout(400);
+  ok("…and saves a multiple-choice card with the right answer marked", await W.evaluate(() => { const y = (window as any).yuzu; const n = [...y.notes.values()].find((n: any) => n.ntid === "yuzu-mcq"); return !!n && /\*Hyperkalaemia/.test(n.fields[1]); }));
+  await W.click('[aria-label="Card type"] >> text=Vocab'); await W.click('[aria-label="Article"] >> text=der'); await W.fill('input[aria-label="Word"]', "Schmerz"); await W.fill('input[aria-label="Meaning"]', "pain");
+  await W.click("button:has-text('Save card')"); await W.waitForTimeout(400); await W.click('button[aria-label="Close editor"]');
+  const vc = await W.evaluate(() => { const y = (window as any).yuzu; const n = [...y.notes.values()].find((n: any) => n.ntid === "yuzu-vocab"); return n ? { cards: y.cardsOfNote(n.id).length, audio: n.fields[2] } : null; });
+  ok("a vocab card makes two cards (word → meaning, meaning → word), spoken in German without a recording", !!vc && vc.cards === 2 && vc.audio === "[tts:de-DE:der Schmerz]", JSON.stringify(vc));
+  await W.click("nav.tabs >> text=Today"); await W.evaluate(() => (window as any).yuzu.saveSettings({ newPerDay: 50 }));
+  await W.click(".hero >> text=Study"); await W.waitForSelector(".study .card-host", { timeout: 10000 });
+  for (let i = 0; i < 6; i++) { const hasTts = await W.evaluate(() => !!(document.querySelector(".study .card-host") as any)?.shadowRoot?.querySelector("button.yz-sound.tts")); if (hasTts) break; await W.keyboard.press("Space"); await W.keyboard.press("3"); await W.waitForTimeout(200); }
+  await W.evaluate(() => ((document.querySelector(".study .card-host") as any)?.shadowRoot?.querySelector("button.yz-sound.tts") as HTMLElement)?.click()); await W.waitForTimeout(200);
+  const spoken = await W.evaluate(() => (window as any).__said as string[]);
+  ok("tapping the speaker says the word with a German voice", spoken.some((t) => t === "de-DE|der Schmerz"), JSON.stringify(spoken));
+  await ctx8.close();
 } finally {
   console.log("errors:", errors.length ? errors : "none"); if (fails.length || errors.length) { console.log("FAILED:", fails); process.exitCode = 1; }
   await browser.close(); server.kill();

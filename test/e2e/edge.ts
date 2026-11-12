@@ -92,6 +92,29 @@ try {
   ok("Sketchy fields are emptied and sketchy tags dropped; other fields and tags untouched", sk.before.notes === 2 && sk.r?.notes === 2 && sk.after.notes === 0 && sk.n1.f2 === "" && sk.n1.f3 === "" && sk.n1.f4 === "pathoma" && sk.n1.tags.join() === "cardio", JSON.stringify(sk).slice(0, 300));
   ok("…a copy stays on this device, and Put Sketchy back restores it (and keeps it from being stripped again)", sk.kept === 2 && sk.back === 2 && /Sketchy story/.test(sk.n1b.f2) && sk.n1b.tags.some((t: string) => /Sketchy/.test(t)) && sk.keep === true && sk.again === null);
   await c7.close();
+  // ---- Mouse, keyboard and gamepad together (Steam Deck at a monitor)
+  const c8 = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  await c8.addInitScript(`window.__pad = { id: "Steam Deck", index: 0, connected: true, mapping: "standard", buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })), axes: [0, 0, 0, 0] }; navigator.getGamepads = () => [window.__pad];`);
+  const K = await open(c8, "K"); await K.evaluate((p) => (window as any).yuzu.importPack(p), pack);
+  const pad = async (b: number) => { await K.evaluate((i) => { (window as any).__pad.buttons[i].pressed = true; }, b); await K.waitForTimeout(80); await K.evaluate((i) => { (window as any).__pad.buttons[i].pressed = false; }, b); await K.waitForTimeout(80); };
+  await K.keyboard.press("l"); ok("keyboard: L opens the Library", await K.locator("nav.tabs .tab.active >> text=Library").count() === 1);
+  await K.keyboard.press("?"); ok("? lists the keyboard and gamepad controls", await K.locator('[role=dialog][aria-label="Controls"]').count() === 1);
+  await K.keyboard.press("Escape"); await K.waitForTimeout(100); ok("…Esc closes it", await K.locator('[role=dialog][aria-label="Controls"]').count() === 0);
+  await K.keyboard.press("t"); await K.keyboard.press("n"); await K.waitForTimeout(200); ok("N opens quick add", await K.locator('[role=dialog][aria-label="Quick add"]').count() === 1); await K.keyboard.press("Escape");
+  await K.evaluate(() => window.dispatchEvent(new Event("gamepadconnected")));
+  await pad(5); await K.waitForTimeout(150); ok("gamepad: RB moves to the next tab", await K.locator("nav.tabs .tab.active >> text=Library").count() === 1);
+  await pad(4); await K.waitForTimeout(150); ok("…LB back", await K.locator("nav.tabs .tab.active >> text=Today").count() === 1);
+  await pad(13); await pad(13); ok("…the d-pad moves a visible focus between buttons", await K.evaluate(() => !!document.querySelector(".pad-focus") && document.activeElement === document.querySelector(".pad-focus")));
+  await pad(9); await K.waitForSelector(".study .card-host", { timeout: 5000 }).catch(() => {}); ok("…Menu starts studying", await K.locator(".study .card-host").count() === 1);
+  const r0 = await K.evaluate(() => (window as any).yuzu.reviews.length);
+  await pad(0); await K.waitForSelector(".answer-bar", { timeout: 3000 }).catch(() => {}); ok("…A shows the answer", await K.locator(".answer-bar").count() === 1);
+  await pad(15); await K.waitForTimeout(250); const g = await K.evaluate(() => { const y = (window as any).yuzu; return y.reviews.length ? y.reviews[y.reviews.length - 1].rating : 0; });
+  ok("…d-pad → grades Good (the swipe directions)", (await K.evaluate(() => (window as any).yuzu.reviews.length)) === r0 + 1 && g === 3, String(g));
+  await K.click(".study-body", { button: "right" }); await K.waitForTimeout(150); ok("mouse: right-click a card opens its menu", await K.locator("text=Hands-free").count() + await K.locator("text=Needs improving").count() > 0);
+  await K.keyboard.press("Escape"); await K.keyboard.press("Escape"); await K.waitForTimeout(200);
+  await K.click("nav.tabs >> text=Today").catch(() => {}); const hintEl = K.locator(".stat[data-hint]").first(); await hintEl.hover(); await K.waitForTimeout(900);
+  ok("mouse: hovering a stat shows its explanation", await K.locator("[data-testid=hint]").count() === 1);
+  await c8.close();
 } finally {
   console.log("errors:", errors.length ? errors : "none"); if (fails.length || errors.length) { console.log("FAILED:", fails); process.exitCode = 1; }
   await browser.close(); server.kill();

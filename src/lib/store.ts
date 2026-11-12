@@ -375,6 +375,7 @@ export class Store {
       { id: "review", label: due ? `Review ${due.toLocaleString()} cards` : "Study", url: base, icon: "🍋", minutes: needMin },
       { id: "drill", label: "Mixed drill (30 cards)", url: base, icon: "🔀", minutes: 10 },
       { id: "capture", label: "Capture for Yuzu", url: base, icon: "📝", minutes: 1 },
+      { id: "add", label: "Write a card", url: base, icon: "✏️", minutes: 2 },
       { id: "practice", label: "Practice with Claude", url: base, icon: "💬", minutes: 15 },
       ...((this.settings.deadlines ?? []).some((d) => d.date >= today) ? [{ id: "exam", label: "Exam: weakest 30", url: base, icon: "🎯", minutes: 10 }] : []),
     ];
@@ -1337,6 +1338,16 @@ export class Store {
     return this.stripSketchy();
   }
 
+
+  // ---- Areas side by side (Progress): each top-level deck's due, new left, recall and mastery, so the parts of the collection compare at a glance
+  areaStats(now = Date.now()): { name: string; total: number; due: number; fresh: number; learned: number; mastered: number; recall: number | null; reviews30: number; minutes30: number }[] {
+    const top = (c: Card) => (c.source || "Other").split("::")[0]; const end = this.dayStart(now) + DAY; const m = new Map<string, any>();
+    const get = (k: string) => m.get(k) ?? m.set(k, { name: k, total: 0, due: 0, fresh: 0, learned: 0, mastered: 0, ok: 0, all: 0, reviews30: 0, ms: 0 }).get(k);
+    for (const c of this.cards.values()) { if (c.suspended) continue; const a = get(top(c)); a.total++; if (c.state === "new") a.fresh++; else { a.learned++; if (c.due < end) a.due++; if (c.stability >= this.settings.mastery.mastered) a.mastered++; } }
+    const from = now - 30 * DAY;
+    for (let i = this.reviews.length - 1; i >= 0; i--) { const r = this.reviews[i]; if (r.ts < from) { if (r.ts < from - 30 * DAY) break; continue; } const c = this.cards.get(r.cid); if (!c) continue; const a = get(top(c)); a.reviews30++; a.ms += Math.min(r.durationMs || 0, 120000); if (r.state === "review") { a.all++; if (r.rating > 1) a.ok++; } }
+    return [...m.values()].filter((a) => a.total).map((a) => ({ name: a.name, total: a.total, due: a.due, fresh: a.fresh, learned: a.learned, mastered: a.mastered, recall: a.all >= 10 ? Math.round((a.ok / a.all) * 100) : null, reviews30: a.reviews30, minutes30: Math.round(a.ms / 60000) })).sort((x, y) => y.total - x.total);
+  }
 
   // ---- Exam countdown and mixed drills ---------------------------------------------------------------------------------------
   /** Where a deadline stands: how much of its scope is introduced, how many new cards a day it needs, and what you'd remember on the day if you stopped reviewing today. */

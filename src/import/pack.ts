@@ -42,10 +42,22 @@ export const PACK_IO: Notetype = {
   templates: [{ name: "Occlusion", qfmt: "{{Title}}", afmt: "{{Title}}" }],
 };
 
+export const VOCAB_ID = "yuzu-vocab";
+/** German (or any language) vocabulary: two cards, word → meaning and meaning → word. Audio: a recording when the pack has one, else the device says the word. */
+export const PACK_VOCAB: Notetype = {
+  id: VOCAB_ID, name: "Yuzu Vocab", kind: "standard",
+  css: PACK_CLOZE.css + " .vw{font-size:1.5em;font-weight:700;line-height:1.3} .va{opacity:.7;font-weight:600;margin-right:.25em} .vpl{opacity:.7;font-size:.8em;margin-top:2px} .vex{margin-top:10px;font-style:italic;opacity:.85} .vm{font-size:1.25em;font-weight:600}",
+  fields: ["Word", "Meaning", "Audio", "Source", "Article", "Plural", "Example", "Lang"],
+  templates: [
+    { name: "Word → meaning", qfmt: "<div class=vw>{{#Article}}<span class=va>{{Article}}</span>{{/Article}}{{Word}}</div>{{Audio}}", afmt: "{{FrontSide}}<hr id=answer><div class=vm>{{Meaning}}</div>{{#Plural}}<div class=vpl>Plural: {{Plural}}</div>{{/Plural}}{{#Example}}<div class=vex>{{Example}}</div>{{/Example}}{{#Source}}<div class=src>{{Source}}</div>{{/Source}}" },
+    { name: "Meaning → word", qfmt: "<div class=vm>{{Meaning}}</div>", afmt: "{{FrontSide}}<hr id=answer><div class=vw>{{#Article}}<span class=va>{{Article}}</span>{{/Article}}{{Word}}</div>{{Audio}}{{#Plural}}<div class=vpl>Plural: {{Plural}}</div>{{/Plural}}{{#Example}}<div class=vex>{{Example}}</div>{{/Example}}" },
+  ],
+};
+
 // Revisions: give a card a stable "id" (unique within the pack) and re-importing a later version updates
 // that note in place, keeping its review history. "replaces" names an existing note id to update instead
 // (used to revise cards imported before they had ids).
-export interface PackCard { id?: string; replaces?: string; source?: string; type?: "cloze" | "basic" | "mcq" | "occlusion"; masks?: Mask[]; question?: string; options?: unknown; answer?: number | string; explanation?: string; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
+export interface PackCard { id?: string; replaces?: string; source?: string; type?: "cloze" | "basic" | "mcq" | "occlusion" | "vocab"; masks?: Mask[]; word?: string; meaning?: string; article?: string; plural?: string; example?: string; audio?: string; lang?: string; question?: string; options?: unknown; answer?: number | string; explanation?: string; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
 export interface Pack { yuzu_pack: 1; id?: string; name?: string; source?: string; category?: string; tags?: string[]; cards: PackCard[] }
 
 export interface PackResult { notetypes: Notetype[]; notes: Note[]; cards: Card[]; media: { name: string; dataUrl: string }[]; skipped: number; similar: number; updated: string[]; unchanged: number }
@@ -78,22 +90,27 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
   const packKey = p.id || p.name || "pack";
   const base = p.category || "Medicine::Inbox";
   p.cards.forEach((c, i) => {
-    const type = c.type ?? (c.text ? "cloze" : c.options ? "mcq" : c.masks ? "occlusion" : "basic");
-    const nt = type === "cloze" ? PACK_CLOZE : type === "mcq" ? PACK_MCQ : type === "occlusion" ? PACK_IO : PACK_BASIC;
+    const type = c.type ?? (c.text ? "cloze" : c.options ? "mcq" : c.masks ? "occlusion" : c.word ? "vocab" : "basic");
+    const nt = type === "cloze" ? PACK_CLOZE : type === "mcq" ? PACK_MCQ : type === "occlusion" ? PACK_IO : type === "vocab" ? PACK_VOCAB : PACK_BASIC;
     let imageField = "";
     if (c.image && /^data:image\//.test(c.image)) { const name = `pack-${hash(c.image)}.${c.image.slice(11, c.image.indexOf(";")) || "png"}`; media.push({ name, dataUrl: c.image }); imageField = `<img src="${name}">`; }
     const src = c.source ?? p.source ?? "";
     const opts = type === "mcq" ? optionsFromPack(c.options, c.answer) : [];
     const masks = type === "occlusion" ? parseMasks(formatMasks(Array.isArray(c.masks) ? c.masks.map((m) => ({ x: +m.x, y: +m.y, w: +m.w, h: +m.h, label: String(m.label ?? "") })) : [])) : [];
-    const fields = type === "occlusion" ? [c.front ?? c.question ?? "Image occlusion", formatMasks(masks), imageField, src, c.extra ?? ""] : type === "cloze" ? [c.text ?? "", c.extra ?? "", imageField, src] : type === "mcq" ? [c.question ?? c.front ?? "", formatOptions(opts), imageField, src, c.explanation ?? c.extra ?? ""] : [c.front ?? "", c.back ?? "", imageField, src];
-    if (!fields[0].trim() || (type === "mcq" && !valid(opts)) || (type === "occlusion" && (!masks.length || !imageField))) { skipped++; return; }
+    let audioField = "";
+    if (type === "vocab") { const lang = (c.lang ?? (p as any).lang ?? "de-DE").replace(/^de$/i, "de-DE");
+      if (c.audio && /^data:audio\//.test(c.audio)) { const ext = (c.audio.slice(11, c.audio.indexOf(";")) || "mp3").replace("mpeg", "mp3"); const name = `pack-${hash(c.audio)}.${ext}`; media.push({ name, dataUrl: c.audio }); audioField = `[sound:${name}]`; }
+      else if (c.audio && /^[\w.-]+\.(mp3|ogg|wav|m4a|opus)$/i.test(c.audio)) audioField = `[sound:${c.audio}]`;
+      else audioField = `[tts:${lang}:${[c.article, c.word].filter(Boolean).join(" ")}]`; }
+    const fields = type === "vocab" ? [c.word ?? "", c.meaning ?? c.back ?? "", audioField, src, c.article ?? "", c.plural ?? "", c.example ?? "", c.lang ?? (p as any).lang ?? "de-DE"] : type === "occlusion" ? [c.front ?? c.question ?? "Image occlusion", formatMasks(masks), imageField, src, c.extra ?? ""] : type === "cloze" ? [c.text ?? "", c.extra ?? "", imageField, src] : type === "mcq" ? [c.question ?? c.front ?? "", formatOptions(opts), imageField, src, c.explanation ?? c.extra ?? ""] : [c.front ?? "", c.back ?? "", imageField, src];
+    if (!fields[0].trim() || (type === "mcq" && !valid(opts)) || (type === "occlusion" && (!masks.length || !imageField)) || (type === "vocab" && !(c.meaning ?? c.back ?? "").trim())) { skipped++; return; }
     const norm = normalizeText(fields.slice(0, 2).join(" "));
     const target = c.replaces && byId.has(c.replaces) ? c.replaces : c.id ? "p" + hash(packKey + "#" + c.id) : null;
     const prev = target ? byId.get(target) : undefined;
     if (prev) {
       // Revision of a card already in the collection: update in place, keep scheduling.
       const tags = [...new Set([...prev.tags.filter((t) => t !== "needs-review::similar"), ...(p.tags ?? []), ...(c.tags ?? [])])];
-      if (normOf.get(prev.id) === norm && prev.fields[2] === fields[2] && (prev.fields[3] ?? "") === fields[3] && (prev.fields[4] ?? "") === (fields[4] ?? "") && tags.length === prev.tags.length) { unchanged++; return; }
+      if (normOf.get(prev.id) === norm && fields.every((f, i) => (prev.fields[i] ?? "") === (f ?? "")) && tags.length === prev.tags.length) { unchanged++; return; }
       const ntid = nt.id;
       notes.push({ ...prev, ntid, fields, tags, modified: Math.max(now + i, prev.modified + 1) });
       updated.push(prev.id);
@@ -122,11 +139,12 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
       cards.push({ id: `${id}-${ord}`, nid: id, ord, state: "new", suspended: false, flag: 0, due: t, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: t, mod: t, source: c.category || base });
     }
   }
-  return { notetypes: [PACK_CLOZE, PACK_BASIC, PACK_MCQ, PACK_IO], notes, cards, media, skipped, similar, updated, unchanged };
+  return { notetypes: [PACK_CLOZE, PACK_BASIC, PACK_MCQ, PACK_IO, PACK_VOCAB], notes, cards, media, skipped, similar, updated, unchanged };
 }
 
 export function packOrds(type: string, text?: string, masks?: number): number[] {
   if (type === "occlusion") return Array.from({ length: Math.max(1, masks ?? 1) }, (_, i) => i);
+  if (type === "vocab") return [0, 1];
   if (type !== "cloze") return [0];
   const o = [...new Set([...(text ?? "").matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]) - 1))].sort((a, b) => a - b);
   return o.length ? o : [0];

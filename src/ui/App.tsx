@@ -8,6 +8,8 @@ import { IconToday, IconLibrary, IconProgress, IconSettings, YuzuMark } from "./
 import { Progress } from "./Progress";
 import { Boss } from "./Boss";
 import { Inbox } from "./Inbox";
+import { ShortcutsSheet } from "./Shortcuts";
+import { startGamepad } from "../lib/gamepad";
 import { ConfirmHost, HintLayer, SnackbarHost, confirmSheet, tellSheet, snackbar } from "./kit";
 
 type Tab = "today" | "library" | "progress" | "settings";
@@ -92,6 +94,28 @@ function AppInner() {
     else browse("tags", tag);
   };
 
+  // Keyboard everywhere (study has its own keys), the gamepad, and the "?" list of both.
+  const [keysOpen, setKeysOpen] = useState(false);
+  useEffect(() => { startGamepad(); }, []);
+  useEffect(() => {
+    const tabs: Tab[] = ["today", "library", "progress", "settings"];
+    const onTab = (e: Event) => { if (study) return; const d = (e as CustomEvent).detail as number; setInbox(false); setTab((t) => tabs[(tabs.indexOf(t) + d + tabs.length) % tabs.length]); };
+    const onStudy = () => { if (!study && store.loaded) startStudy(""); };
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null; if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+      if (e.key === "?") { e.preventDefault(); setKeysOpen(true); return; }
+      if (study || document.querySelector(".sheet-backdrop")) return;
+      const k = e.key.toLowerCase(); const go = (x: Tab) => { e.preventDefault(); setInbox(false); setTab(x); };
+      if (k === "t") go("today"); else if (k === "l") go("library"); else if (k === "p") go("progress"); else if (k === "s") go("settings");
+      else if (k === "/") { e.preventDefault(); const q = document.querySelector<HTMLInputElement>('input[type=search], input[placeholder^="Search"]'); if (q) q.focus(); else { setTab("library"); setTimeout(() => document.querySelector<HTMLInputElement>('input[type=search], input[placeholder^="Search"]')?.focus(), 80); } }
+      else if (k === "n" || k === "c" || k === "w") { e.preventDefault(); setTab("today"); store.openOnToday(k === "n" ? "add" : k === "c" ? "capture" : "workload"); }
+      else if (e.key === "Enter" && tab === "today" && (!t || t === document.body)) { e.preventDefault(); startStudy(""); }
+    };
+    window.addEventListener("keydown", onKey); window.addEventListener("yuzu-tab", onTab); window.addEventListener("yuzu-study", onStudy);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("yuzu-tab", onTab); window.removeEventListener("yuzu-study", onStudy); };
+  });
+
   // Sketchy out, once (the user's call, 12/11/2026): after start-up settles, with Undo while the app is open.
   useEffect(() => {
     if (!store.loaded || store.keepSketchy) return;
@@ -111,7 +135,7 @@ function AppInner() {
     else if (act === "drill") startStudy("", "decks", { preset: store.drillQueue(30), title: "Mixed drill" });
     else if (act === "exam" && exam) startStudy(exam.path, exam.view, { preset: store.examWeakest(exam), title: exam.name + " · weakest" });
     else if (act === "leeches") browse("decks", "", undefined, "leech");
-    else if (act === "capture" || act === "practice" || act === "workload") { setStudy(null); setInbox(false); setTab("today"); store.openOnToday(act); }
+    else if (act === "capture" || act === "practice" || act === "workload" || act === "add") { setStudy(null); setInbox(false); setTab("today"); store.openOnToday(act); }
     else if (act === "settings") { setStudy(null); setTab("settings"); }
   }, [store.loaded]);
 
@@ -129,7 +153,7 @@ function AppInner() {
     return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={64} /><div className="px muted" style={{ fontSize: 10, lineHeight: "10px" }}>loading…</div>{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
   }
   if (study !== null && study.boss !== undefined) return <Boss path={study.path} view={study.view ?? "decks"} name={study.boss} onExit={() => setStudy(null)} />;
-  if (study !== null) return <Study {...study} onExit={() => setStudy(null)} onBrowseTag={browseTag} onSearch={(q) => browse("decks", "", q)} />;
+  if (study !== null) return <><Study {...study} onExit={() => setStudy(null)} onBrowseTag={browseTag} onSearch={(q) => browse("decks", "", q)} />{keysOpen && <ShortcutsSheet onClose={() => setKeysOpen(false)} />}</>;
 
   return (
     <div className="app">
@@ -137,6 +161,7 @@ function AppInner() {
       {tab === "today" && <Today onStudy={startStudy} onInbox={() => setInbox(true)} onSearch={(q) => browse("decks", "", q)} onBoss={startBoss} onFilter={(f) => browse("decks", "", undefined, f)} onTab={setTab} />}
       {tab === "library" && <Library onStudy={startStudy} onBoss={startBoss} initial={libraryTarget} />}
       {tab === "progress" && <Progress onBoss={startBoss} />}
+      {keysOpen && <ShortcutsSheet onClose={() => setKeysOpen(false)} />}
       {tab === "settings" && <Settings onInbox={() => setInbox(true)} />}
       </>}
       {store.saveError && <div className="toast row" style={{ borderColor: "var(--again)" }}>Changes are not being saved ({store.saveError}). <button className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={downloadBackup}>Back up now</button></div>}
@@ -145,7 +170,7 @@ function AppInner() {
         {([["today", "Today", <IconToday />], ["library", "Library", <IconLibrary />], ["progress", "Progress", <IconProgress />], ["settings", "Settings", <IconSettings />]] as const).map(([k, label, icon]) => (
           <button key={k} className={"tab" + (tab === k ? " active" : "")} data-hint={TAB_HINTS[k]} onClick={() => { if (tab !== k) window.scrollTo(0, 0); setTab(k); setInbox(false); }}>{icon}{label}</button>
         ))}
-      </nav>
+      <button className="tab rail-only" aria-label="Keyboard and gamepad" data-hint="Controls|Keyboard, mouse and gamepad all work at once. Press ? (or View on a pad) any time." onClick={() => setKeysOpen(true)}><b style={{ fontSize: 20, lineHeight: "20px" }}>?</b><span>Keys</span></button></nav>
     </div>
   );
 }

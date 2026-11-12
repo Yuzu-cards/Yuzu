@@ -9,6 +9,7 @@ import { IconChevron, IconPlay, IconClose, IconPin, IconEdit } from "./icons";
 import { useEffect, useRef } from "react";
 import { Duplicates } from "./Duplicates";
 import { OcclusionEditor } from "./Occlusion";
+import { CardEditor } from "./CardEditor";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
@@ -111,7 +112,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [editSmart, setEditSmart] = useState<SmartDeck | null | "new">(null);
   const [moveTo, setMoveTo] = useState<string | null>(null);
   const [tagTo, setTagTo] = useState<string | null>(null);
-  const [tool, setTool] = useState<"dupes" | "occlusion" | null>(null);
+  const [tool, setTool] = useState<"dupes" | "occlusion" | "card" | null>(null);
   const [rename, setRename] = useState<string | null>(null);
   const [classify, setClassify] = useState<"System" | "Specialty" | null>(null);
   const v = store.getVersion();
@@ -180,7 +181,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   ] }); };
 
   if (store.cards.size === 0) {
-    return (<div className="screen"><div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1><button className="chip" onClick={() => setTool("occlusion")}>＋ Image</button></div><div className="empty">No cards yet. Import your Anki collection from Settings.</div>{tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}</div>);
+    return (<div className="screen"><div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1><button className="chip" onClick={() => setTool("card")}>＋ Card</button><button className="chip" onClick={() => setTool("occlusion")}>＋ Image</button></div><div className="empty">No cards yet. Import your Anki collection from Settings.</div>{tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}{tool === "card" && <CardEditor full onClose={() => setTool(null)} />}</div>);
   }
   const doBulk = async (action: Parameters<typeof store.bulk>[1]) => { await store.bulk([...selected], action); setSelected(new Set()); setSelecting(false); };
   const title = view === "smart" ? (smart?.name ?? "Smart decks") : node!.name;
@@ -188,8 +189,9 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
 
   return (
     <div className="screen">
-      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pairs</button>}<button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("occlusion")}>＋ Image</button></div>
+      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pairs</button>}<button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("card")}>＋ Card</button><button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("occlusion")}>＋ Image</button></div>
       {tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}
+      {tool === "card" && <CardEditor full onClose={() => setTool(null)} />}
       <div className="seg">
         {[...VIEWS, { id: "smart" as View, label: "Smart" }].map((x) => <button key={x.id} className={view === x.id ? "on" : ""} onClick={() => { setView(x.id); go(""); }}>{x.label}</button>)}
       </div>
