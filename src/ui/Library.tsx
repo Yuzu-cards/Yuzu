@@ -1,3 +1,4 @@
+import { latinDigits } from "../lib/num";
 import { useMemo, useState } from "react";
 import { store, VIEWS, type TreeNode, type View, type SmartDeck } from "../lib/store";
 import { noteTitle, renderCard } from "../lib/render";
@@ -101,7 +102,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [query, setQuery] = useState("");
   const [q, setQ] = useState(""); // debounced
   const [only, setOnly] = useState<null | "flagged" | "improve" | "suspended" | "leech" | "overfilled">(null); // quick filters
-  useEffect(() => { const t = setTimeout(() => setQ(query.trim().toLowerCase()), 160); return () => clearTimeout(t); }, [query]);
+  useEffect(() => { const t = setTimeout(() => setQ(latinDigits(query).trim().toLowerCase()), 160); return () => clearTimeout(t); }, [query]);
   const [sort, setSort] = useState<"due" | "new" | "state" | "deck">("due");
   const [allTags, setAllTags] = useState(false);
   const [preview, setPreview] = useState<Card | null>(null);

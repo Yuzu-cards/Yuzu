@@ -1,3 +1,4 @@
+import { latinDigits } from "../lib/num";
 // Hand kit, ported from Orange (src/components/ui.jsx, 8.1.0) to typed components in Yuzu's 8-bit look:
 // hold to explain, hold menus (action sheets), sliders, drag to reorder, pull to sync, undo snackbars.
 // Rule from Orange: holding is a shortcut and an explainer, never the only way to reach something.
@@ -235,7 +236,7 @@ export function SnackbarHost() {
 
 // ---------------------------------------------------------------- dd/mm/yyyy date field
 const dmyOf = (iso: string) => (/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : "");
-const isoOf = (t: string) => { const m = /^(\d{1,2})[\/.\-\s]?(\d{1,2})[\/.\-\s]?(\d{4})$/.exec(t.trim()) || /^(\d{2})(\d{2})(\d{4})$/.exec(t.trim()); if (!m) return null; const d = new Date(+m[3], +m[2] - 1, +m[1]); return d.getDate() === +m[1] && d.getMonth() === +m[2] - 1 ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : null; };
+const isoOf = (t0: string) => { const t = latinDigits(t0); const m = /^(\d{1,2})[\/.\-\s]?(\d{1,2})[\/.\-\s]?(\d{4})$/.exec(t.trim()) || /^(\d{2})(\d{2})(\d{4})$/.exec(t.trim()); if (!m) return null; const d = new Date(+m[3], +m[2] - 1, +m[1]); return d.getDate() === +m[1] && d.getMonth() === +m[2] - 1 ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : null; };
 /** A date typed as dd/mm/yyyy (or 03112026), with the phone's own calendar behind the 📅 button. Value is ISO yyyy-mm-dd or "". */
 export function DateField({ value, onChange, min, label, placeholder = "dd/mm/yyyy" }: { value: string; onChange: (iso: string) => void; min?: string; label?: string; placeholder?: string }) {
   const [text, setText] = useState(dmyOf(value)); const [bad, setBad] = useState(false);

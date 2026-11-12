@@ -13,6 +13,7 @@ async function launch(w: number, h: number, mobile: boolean) {
   page = ctx.pages()[0] ?? (await ctx.newPage()); await (await ctx.newCDPSession(page)).send("Network.setCacheDisabled", { cacheDisabled: true });
   page.on("pageerror", (e) => errors.push(e.message.slice(0, 300))); page.on("console", (m) => { if (m.type() === "error" && !/ERR_|favicon|accounts.google/.test(m.text())) errors.push("console: " + m.text().slice(0, 300)); });
   page.on("dialog", (d) => d.dismiss().catch(() => {}));
+  await page.goto(`http://127.0.0.1:${port}/`); await page.evaluate(() => localStorage.removeItem("yuzu-session")); /* an interrupted session would resume over the tabs */
   await page.goto(`http://127.0.0.1:${port}/`); await page.waitForFunction(() => (window as any).yuzu?.loaded, null, { timeout: 120000 });
 }
 const BAD = /\b(undefined|NaN|null|Infinity)\b|\[object Object\]/;

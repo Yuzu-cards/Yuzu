@@ -4,6 +4,7 @@ import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle } from "../lib/render";
 import { MCQ_ID, parseOptions, shuffled } from "../lib/mcq";
+import { latinDigits } from "../lib/num";
 import { voiceSupported, speak, stopSpeaking, listen, stopListening, spokenText, backOnly, RATING_WORDS, LETTER_WORDS } from "../lib/voice";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
 import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
@@ -300,7 +301,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     const idx = back.map((f) => nt.fields.indexOf(f)).filter((i) => i >= 0);
     return idx.map((i) => note.fields[i]).join(" ").replace(/\[sound:[^\]]+\]/g, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
   }, [card?.id, typing]);
-  const norm = (x: string) => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const norm = (x: string) => latinDigits(x).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
   const hintText = useMemo(() => (card ? hintFor(note ?? undefined, card.ord) : null), [card?.id]);
   const typedOk = typed && answerText ? norm(typed) === norm(answerText) || norm(answerText).split(/[;,/]|\s-\s/).map((x) => x.trim()).includes(norm(typed)) : null;
 

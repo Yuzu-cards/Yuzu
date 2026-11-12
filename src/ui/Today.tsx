@@ -3,11 +3,12 @@ import type { Card } from "../lib/model";
 import { YuzuMark, IconPlay } from "./icons";
 import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionSheet, DragHandle, HoldRow, PullToSync, useDragReorder, snackbar, type SheetItem } from "./kit";
 import { Recap } from "./Recap";
 import { CaptureSheet } from "./Capture";
 import { PracticeSheet } from "./Practice";
+import { DiagnoseSheet } from "./Diagnose";
 import { sendImproveToClaude } from "./Improve";
 
 /** A yuzu cut in half, drawn on a 30×30 pixel grid: 8 segments fill (yellow; orange while partly done) toward the daily goal. */
@@ -87,7 +88,9 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
   const held = Math.max(0, tree.due - parts.review - parts.learning); // tree.due already counts learning cards that are due
   const [q, setQ] = useState("");
   const [sheet, setSheet] = useState<{ title: string; sub?: string; items: SheetItem[] } | null>(null);
-  const [recap, setRecap] = useState(false); const [capture, setCapture] = useState(false);
+  const [recap, setRecap] = useState(false); const [capture, setCapture] = useState(false); const [work, setWork] = useState(false);
+  useEffect(() => { if (store.takePendingOpen("capture")) setCapture(true); if (store.takePendingOpen("workload")) setWork(true); });
+  const fromCitrus = (() => { try { return sessionStorage.getItem("yuzu-from") === "citrus"; } catch { return false; } })();
   const pinList = useRef<HTMLDivElement>(null);
   const { handle } = useDragReorder({ listRef: pinList, onMove: (a, b) => { const p = [...store.settings.pins]; const [x] = p.splice(a, 1); p.splice(b, 0, x); store.saveSettings({ pins: p }); } });
   const unpin = (path: string, view: View) => { const before = store.settings.pins; store.saveSettings({ pins: before.filter((x) => !(x.path === path && x.view === view)) }); snackbar("Unpinned", () => store.saveSettings({ pins: before })); };
@@ -105,8 +108,9 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
       <PullToSync enabled={store.syncConfigured()} onSync={() => store.sync()} />
       {sheet && <ActionSheet title={sheet.title} sub={sheet.sub} items={sheet.items} onClose={() => setSheet(null)} />}
       {capture && <CaptureSheet onClose={() => setCapture(false)} />}
+      {work && <DiagnoseSheet onClose={() => setWork(false)} />}
       {recap && <Recap initial={new Date().getDate() <= 7 ? "last-month" : "month"} onClose={() => setRecap(false)} />}
-      <div className="brand"><YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" /><button className="chip" aria-label="Capture" onClick={() => setCapture(true)}>＋ Capture</button>
+      <div className="brand">{fromCitrus && <a className="chip back-citrus" href="https://amaerys.github.io/Citrus-Maxima/?from=yuzu" aria-label="Back to Citrus">← Citrus</a>}<YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" /><button className="chip" aria-label="Capture" onClick={() => setCapture(true)}>＋ Capture</button>
         {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} data-hint={`Sync|${store.syncStatus.message || "Ready"}. Tap to sync now, or pull the page down.`} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing…" : store.syncStatus.state === "error" ? "sync failed" : store.hasUnsynced() ? "unsynced" : "synced"}</span>}
       </div>
       {store.inbox.length > 0 && onInbox && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginBottom: 10, borderColor: "var(--yuzu)" }} onClick={onInbox}><span className="grow"><b>{store.inbox.length} new pack{store.inbox.length === 1 ? "" : "s"} from Claude</b><div className="small muted">Review the cards before they join your collection</div></span><span className="chip yuzu">Review</span></button>}
@@ -198,6 +202,7 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
   const next = store.settings.newPerDay > 0 ? store.learnNext() : null;
   if (next) tips.push({ id: "next-" + next.name, spine: systemColor(next.name), title: next.started ? `Next: finish ${next.name}` : `Next: start ${next.name}`, meta: next.started ? `${next.seen.toLocaleString()} of ${next.total.toLocaleString()} seen — finish a system before opening another` : `${next.total.toLocaleString()} cards, the biggest system you haven't started`, act: () => onStudy(next.name, "systems", { only: "new", title: `New: ${next.name}` }), why: "Learn next|A teacher's rule: one system at a time. Half-finished systems come first (closest to done first), then the biggest untouched one. New cards from it, today's limit still applies." });
   if (recapReady) tips.push({ id: "recap", spine: "var(--orange)", title: `Your ${new Date(lastMonth).toLocaleString(undefined, { month: "long" })} recap is ready`, meta: "Persona, best day, nemesis card — and a share card", act: onRecap, why: "Recap|A look back at last month from your real reviews." });
+  if (overdue >= 50 || store.tree().due >= Math.max(150, store.settings.dailyGoal * 2)) tips.push({ id: "why-" + store.isoToday(), spine: "var(--amber)", title: "Why so many reviews?", meta: "What's driving your load, biggest first, with a fix for each", why: "Ranked from your own reviews: backlog, new-card pace, leeches, target recall, days off, tuning.", act: () => store.openOnToday("workload") });
   if (overdue >= 50) tips.push({ id: "postpone", spine: "var(--clay)", title: `${overdue.toLocaleString()} cards overdue — spread them over a week`, meta: "The most fragile stay first; sturdy ones wait. Undo anytime.", act: async () => { const r = await store.postponeOverdue(7); if (r) snackbar(`${r.moved.toLocaleString()} cards spread over 7 days`, r.undo); }, why: "Postpone|A big backlog makes every day feel impossible. This moves overdue cards with long, stable memories later and keeps the fragile ones first (FSRS Helper's postpone, simplified)." });
   if (bossReady && onBoss) tips.push({ id: "boss", spine: "var(--yuzu)", title: `Boss fight: ${bossReady.name}`, meta: `${bossReady.ready} well-learned cards — 20 at random, no hints, 85% to pass`, act: () => onBoss(bossReady.name, "systems", bossReady.name), why: "Boss fight|Mixed, cumulative testing on cards you already know — it shows what really stuck." });
   if (missed.length >= 3) tips.push({ id: "missed", spine: "var(--clay)", title: "Redo today's misses", meta: `${missed.length} cards you got wrong today, once more while they're fresh`, act: () => onStudy("", "decks", { preset: missed, title: "Missed today" }), why: "Same-day retry|A missed card retried before the day ends is recalled clearly better later (Quantum Country's retry experiment)." });
@@ -241,6 +246,7 @@ function Countdowns({ onStudy }: { onStudy: OnStudy }) {
 /** "More for today" (Citrus 2.x: the home screen stays short): the extra ways to study, folded under one line. */
 function MoreForToday({ onStudy }: { onStudy: OnStudy }) {
   const [practice, setPractice] = useState(false); const today = store.isoToday();
+  useEffect(() => { if (store.takePendingOpen("practice")) setPractice(true); });
   const [open, setOpen] = useState(() => { try { return localStorage.getItem("yuzu-more-today") === "open"; } catch { return false; } });
   const drill = useMemo(() => store.drillQueue(30), [store.cards.size, store.reviews.length, today]); const systems = store.drillSystems(drill);
   if (systems < 2 && drill.length < 5) return null;

@@ -86,3 +86,31 @@ test("roleplay prompt: facts, style, the way back into Yuzu", async () => {
   assert.match(p, /1\. Antidote for digoxin toxicity\? → Fab fragments\n2\. Peaked T waves\n/); assert.match(p, /revising for Step 1/); assert.ok(p.includes(STYLES.case.role)); assert.match(p, /yuzu_pack/); assert.match(p, /current guidelines/);
   assert.doesNotMatch(buildRoleplayPrompt({ style: "oral", facts: [] }), /revising for/);
 });
+
+test("workload diagnosis: ranked causes with evidence and fixes", async () => {
+  const { diagnoseWorkload, extraShare } = await import("../src/lib/diagnose.ts");
+  const DAY = 86400000; const now = Date.UTC(2026, 10, 12, 12); const dayOf = (t: number) => new Date(t).toISOString().slice(0, 10);
+  const mk = (id: string, o: any = {}) => ({ id, nid: id, ord: 0, state: "review", suspended: false, flag: 0, due: now, stability: 10, difficulty: 5, reps: 5, lapses: 0, lastReview: now - DAY, step: 0, created: 0, mod: 0, source: "x", ...o });
+  const cards = [...Array.from({ length: 200 }, (_, k) => mk("old" + k)), ...Array.from({ length: 300 }, (_, k) => mk("new" + k)), ...Array.from({ length: 8 }, (_, k) => mk("leech" + k, { lapses: 9 }))];
+  const reviews: any[] = []; let id = 0;
+  for (let d = 0; d < 30; d++) { const ts = now - d * DAY - 3600e3; if (d % 3 === 1) continue; // skips every third day
+    for (let k = 0; k < 40; k++) reviews.push({ id: "r" + id++, cid: "new" + ((d * 40 + k) % 300), ts, rating: 3, state: "learning" });
+    for (let k = 0; k < 20; k++) reviews.push({ id: "r" + id++, cid: "old" + k, ts, rating: 3, state: "review" });
+    for (let k = 0; k < 4; k++) reviews.push({ id: "r" + id++, cid: "leech" + k, ts, rating: 1, state: "review" }); }
+  for (let k = 0; k < 200; k++) reviews.push({ id: "q" + k, cid: "old" + k, ts: now - 200 * DAY, rating: 3, state: "review" }); // the old cards were started long ago
+  const d = diagnoseWorkload({ now, cards, reviews, newPerDay: 30, desiredRetention: 0.95, decay: 0.15, leechThreshold: 8, fitAt: null, overdue: 120, dueToday: 300, remindersOn: false, dayOf });
+  const ids = d.causes.map((c) => c.id);
+  assert.deepEqual(new Set(ids), new Set(["backlog", "new", "leeches", "retention", "missed", "tune"]), ids.join());
+  assert.equal(ids[0], "new", "the biggest share leads"); assert.ok(d.causes.every((c, i) => i === 0 || d.causes[i - 1].perDay >= c.perDay));
+  const nw = d.causes.find((c) => c.id === "new")!; assert.equal(nw.fix?.value, 20); assert.match(nw.evidence, /started in the last 30 days/);
+  assert.equal(d.causes.find((c) => c.id === "leeches")!.fix?.ids?.length, 8); assert.equal(d.causes.find((c) => c.id === "missed")!.fix?.kind, "reminders");
+  assert.ok(extraShare(0.95, 0.15) > extraShare(0.92, 0.15) && extraShare(0.9, 0.15) === 0);
+  const calm = diagnoseWorkload({ now, cards: cards.slice(0, 200), reviews: reviews.filter((r) => r.cid.startsWith("old")), newPerDay: 10, desiredRetention: 0.9, decay: 0.15, leechThreshold: 8, fitAt: now - DAY, overdue: 0, dueToday: 20, remindersOn: true, dayOf });
+  assert.ok(!calm.causes.some((c) => ["backlog", "new", "leeches", "retention", "tune"].includes(c.id)), calm.causes.map((c) => c.id).join());
+});
+
+test("Arabic and Persian digits are read as numbers", async () => {
+  const { latinDigits, parseNum } = await import("../src/lib/num.ts");
+  assert.equal(latinDigits("١٢/١١/٢٠٢٦"), "12/11/2026"); assert.equal(latinDigits("۱۲۳"), "123");
+  assert.equal(parseNum("٢٫٥"), 2.5); assert.equal(parseNum("2,5"), 2.5); assert.equal(parseNum("1,307"), 1307); assert.equal(parseNum("٨"), 8); assert.equal(parseNum("abc"), null); assert.equal(parseNum(""), null);
+});

@@ -92,6 +92,22 @@ function AppInner() {
     else browse("tags", tag);
   };
 
+  // Deep links from Citrus (HUB.md): ?from=citrus&do=<id> jumps straight there, then the address is cleaned up.
+  useEffect(() => {
+    if (!store.loaded) return;
+    const q = new URLSearchParams(location.search); const act = q.get("do"); const from = q.get("from");
+    if (!act && !from) return;
+    if (from === "citrus") { try { sessionStorage.setItem("yuzu-from", "citrus"); } catch { /* fine */ } }
+    try { history.replaceState(history.state, "", location.pathname + location.hash); } catch { /* fine */ }
+    const exam = (store.settings.deadlines ?? []).filter((d) => d.date >= store.isoToday()).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+    if (act === "review" || act === "study") startStudy("");
+    else if (act === "drill") startStudy("", "decks", { preset: store.drillQueue(30), title: "Mixed drill" });
+    else if (act === "exam" && exam) startStudy(exam.path, exam.view, { preset: store.examWeakest(exam), title: exam.name + " · weakest" });
+    else if (act === "leeches") browse("decks", "", undefined, "leech");
+    else if (act === "capture" || act === "practice" || act === "workload") { setStudy(null); setInbox(false); setTab("today"); store.openOnToday(act); }
+    else if (act === "settings") { setStudy(null); setTab("settings"); }
+  }, [store.loaded]);
+
   useEffect(() => {
     const onUpdate = (e: Event) => setUpdate(() => (e as CustomEvent).detail as () => void);
     window.addEventListener("yuzu:update", onUpdate);

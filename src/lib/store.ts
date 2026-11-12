@@ -8,12 +8,13 @@ import { parsePack, describePack } from "../import/pack";
 import { noteTitle, renderCard } from "./render";
 import { stamp, observe } from "./clock";
 import { MCQ_ID, parseOptions } from "./mcq";
+import { diagnoseWorkload, type Cause } from "./diagnose";
 import { spokenText, backOnly } from "./voice";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
 import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError } from "./google";
-import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
+import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
 declare const __VERSION__: string;
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
@@ -345,7 +346,30 @@ export class Store {
     const pending: string[] = []; for (const d of this.settings.deadlines ?? []) { if (d.date < today) continue; const e = this.examStatus(d, now); if (!e.onTrack) pending.push(`${d.name} in ${e.daysLeft} days: needs ${e.needPerDay} new cards a day (limit ${this.settings.newPerDay})`); } const imp = this.improveList().length; if (imp) pending.push(`${imp} cards marked for Claude to improve`); const offer = this.countBeyond(this.settings.retireAskYears ?? 5); if (offer) pending.push(`${offer} cards ready to retire as mastered`); if (this.hasUnsynced()) pending.push("Unsynced changes");
     const streak = st.streak ?? 0; let ok = 0, all = 0; for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts > now - 30 * DAY; i--) { const r = this.reviews[i]; if (r.state === "review") { all++; if (r.rating > 1) ok++; } }
     const summary = due === 0 ? `All caught up: nothing due${todayRevs.length ? `, ${todayRevs.length} reviews done today` : ""}.` : `${due.toLocaleString()} cards due (about ${needMin} min); ${todayRevs.length} done today${streak ? `; ${streak}-day streak` : ""}.`;
+    // ---- contract v2 (Citrus HUB.md): numbers Citrus keeps as history, live progress, proposals that wait for a tap, deep links
+    const base = typeof location !== "undefined" ? location.origin + location.pathname : "https://yuzu-cards.github.io/Yuzu/";
+    const metrics: HubMetric[] = [
+      { key: "cards-due", label: "Cards due", value: due, goal: 0, unit: "cards", date: today },
+      { key: "reviews", label: "Reviews today", value: todayRevs.length, goal: this.settings.dailyGoal, unit: "reviews", date: today },
+      { key: "minutes", label: "Minutes studied", value: minutes, unit: "min", date: today },
+      { key: "new-cards", label: "New cards today", value: todayRevs.filter((r) => r.state === "new").length, goal: this.settings.newPerDay, unit: "cards", date: today },
+      ...(all >= 20 ? [{ key: "retention", label: "Recall (30 days)", value: Math.round((ok / all) * 100), goal: Math.round(this.settings.scheduler.desiredRetention * 100), unit: "%", date: today }] : []),
+    ];
+    const progress: HubProgress[] = (this.settings.deadlines ?? []).filter((d) => d.date >= today).slice(0, 6).map((d) => ({ key: "exam-" + d.id, label: `${d.name} introduced`, pct: Math.round(this.examStatus(d, now).coverage * 100), date: today }));
+    const week = (() => { const t = new Date(now); const onejan = new Date(t.getFullYear(), 0, 1); return `${t.getFullYear()}w${Math.ceil(((t.getTime() - onejan.getTime()) / DAY + onejan.getDay() + 1) / 7)}`; })();
+    const inbox: HubProposal[] = [];
+    const leeches = [...this.cards.values()].filter((c) => !c.suspended && c.lapses >= this.settings.leechThreshold).length;
+    if (leeches >= 5) inbox.push({ id: `leeches-${week}`, type: "task", title: `Yuzu: sort out ${leeches} leech cards`, text: "Cards you keep forgetting: send them to Claude to rewrite, or suspend them.", minutes: 10, pri: 2, url: base + "?do=leeches", expires: this.isoToday(new Date(now + 7 * DAY)) });
+    for (const d of this.settings.deadlines ?? []) { if (d.date < today) continue; const e = this.examStatus(d, now); if (!e.onTrack) inbox.push({ id: `exam-${d.id}-${week}`, type: "task", title: `Yuzu: ${d.name} needs ${e.needPerDay} new cards a day`, text: `Your limit is ${this.settings.newPerDay}; at that pace the last new cards come in on ${e.finishOn}.`, minutes: 5, pri: 1, url: base + "?do=exam", expires: this.isoToday(new Date(now + 7 * DAY)) }); }
+    const actions: HubAction[] = [
+      { id: "review", label: due ? `Review ${due.toLocaleString()} cards` : "Study", url: base, icon: "🍋", minutes: needMin },
+      { id: "drill", label: "Mixed drill (30 cards)", url: base, icon: "🔀", minutes: 10 },
+      { id: "capture", label: "Capture for Yuzu", url: base, icon: "📝", minutes: 1 },
+      { id: "practice", label: "Practice with Claude", url: base, icon: "💬", minutes: 15 },
+      ...((this.settings.deadlines ?? []).some((d) => d.date >= today) ? [{ id: "exam", label: "Exam: weakest 30", url: base, icon: "🎯", minutes: 10 }] : []),
+    ];
     return {
+      contract: 2, metrics, progress, inbox: inbox.slice(0, 25), actions: actions.slice(0, 6),
       app: "yuzu", title: "Yuzu", icon: "🍋", color: "#f2d34b", url: typeof location !== "undefined" ? location.origin + location.pathname : "", version: (typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev"), device: this.settings.deviceName || "device", updatedAt: new Date(now).toISOString(), summary,
       estimatedMinutes: needMin, due, streak, nextDue: due ? "now" : "",
       today: { date: today, done: todayRevs.length >= Math.min(this.settings.dailyGoal, Math.max(10, due + todayRevs.length)), items: todayRevs.length ? [{ title: "Reviews", minutes, cards: todayRevs.length }] : [] },
@@ -694,6 +718,10 @@ export class Store {
   saveError: string | null = null;
   // ---- One writing tab (see lib/tabs.ts)
   storagePersisted: boolean | null = null;
+  /** A sheet Today should open when it shows (deep links: capture, practice, workload). */
+  pendingOpen: string | null = null;
+  openOnToday(what: string) { this.pendingOpen = what; this.bump(); }
+  takePendingOpen(what: string): boolean { if (this.pendingOpen !== what) return false; this.pendingOpen = null; return true; }
   /** When the study day turns over (the "new day starts at" hour) everything that counts "today" redraws, without reopening the app.
    *  A timer for the open app, plus a check on return (phones pause timers in the background). */
   private dayTurnTimer: ReturnType<typeof setTimeout> | null = null; private shownDay = 0;
@@ -1234,6 +1262,21 @@ export class Store {
     if (exam) return this.examWeakest(exam, n, now);
     return [...this.cards.values()].filter((c) => !c.suspended && c.state !== "new" && c.lastReview).map((c) => ({ c, r: retrievability((now - c.lastReview) / DAY, c.stability) })).sort((a, b) => a.r - b.r).slice(0, n * 3).map((x) => x.c).filter((c, i, a) => a.findIndex((d) => d.nid === c.nid) === i).slice(0, n);
   }
+  // ---- "Why so many reviews?" (lib/diagnose.ts): ranked causes from your own data; a fix only on a tap, always with an Undo --------
+  diagnose(now = Date.now()) {
+    const tree = this.tree(); return diagnoseWorkload({ now, cards: this.cards.values(), reviews: this.reviews, newPerDay: this.settings.newPerDay, desiredRetention: this.settings.scheduler.desiredRetention, decay: this.settings.scheduler.w?.[20] ?? 0.5, leechThreshold: this.settings.leechThreshold, fitAt: this.settings.fit?.at ?? null, overdue: this.overdueCount(), dueToday: tree.due, remindersOn: this.reminders.on, dayOf: (t) => this.isoToday(new Date(this.dayStart(t))) });
+  }
+  async applyFix(c: Cause): Promise<{ message: string; undo?: () => Promise<void> }> {
+    const f = c.fix; if (!f) return { message: "Nothing to change" };
+    if (f.kind === "spread") { const r = await this.postponeOverdue(7); return r ? { message: `${r.moved.toLocaleString()} overdue cards spread over 7 days`, undo: async () => { await r.undo(); } } : { message: "Nothing overdue now" }; }
+    if (f.kind === "newPerDay") { const prev = this.settings.newPerDay; await this.saveSettings({ newPerDay: f.value! }); return { message: `New cards: ${f.value} a day`, undo: async () => { await this.saveSettings({ newPerDay: prev }); } }; }
+    if (f.kind === "retention") { const prev = this.settings.scheduler.desiredRetention; await this.saveSettings({ scheduler: { ...this.settings.scheduler, desiredRetention: f.value! } }); return { message: `Target recall: ${Math.round(f.value! * 100)}%`, undo: async () => { await this.saveSettings({ scheduler: { ...this.settings.scheduler, desiredRetention: prev } }); } }; }
+    if (f.kind === "suspendLeeches") { const ids = f.ids ?? []; await this.bulk(ids, { suspended: true }); return { message: `${ids.length} leeches paused (Library → Leeches to see them)`, undo: async () => { await this.bulk(ids, { suspended: false }); } }; }
+    if (f.kind === "tune") return { message: await this.optimizeScheduler() };
+    if (f.kind === "reminders") { const m = await this.setReminders({ on: true }); return { message: m, undo: this.reminders.on ? async () => { await this.setReminders({ on: false }); } : undefined }; }
+    return { message: "" };
+  }
+
   // ---- Exam countdown and mixed drills ---------------------------------------------------------------------------------------
   /** Where a deadline stands: how much of its scope is introduced, how many new cards a day it needs, and what you'd remember on the day if you stopped reviewing today. */
   examStatus(d: Deadline, now = Date.now()): ExamStatus {

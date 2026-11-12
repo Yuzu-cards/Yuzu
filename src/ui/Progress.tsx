@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useBack } from "./useBack";
 import { Recap } from "./Recap";
+import { DiagnoseSheet } from "./Diagnose";
 
 /** What each mastery label means, with the stability thresholds from Settings. */
 function masteryHint(k: string) {
@@ -198,11 +199,13 @@ function Mastered() {
 
 /** Recap entry + "known right now" (the sum of every learned card's recall probability). */
 function RecapButton() {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false); const [why, setWhy] = useState(false);
   const v = store.getVersion(); const k = useMemo(() => store.knowledgeNow(), [Math.floor(v / 20)]);
   return (<>
-    <div className="card-box row" style={{ gap: 12, marginBottom: 12 }}>
+    {why && <DiagnoseSheet onClose={() => setWhy(false)} />}
+    <div className="card-box row" style={{ gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
       <span className="grow" data-hint="Known right now|The sum of every learned card's predicted recall today, from your own forgetting curves — the expected number of cards you'd get right if all were asked now."><b className="kit-num" style={{ fontSize: 20 }}>{k.known.toLocaleString()}</b><span className="small muted" style={{ display: "block", marginTop: 4 }}>cards you'd likely recall right now, of {k.of.toLocaleString()} learned</span></span>
+      <button className="btn" onClick={() => setWhy(true)} data-hint="Why so many reviews?|What drives your daily load, biggest first, worked out from your own reviews — with a fix for each.">Workload</button>
       <button className="btn primary" onClick={() => setOpen(true)}>Recap</button>
     </div>
     {open && <Recap onClose={() => setOpen(false)} />}
