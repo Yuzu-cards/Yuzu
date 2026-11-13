@@ -55,6 +55,21 @@ function Review({ sha, onDone }: { sha: string; onDone: () => void }) {
   );
 }
 
+/** Inbox files that aren't a pack Yuzu can read (cut short, not JSON): said plainly, with the text to look at and a Remove. */
+function BadFiles() {
+  const [show, setShow] = useState<string | null>(null); const n = store.inboxBad.length;
+  return <div className="card-box wp04-bad" style={{ margin: "10px 0" }}>
+    <b>{n} file{n === 1 ? "" : "s"} in your inbox couldn't be read</b>
+    <div className="small muted">Usually a pack Claude cut short. Ask Claude to send it again, then remove this one.</div>
+    {store.inboxBad.map((f) => <div key={f.sha}>
+      <div className="list-row"><span className="t">{f.file}<span className="small muted"> · {f.why}{f.size ? ` · ${f.size.toLocaleString()} bytes` : ""}</span></span>
+        <button className="chip" aria-expanded={show === f.sha} onClick={() => setShow(show === f.sha ? null : f.sha)}>{show === f.sha ? "Hide text" : "Show text"}</button>
+        <button className="chip" onClick={async () => { if (await confirmSheet({ title: `Remove “${f.file}”?`, sub: "It is deleted from the inbox folder on every device. Nothing in your collection changes.", yes: "Remove file" })) await store.removeBadInbox(f.sha); }}>Remove</button></div>
+      {show === f.sha && <pre className="wp04-bad-text small">{f.text || "(empty)"}</pre>}
+    </div>)}
+  </div>;
+}
+
 export function Inbox({ onClose }: { onClose: () => void }) {
   const [open, setOpen] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
@@ -72,6 +87,7 @@ export function Inbox({ onClose }: { onClose: () => void }) {
           <span className="small muted">{e.pack.yuzu_curation ? "curation" : countOf(Array.isArray(e.pack.cards) ? e.pack.cards.length : 0, "card")}</span>
         </button>
       ))}
+      {store.inboxBad.length > 0 && <BadFiles />}
       {store.packLog.length > 0 && (
         <>
           <h2>Added packs</h2>

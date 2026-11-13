@@ -147,7 +147,8 @@ export class DriveMedia {
 type Listing = Map<string, DriveFile>; // name → file
 const toText = (b: Uint8Array) => new TextDecoder().decode(b);
 export class DriveSync {
-  static LOCK_MS = 12 * 60000;
+  /** A short lease, renewed while the sync runs: a device that stops mid-sync (a lapsed token, a phone that killed the page) blocks the others for a minute and a half, not 12 minutes. */
+  static LOCK_MS = 90000; static BEAT_MS = 60000;
   private folder = ""; private listing: Listing | null = null; private seenRev: string | null | undefined = undefined; private holdsLock = false; private inboxId = "";
   /** memo: the last manifest this device read or wrote, kept by the caller across syncs (no download when Drive still has it). */
   constructor(private cache: Record<string, string>, private device: string, private memo: { rev?: string; m?: Manifest } = {}, private path: string[] = PATHS.collection) {}
@@ -195,20 +196,57 @@ export class DriveSync {
   }
   private parse(t: string): Manifest { const m = JSON.parse(t) as Manifest; if (!m || typeof m !== "object" || !m.files) throw new SyncError("manifest.json on Drive is not a Yuzu manifest", "other"); return m; }
   private adopt(m: Manifest & { rev?: string }, mt?: string): Manifest { this.seenRev = m.rev ?? String(m.updatedAt); this.seenMt = mt; this.lastManifest = { m, mt }; if (m.rev) { this.memo.rev = m.rev; this.memo.m = m; } return m; }
-  async acquireLock(device: string, id = ""): Promise<{ held: boolean; by?: string }> {
+  /** `at`/`until`: when the holder started and when its lease runs out (for "Phone started a sync at 14:02 …"). */
+  async acquireLock(device: string, id = ""): Promise<{ held: boolean; by?: string; at?: number; until?: number }> {
     const now = Date.now(); const cur = await this.readText("lock.json").then((t) => (t ? JSON.parse(t) : null), () => null);
-    if (cur && cur.until > now && !sameDevice(cur, device, id)) return { held: false, by: cur.device };
-    const mine = { device, id, until: now + DriveSync.LOCK_MS, n: Math.random().toString(36).slice(2) };
+    if (cur && cur.until > now && !sameDevice(cur, device, id)) return { held: false, by: cur.device, at: cur.at, until: cur.until };
+    this.stopBeat();
+    const mine = { device, id, at: now, until: now + DriveSync.LOCK_MS, n: Math.random().toString(36).slice(2) };
     const fileId = await putFile({ parent: await this.open(), name: "lock.json", body: JSON.stringify(mine), id: this.listing?.get("lock.json")?.id ?? null });
     this.listing?.set("lock.json", { id: fileId, name: "lock.json" });
     await new Promise((r) => setTimeout(r, 300)); // two devices writing at once: whoever's content is there after a moment holds it
     const back = await downloadBytes(fileId).then((b) => (b ? JSON.parse(toText(b)) : null), () => null);
-    if (!back || back.n !== mine.n) return { held: false, by: back?.device ?? "another device" };
-    this.holdsLock = true; return { held: true };
+    if (!back || back.n !== mine.n) return { held: false, by: back?.device ?? "another device", at: back?.at, until: back?.until };
+    this.holdsLock = true; this.mine = mine; this.lockLost = false; this.unlockFailed = false; this.beat(fileId); return { held: true };
+  }
+  private mine: { device: string; id: string; at: number; until: number; n: string } | null = null; private lockLost = false; private beatTimer: ReturnType<typeof setTimeout> | null = null; private beating: Promise<void> | null = null; private unlockFailed = false;
+  /** Renew the lease every minute while this device holds it; a lease someone else took meanwhile is noted (the push then stops before the manifest). */
+  private beat(fileId: string) {
+    this.beatTimer = setTimeout(() => {
+      this.beatTimer = null; if (!this.holdsLock || !this.mine) return;
+      this.beating = (async () => {
+        const cur = await downloadBytes(fileId).then((b) => (b ? JSON.parse(toText(b)) : null));
+        if (!this.holdsLock || !this.mine) return; // released meanwhile: never renew after the release
+        if (cur && cur.n !== this.mine.n && cur.until > Date.now()) { this.lockLost = true; return; }
+        const next = { ...this.mine, until: Date.now() + DriveSync.LOCK_MS }; await putFile({ parent: this.folder, name: "lock.json", body: JSON.stringify(next), id: fileId }); this.mine = next;
+      })().catch(() => { /* the check before the manifest still guards */ }).finally(() => { this.beating = null; if (this.holdsLock) this.beat(fileId); });
+    }, DriveSync.BEAT_MS);
+    (this.beatTimer as any)?.unref?.();
+  }
+  private stopBeat() { if (this.beatTimer) { clearTimeout(this.beatTimer); this.beatTimer = null; } }
+  /** Right before the manifest: the lock must still be this device's (a lease that ran out and was taken by another device stops the push). */
+  private async confirmLock() {
+    if (!this.mine) return; const f = this.listing?.get("lock.json"); if (!f) return;
+    const cur = this.lockLost ? null : await downloadBytes(f.id).then((b) => (b ? JSON.parse(toText(b)) : null), (e) => { if (e instanceof GoogleError && e.auth) throw e; return undefined; });
+    if (this.lockLost || (cur && cur.n !== this.mine.n)) { this.holdsLock = false; this.stopBeat(); throw new SyncError(`${cur?.device ?? "Another device"} took over the sync`, "conflict"); }
+  }
+  /** Whether the last release didn't reach Drive (the lock is left until its lease runs out): the caller remembers it, and the next sync with a good token clears it first. */
+  lockLeft(): boolean { return this.unlockFailed; }
+  /** A lock this device left behind (token rejected mid-sync, the page killed): released before anything else, so other devices aren't kept waiting. */
+  async releaseOwnLock(device: string, id = ""): Promise<boolean> {
+    const f = (this.listing ?? (await this.list())).get("lock.json"); if (!f) return false;
+    const cur = await downloadBytes(f.id).then((b) => (b ? JSON.parse(toText(b)) : null), () => null);
+    if (!cur || !(cur.until > Date.now()) || !sameDevice(cur, device, id)) return false;
+    await putFile({ parent: this.folder, name: "lock.json", body: JSON.stringify({ device, until: 0 }), id: f.id }); return true;
   }
   private after: Promise<void> | null = null;
   async releaseLock(): Promise<void> { if (this.after) { const a = this.after; this.after = null; await a; } return this.unlock(); }
-  private async unlock(): Promise<void> { if (!this.holdsLock) return; this.holdsLock = false; const f = this.listing?.get("lock.json"); if (f) { try { await putFile({ parent: this.folder, name: "lock.json", body: JSON.stringify({ device: this.device, until: 0 }), id: f.id }); } catch { /* it expires anyway */ } } }
+  private async unlock(): Promise<void> { this.stopBeat(); if (!this.holdsLock) return; this.holdsLock = false; this.mine = null; if (this.beating) await this.beating; /* a renewal in flight lands first, then the release */ const f = this.listing?.get("lock.json"); if (f) { try { await putFile({ parent: this.folder, name: "lock.json", body: JSON.stringify({ device: this.device, until: 0 }), id: f.id }); this.unlockFailed = false; } catch { this.unlockFailed = true; /* the lease runs out anyway */ } } }
+  /** Duplicate files (a create retried after its answer was lost) found by the last listing: removed under the lock, also when there was nothing to push. */
+  async tidyDupes(device: string, id = ""): Promise<number> {
+    if (!this.dupes.length) return 0; const lock = await this.acquireLock(device, id); if (!lock.held) return 0;
+    let n = 0; try { for (const d of this.dupes.splice(0)) { try { await deleteFile(d.id); n++; } catch { /* next time */ } } } finally { await this.unlock(); } return n;
+  }
   async pullChanged(manifest: Manifest, known: Record<string, string>, progress?: Progress): Promise<Partial<SyncSnapshot> & { files: Record<string, string> }> {
     const changed = Object.entries(manifest.files).filter(([p, h]) => known[p] !== h);
     const out: Partial<SyncSnapshot> & { files: Record<string, string> } = { files: {} }; const parsed: [string, any][] = []; let done = 0; const queue = [...changed];
@@ -256,6 +294,7 @@ export class DriveSync {
     await pool(queue, 4, one);
     for (const real of toDelete) { const f = listing.get(real); if (f) { try { await deleteFile(f.id); } catch { /* fine */ } listing.delete(real); } }
     manifest.stored = stored;
+    await this.confirmLock();
     // The revision rides along as an appProperty, so other devices tell "changed" from the changes feed without a download.
     const mid = await putFile({ parent: this.folder, name: "manifest.json", body: JSON.stringify(manifest), id: listing.get("manifest.json")?.id ?? null, props: { rev } });
     listing.set("manifest.json", { id: mid, name: "manifest.json", props: { rev } }); this.seenRev = rev; this.lastManifest = null; this.seenMt = undefined; this.memo.rev = rev; this.memo.m = manifest;
@@ -281,9 +320,9 @@ export class DriveSync {
   async deleteInbox(_name: string, id: string): Promise<void> { await deleteFile(id); }
   // Outbox: what Yuzu leaves for Claude (or any app) to pick up — captured notes and photos, the cards marked for improving.
   private outboxId = ""; private async outbox() { if (!this.outboxId) this.outboxId = await ensureFolders(PATHS.outbox, this.cache); return this.outboxId; }
-  async listOutbox(): Promise<{ name: string; id: string }[]> { const id = await this.outbox(); return (await listFiles({ parent: id, all: true })).map((f) => ({ name: f.name, id: f.id })); }
-  /** Write (or replace) one outbox file. */
-  async putOutbox(name: string, text: string, known?: string): Promise<string> { const parent = await this.outbox(); const id = known ?? (await listFiles({ parent, name }))[0]?.id ?? null; return putFile({ parent, name, body: text, mime: "application/json", id, isNew: !id }); }
+  async listOutbox(): Promise<{ name: string; id: string; props?: Record<string, string> }[]> { const id = await this.outbox(); return (await listFiles({ parent: id, all: true })).map((f) => ({ name: f.name, id: f.id, props: f.props })); }
+  /** Write (or replace) one outbox file. `props`: a few words every device can show from a listing (who captured it, where, the start of the text). */
+  async putOutbox(name: string, text: string, known?: string, props?: Record<string, string>): Promise<string> { const parent = await this.outbox(); const id = known ?? (await listFiles({ parent, name }))[0]?.id ?? null; return putFile({ parent, name, body: text, mime: "application/json", id, isNew: !id, ...(props ? { props } : {}) }); }
   async deleteOutbox(id: string): Promise<void> { await deleteFile(id); }
   async readBinary(): Promise<Uint8Array | null> { return null; } // media goes through DriveMedia, not the collection
 }

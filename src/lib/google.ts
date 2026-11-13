@@ -102,7 +102,7 @@ export async function gfetch(url: string, init: RequestInit = {}, token = savedT
 export const DRIVE = "https://www.googleapis.com/drive/v3", UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 export const FOLDER = "application/vnd.google-apps.folder", GSHEET = "application/vnd.google-apps.spreadsheet";
 export const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-export interface DriveFile { id: string; name: string; mimeType?: string; modifiedTime?: string; size?: number; md5?: string; props?: Record<string, string> }
+export interface DriveFile { id: string; name: string; mimeType?: string; modifiedTime?: string; createdTime?: string; size?: number; md5?: string; props?: Record<string, string> }
 const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 const q = (p: Record<string, string>) => new URLSearchParams(p).toString();
 export async function gjson(url: string, init?: RequestInit) { const r = await gfetch(url, init); return r.status === 404 ? null : r.status === 204 ? null : r.json(); }
@@ -111,8 +111,8 @@ export async function listFiles(o: { parent?: string | null; name?: string | nul
   const parts = ["trashed = false"]; if (o.parent) parts.push(`'${esc(o.parent)}' in parents`); if (o.name) parts.push(`name = '${esc(o.name)}'`); if (o.folders) parts.push(`mimeType = '${FOLDER}'`);
   const out: DriveFile[] = []; let page: string | undefined;
   do {
-    const j = await gjson(`${DRIVE}/files?${q({ q: parts.join(" and "), fields: "nextPageToken,files(id,name,mimeType,modifiedTime,size,md5Checksum,appProperties)", pageSize: String(o.pageSize ?? (o.all ? 1000 : 100)), spaces: "drive", ...(page ? { pageToken: page } : {}) })}`);
-    for (const f of j?.files ?? []) out.push({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, size: Number(f.size) || 0, md5: f.md5Checksum, props: f.appProperties });
+    const j = await gjson(`${DRIVE}/files?${q({ q: parts.join(" and "), fields: "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,size,md5Checksum,appProperties)", pageSize: String(o.pageSize ?? (o.all ? 1000 : 100)), spaces: "drive", ...(page ? { pageToken: page } : {}) })}`);
+    for (const f of j?.files ?? []) out.push({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, createdTime: f.createdTime, size: Number(f.size) || 0, md5: f.md5Checksum, props: f.appProperties });
     page = o.all ? j?.nextPageToken : undefined;
   } while (page);
   return out;
@@ -121,8 +121,26 @@ export async function listFiles(o: { parent?: string | null; name?: string | nul
 export async function copyFile(id: string, parent: string, name: string, props?: Record<string, string>): Promise<string> {
   const j = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}/copy?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, parents: [parent], ...(props ? { appProperties: props } : {}) }) }); return j.id;
 }
+/**
+ * A create (POST) whose answer can be lost: Drive may have made the file although the phone never heard back, and a plain
+ * retry makes a second one. So each create carries a client-made id (appProperties.yc); after a dropped connection the
+ * folder is looked up for a file with that id before trying again, and the retry happens only when there is none.
+ */
+export const clientId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+async function createOnce(send: () => Promise<Response>, find: () => Promise<string | null>): Promise<string> {
+  for (let attempt = 0; ; attempt++) {
+    try { const r = await send(); const j = r.status === 404 ? null : await r.json(); if (!j?.id) throw new GoogleError("Drive did not return a file id."); return j.id; }
+    catch (e) {
+      if (!(e instanceof GoogleError) || !/couldn't be reached/.test(e.message) || attempt >= 5) throw e;
+      await new Promise((r) => setTimeout(r, Math.min(16000, 800 * 2 ** attempt) * (0.75 + Math.random() * 0.5) * retryScale));
+      const got = await find().catch(() => null); if (got) return got; // it was made after all: no second copy
+    }
+  }
+}
+const findMine = async (parent: string | null, name: string, yc: string, folders = false) => (await listFiles({ parent: parent ?? "root", name, folders })).find((f) => f.props?.yc === yc)?.id ?? null;
 export async function createFolder(name: string, parent: string | null): Promise<string> {
-  const j = await gjson(`${DRIVE}/files?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: FOLDER, ...(parent ? { parents: [parent] } : {}) }) }); return j.id;
+  const yc = clientId();
+  return createOnce(() => gfetch(`${DRIVE}/files?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: FOLDER, appProperties: { yc }, ...(parent ? { parents: [parent] } : {}) }) }, savedToken(), 1), () => findMine(parent, name, yc, true));
 }
 /** The folder at `path` under My Drive, created where missing; ids cached by path and re-checked only when a call about them fails. */
 export async function ensureFolders(path: string[], cache: Record<string, string>): Promise<string> { return (await findFolders(path, cache, true))!; }
@@ -139,10 +157,48 @@ export async function findFolders(path: string[], cache: Record<string, string>,
   for (const name of path) {
     key = key ? `${key}/${name}` : name; let id: string | null = cache[key] ?? null;
     if (id && !verified.has(id)) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (!ok) { id = null; delete cache[key]; } else verified.add(id); }
-    if (!id) { const found = await listFiles({ parent: parent ?? "root", name, folders: true }); id = found[0]?.id ?? (create ? await createFolder(name, parent) : null); if (!id) return null; cache[key] = id; verified.add(id); }
+    if (!id) {
+      const miss = cache["?" + key]; // "not there" (looked up within the day, and the changes feed showed nothing made there since)
+      if (!create && miss && Date.now() - Number(miss.split("|")[0]) < MISSING_MS) return null;
+      id = await lookupFolder(parent, name, create); if (!id) { cache["?" + key] = `${Date.now()}|${parent ?? "root"}|${name}`; return null; }
+      delete cache["?" + key]; cache[key] = id; verified.add(id);
+    }
     parent = id;
   }
   return parent;
+}
+const MISSING_MS = 86400000;
+/** The changes feed showed `name` appear in folder `parent`: forget any "not there" kept for it. Returns whether one was. */
+export function folderAppeared(cache: Record<string, string>, parent: string | undefined, name: string | undefined): boolean {
+  let hit = false; if (!name) return false;
+  for (const [k, v] of Object.entries(cache)) { if (k[0] !== "?") continue; const [, p, n] = v.split("|"); if (n === name && (p === parent || p === "root")) { delete cache[k]; hit = true; } }
+  return hit;
+}
+// One lookup-or-create per folder at a time: the sync and the refresh both make "My Apps" on a fresh Drive, and without
+// this each made its own (two "My Apps" folders, the apps' files split between them).
+const inFlight = new Map<string, Promise<string | null>>();
+function lookupFolder(parent: string | null, name: string, create: boolean): Promise<string | null> {
+  const k = `${parent ?? "root"}/${name}/${create ? 1 : 0}`; const cur = inFlight.get(k); if (cur) return cur;
+  const p = (async () => {
+    const made = inFlight.get(`${parent ?? "root"}/${name}/1`); if (!create && made) return made; // a create in progress answers a lookup too
+    let found = await listFiles({ parent: parent ?? "root", name, folders: true });
+    if (!found.length && create) { await createFolder(name, parent); found = await listFiles({ parent: parent ?? "root", name, folders: true }); } // listed again: another device may have made one at the same moment
+    if (!found.length) return null;
+    return found.length > 1 ? mergeTwins(found) : found[0].id;
+  })().finally(() => inFlight.delete(k));
+  inFlight.set(k, p); return p;
+}
+const byAge = (a: DriveFile, b: DriveFile) => ((a.createdTime ?? a.modifiedTime ?? "") < (b.createdTime ?? b.modifiedTime ?? "") ? -1 : (a.createdTime ?? a.modifiedTime ?? "") > (b.createdTime ?? b.modifiedTime ?? "") ? 1 : a.id < b.id ? -1 : 1);
+/** Two folders of one name side by side: the oldest is kept (every device picks the same), the others' contents move into it and the empty twin goes to the bin. */
+export async function mergeTwins(found: DriveFile[]): Promise<string> {
+  const [keep, ...rest] = [...found].sort(byAge);
+  for (const t of rest) {
+    try {
+      for (const c of await listFiles({ parent: t.id, all: true })) await gjson(`${DRIVE}/files/${encodeURIComponent(c.id)}?addParents=${encodeURIComponent(keep.id)}&removeParents=${encodeURIComponent(t.id)}&fields=id`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (!(await listFiles({ parent: t.id })).length) await gjson(`${DRIVE}/files/${encodeURIComponent(t.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
+    } catch { /* the next lookup tries again */ }
+  }
+  return keep.id;
 }
 // Partial downloads need Google to accept the Range header from a web page. If the first ranged read dies at the network level
 // while a plain read of the same file works, the Range header is what's refused: remember that (a week) and read whole files.
@@ -196,9 +252,11 @@ export async function putFile(o: { parent: string; name: string; body: BodyInit;
   if (!id && !o.isNew) id = (await listFiles({ parent: o.parent, name: o.name }))[0]?.id ?? null;
   if (id && !o.props) { await gfetch(`${UPLOAD}/files/${encodeURIComponent(id)}?uploadType=media&fields=id`, { method: "PATCH", headers: { "Content-Type": mime }, body: o.body }); return id; }
   const boundary = "yuzu" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const meta = id ? { ...(o.props ? { appProperties: o.props } : {}) } : { name: o.name, parents: [o.parent], mimeType: mime, ...(o.props ? { appProperties: o.props } : {}) };
+  const yc = id ? "" : clientId();
+  const meta = id ? { ...(o.props ? { appProperties: o.props } : {}) } : { name: o.name, parents: [o.parent], mimeType: mime, appProperties: { ...(o.props ?? {}), yc } };
   const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`;
   const body = new Blob([head, o.body as BlobPart, `\r\n--${boundary}--`]);
+  if (!id) return createOnce(() => gfetch(`${UPLOAD}/files?uploadType=multipart&fields=id`, { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body }, savedToken(), 1), () => findMine(o.parent, o.name, yc));
   const j = await gjson(`${UPLOAD}/files${id ? "/" + encodeURIComponent(id) : ""}?uploadType=multipart&fields=id`, { method: id ? "PATCH" : "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
   if (!j?.id) throw new GoogleError("Drive did not return a file id."); return j.id;
 }

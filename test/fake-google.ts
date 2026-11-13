@@ -1,12 +1,12 @@
 // An in-memory Google for tests: the sign-in script, Drive v3 (files, changes, upload, download) and Calendar v3.
 export function fakeGoogle() {
-  const files = new Map<string, { id: string; name: string; parents: string[]; mime: string; bytes: Uint8Array; trashed?: boolean; t?: number; props?: Record<string, string> }>();
+  const files = new Map<string, { id: string; name: string; parents: string[]; mime: string; bytes: Uint8Array; trashed?: boolean; t?: number; c?: number; props?: Record<string, string> }>();
   let tick = 0; const now = () => Date.now() * 1000 + tick++; // strictly increasing "modifiedTime" (µs), so newest-wins is deterministic
   const changes: { id: string; removed: boolean }[] = []; let seq = 0; let nextId = 1;
   const events: any[] = [];
   const stats = { requests: 0, uploads: 0, dropped: 0, throttled: 0, downloads: 0, ranged: 0, copies: 0 };
   const mkId = () => "f" + nextId++;
-  const add = (name: string, parents: string[], mime: string, bytes: Uint8Array, props?: Record<string, string>) => { const id = mkId(); files.set(id, { id, name, parents, mime, bytes, t: now(), props }); changes.push({ id, removed: false }); return id; };
+  const add = (name: string, parents: string[], mime: string, bytes: Uint8Array, props?: Record<string, string>) => { const id = mkId(); const t = now(); files.set(id, { id, name, parents, mime, bytes, t, c: t, props }); changes.push({ id, removed: false }); return id; };
   const mt = (f: { t?: number }) => new Date((f.t ?? 0) / 1000).toISOString().replace("Z", String((f.t ?? 0) % 1000).padStart(3, "0") + "Z");
   const json = (o: any, status = 200) => new Response(JSON.stringify(o), { status, headers: { "Content-Type": "application/json" } });
   const parseQ = (q: string) => { const name = /name = '([^']*)'/.exec(q)?.[1]; const parent = /'([^']*)' in parents/.exec(q)?.[1]; const folder = /mimeType = 'application\/vnd.google-apps.folder'/.test(q); return { name, parent, folder }; };
@@ -19,6 +19,8 @@ export function fakeGoogle() {
     stats,
     /** Return "network" (the request dies like a dropped connection), a status (e.g. 503, or 403 for "slow down"), or null. */
     fail: null as null | ((u: URL, method: string, headers: Record<string, string>) => "network" | number | null),
+    /** Return true to lose the answer of a create that Drive carried out (the file is there, the caller hears a dropped connection). */
+    afterCreate: null as null | ((u: URL, method: string) => boolean),
     async fetchImpl(url: string, init: RequestInit = {}): Promise<Response> {
       const u = new URL(url); const m = init.method ?? "GET"; stats.requests++;
       const f = this.fail?.(u, m, (init.headers as any) ?? {}) ?? null;
@@ -34,16 +36,16 @@ export function fakeGoogle() {
       if (u.pathname === "/drive/v3/files" && m === "GET") {
         const { name, parent, folder } = parseQ(u.searchParams.get("q") ?? ""); const size = Number(u.searchParams.get("pageSize") ?? 100); const page = Number(u.searchParams.get("pageToken") ?? 0);
         const all = [...files.values()].filter((f) => !f.trashed && (!name || f.name === name) && (!parent || f.parents.includes(parent)) && (!folder || f.mime.endsWith("folder")));
-        const slice = all.slice(page, page + size); return json({ files: slice.map((f) => ({ id: f.id, name: f.name, size: String(f.bytes.length), mimeType: f.mime, modifiedTime: mt(f), appProperties: f.props })), nextPageToken: page + size < all.length ? String(page + size) : undefined });
+        const slice = all.slice(page, page + size); return json({ files: slice.map((f) => ({ id: f.id, name: f.name, size: String(f.bytes.length), mimeType: f.mime, modifiedTime: mt(f), createdTime: mt({ t: f.c ?? f.t }), appProperties: f.props })), nextPageToken: page + size < all.length ? String(page + size) : undefined });
       }
-      if (u.pathname === "/drive/v3/files" && m === "POST") { const b = JSON.parse(await bodyText()); return json({ id: add(b.name, b.parents ?? ["root"], b.mimeType ?? "application/octet-stream", new Uint8Array()) }); }
+      if (u.pathname === "/drive/v3/files" && m === "POST") { const b = JSON.parse(await bodyText()); const id = add(b.name, b.parents ?? ["root"], b.mimeType ?? "application/octet-stream", new Uint8Array(), b.appProperties); if (this.afterCreate?.(u, m)) throw new TypeError("Failed to fetch"); return json({ id }); }
       const multipart = async () => {
         const buf = new Uint8Array(await new Response(init.body as any).arrayBuffer()); const find = (pat: string, from = 0) => { const p = new TextEncoder().encode(pat); outer: for (let i = from; i <= buf.length - p.length; i++) { for (let j = 0; j < p.length; j++) if (buf[i + j] !== p[j]) continue outer; return i; } return -1; };
         const h1 = find("\r\n\r\n"), h1e = find("\r\n--", h1); const meta = JSON.parse(new TextDecoder().decode(buf.slice(h1 + 4, h1e)));
         const h2 = find("\r\n\r\n", h1e + 4) + 4; let end = buf.length; for (let i = buf.length - 4; i > h2; i--) if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 45 && buf[i + 3] === 45) { end = i; break; }
         return { meta, bytes: buf.slice(h2, end) };
       };
-      if (u.pathname === "/upload/drive/v3/files" && m === "POST") { const { meta, bytes } = await multipart(); stats.uploads++; return json({ id: add(meta.name, meta.parents, meta.mimeType ?? "image/png", bytes, meta.appProperties) }); }
+      if (u.pathname === "/upload/drive/v3/files" && m === "POST") { const { meta, bytes } = await multipart(); stats.uploads++; const id = add(meta.name, meta.parents, meta.mimeType ?? "image/png", bytes, meta.appProperties); if (this.afterCreate?.(u, m)) { stats.dropped++; throw new TypeError("Failed to fetch"); } return json({ id }); }
       const cp = /^\/drive\/v3\/files\/([^/]+)\/copy$/.exec(u.pathname);
       if (cp && m === "POST") { const f = files.get(cp[1]); if (!f || f.trashed) return json({ error: { message: "not found" } }, 404); const b = JSON.parse(await bodyText() || "{}"); stats.copies++; return json({ id: add(b.name ?? f.name, b.parents ?? f.parents, f.mime, f.bytes.slice(), b.appProperties ?? f.props) }); }
       const dl = /^\/drive\/v3\/files\/([^/]+)$/.exec(u.pathname);
@@ -53,7 +55,7 @@ export function fakeGoogle() {
         return new Response(f.bytes as BlobPart, { status: 200 });
       }
       if (dl && m === "GET") { const f = files.get(dl[1]); return f ? json({ id: f.id, name: f.name, trashed: !!f.trashed, mimeType: f.mime, parents: f.parents, modifiedTime: mt(f), appProperties: f.props }) : json({ error: { message: "not found" } }, 404); }
-      if (dl && m === "PATCH") { const f = files.get(dl[1]); if (!f) return json({ error: { message: "not found" } }, 404); const b = JSON.parse(await bodyText() || "{}"); if (b.trashed) f.trashed = true; if (b.name) f.name = b.name; f.t = now(); changes.push({ id: f.id, removed: !!b.trashed }); return json({ id: f.id }); } // any metadata change is a change
+      if (dl && m === "PATCH") { const f = files.get(dl[1]); if (!f) return json({ error: { message: "not found" } }, 404); const b = JSON.parse(await bodyText() || "{}"); if (b.trashed) f.trashed = true; if (b.name) f.name = b.name; const addP = u.searchParams.get("addParents"), remP = u.searchParams.get("removeParents"); if (remP) f.parents = f.parents.filter((x) => !remP.split(",").includes(x)); if (addP) f.parents = [...f.parents, ...addP.split(",")]; f.t = now(); changes.push({ id: f.id, removed: !!b.trashed }); return json({ id: f.id }); } // any metadata change is a change
       if (dl && m === "DELETE") { const f = files.get(dl[1]); if (f) { f.trashed = true; changes.push({ id: f.id, removed: true }); } return new Response(null, { status: 204 }); }
       const up = /^\/upload\/drive\/v3\/files\/([^/]+)$/.exec(u.pathname);
       if (up && m === "PATCH") {

@@ -93,7 +93,7 @@ test("two devices: the lock, the revision check, and duplicate files from a retr
   // A holds the lock; B is told to wait; A again (same install) is fine, and a case change of the name too
   const A = new DriveSync({}, "A"); const B = new DriveSync({}, "B");
   assert.equal((await A.acquireLock("S25 Ultra", "id-A")).held, true);
-  assert.deepEqual(await B.acquireLock("PC", "id-B"), { held: false, by: "S25 Ultra" });
+  { const l = await B.acquireLock("PC", "id-B"); assert.deepEqual({ held: l.held, by: l.by }, { held: false, by: "S25 Ultra" }); }
   assert.equal((await new DriveSync({}, "A").acquireLock("S25 ULTRA", "id-A")).held, true, "same install, name in capitals");
   await A.releaseLock(); assert.equal((await B.acquireLock("PC", "id-B")).held, true, "released → B takes it"); await B.releaseLock();
   // B pulls, then A pushes a change: B's push is refused (it must pull and merge first)
