@@ -1,0 +1,3 @@
+/* WP19: start-up progress on the loading screen */
+.load-bar { width: min(220px, 60vw); height: 6px; background: var(--line, rgba(127,127,127,.25)); border-radius: 3px; overflow: hidden; }
+.load-bar > i { display: block; height: 100%; background: var(--accent, #F28A1B); transition: width .15s linear; }

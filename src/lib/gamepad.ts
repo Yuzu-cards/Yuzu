@@ -3,7 +3,10 @@
 //   Study:  A flip / Good · D-pad ← Again ↓ Hard → Good ↑ Easy (the swipe directions) · B leave · X undo · Y card info · Menu card menu
 //   Else:   D-pad / left stick move between buttons · A press · B back · LB / RB previous / next tab · Menu start studying · View shortcuts
 const A = 0, B = 1, X = 2, Y = 3, LB = 4, RB = 5, VIEW = 8, MENU = 9, UP = 12, DOWN = 13, LEFT = 14, RIGHT = 15;
-let running = false; let prev: boolean[] = []; let stickAt = 0; let lastFocus: HTMLElement | null = null;
+let running = false; let prev: boolean[] = []; let stickAt = 0;
+// Held weakly: a strong reference kept the whole screen it was on alive after that screen closed.
+let lastFocusRef: WeakRef<HTMLElement> | null = null;
+const lastFocusEl = () => lastFocusRef?.deref() ?? null;
 
 function key(k: string, mods: KeyboardEventInit = {}) {
   const target = (document.activeElement as HTMLElement | null) ?? document.body;
@@ -20,7 +23,7 @@ function move(dir: 1 | -1) {
   const list = focusables(); if (!list.length) return;
   const cur = document.activeElement as HTMLElement | null; let i = cur ? list.indexOf(cur) : -1;
   i = i < 0 ? (dir > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, i + dir));
-  const el = list[i]; lastFocus?.classList.remove("pad-focus"); el.classList.add("pad-focus"); lastFocus = el;
+  const el = list[i]; lastFocusEl()?.classList.remove("pad-focus"); el.classList.add("pad-focus"); lastFocusRef = new WeakRef(el);
   try { (el as any).focus({ focusVisible: true, preventScroll: true }); } catch { el.focus(); }
   el.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
@@ -54,7 +57,7 @@ export function startGamepad() {
   const go = () => { if (!running) { running = true; prev = []; requestAnimationFrame(loop); } };
   window.addEventListener("gamepadconnected", go);
   if ([...(navigator.getGamepads?.() ?? [])].some(Boolean)) go();
-  document.addEventListener("pointerdown", () => { lastFocus?.classList.remove("pad-focus"); lastFocus = null; }, true);
+  document.addEventListener("pointerdown", () => { lastFocusEl()?.classList.remove("pad-focus"); lastFocusRef = null; }, true);
 }
 /** For tests: act as if a pad button was pressed. */
 export const padPress = press;

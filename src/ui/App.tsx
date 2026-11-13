@@ -27,9 +27,9 @@ export async function repairApp() {
   location.reload();
 }
 
-function downloadBackup() {
+async function downloadBackup() {
   try {
-    const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" });
+    const blob = await store.backupBlob();
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click();
   } catch (e) { tellSheet("Backup failed", (e as any)?.message); }
 }
@@ -119,8 +119,9 @@ function AppInner() {
   // Sketchy out, once (the user's call, 12/11/2026): after start-up settles, with Undo while the app is open.
   useEffect(() => {
     if (!store.loaded || store.keepSketchy) return;
-    const t = setTimeout(async () => { const r = await store.stripSketchyOnce().catch(() => null); if (r && r.notes) snackbar(`Sketchy removed from ${r.notes.toLocaleString()} notes (${r.tags.toLocaleString()} tags)`, async () => { const n = await store.restoreSketchy(); snackbar(`Sketchy put back on ${n.toLocaleString()} notes`); }); }, 4000);
-    return () => clearTimeout(t);
+    let live = true; // waits for a pause in tapping and an idle moment (a walk over every note)
+    store.whenIdle(async () => { if (!live) return; const r = await store.stripSketchyOnce().catch(() => null); if (r && r.notes) snackbar(`Sketchy removed from ${r.notes.toLocaleString()} notes (${r.tags.toLocaleString()} tags)`, async () => { const n = await store.restoreSketchy(); snackbar(`Sketchy put back on ${n.toLocaleString()} notes`); }); }, 4000);
+    return () => { live = false; };
   }, [store.loaded]);
 
   // Deep links from Citrus (HUB.md): ?from=citrus&do=<id> jumps straight there, then the address is cleaned up.
@@ -150,7 +151,7 @@ function AppInner() {
   if (store.tabBusy || store.movedAway) return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "center", justifyContent: "center", minHeight: "80dvh", textAlign: "center" }}><YuzuMark size={56} /><h1 style={{ margin: 0 }}>Open in another tab</h1><p className="muted" style={{ maxWidth: 340, margin: 0 }}>Yuzu is already open in another tab or window on this device. One copy at a time keeps your reviews and edits from overwriting each other.</p><button className="btn primary" disabled={store.movedAway} onClick={() => store.useHere()}>Use Yuzu here</button></div>;
   if (store.loadError) return <Recovery error={store.loadError} />;
   if (!store.loaded) {
-    return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={64} /><div className="px muted" style={{ fontSize: 10, lineHeight: "10px" }}>loading…</div>{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
+    return <div className="screen" style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", justifyContent: "center", minHeight: "80dvh" }}><YuzuMark size={64} /><div className="px muted" style={{ fontSize: 10, lineHeight: "10px" }}>loading…{store.loadProgress > 0 && ` ${Math.round(store.loadProgress * 100)}%`}</div>{store.loadProgress > 0 && <div className="load-bar" role="progressbar" aria-label="Loading your cards" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(store.loadProgress * 100)}><i style={{ width: `${Math.round(store.loadProgress * 100)}%` }} /></div>}{slow && <div className="small muted" style={{ textAlign: "center" }}>Still loading… a large collection can take a few seconds.<br /><button className="btn" style={{ marginTop: 10 }} onClick={repairApp}>Repair app</button></div>}</div>;
   }
   if (study !== null && study.boss !== undefined) return <Boss path={study.path} view={study.view ?? "decks"} name={study.boss} onExit={() => setStudy(null)} />;
   if (study !== null) return <><Study {...study} onExit={() => setStudy(null)} onBrowseTag={browseTag} onSearch={(q) => browse("decks", "", q)} />{keysOpen && <ShortcutsSheet onClose={() => setKeysOpen(false)} />}</>;

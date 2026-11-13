@@ -132,9 +132,18 @@ export function mapDeck(source: string, map: Record<string, string>): string | n
   return null;
 }
 
+/** A Map that counts its changes, so a scan of every note can be kept until a note actually changes (WP19). */
+let revMaps = 0;
+export class RevMap<K, V> extends Map<K, V> {
+  readonly id = ++revMaps; rev = 0;
+  set(k: K, v: V) { this.rev = (this.rev || 0) + 1; return super.set(k, v); }
+  delete(k: K) { this.rev = (this.rev || 0) + 1; return super.delete(k); }
+  clear() { this.rev = (this.rev || 0) + 1; super.clear(); }
+}
+
 export class Store {
   notetypes = new Map<string, Notetype>();
-  notes = new Map<string, Note>();
+  notes: Map<string, Note> = new RevMap<string, Note>();
   cards = new Map<string, Card>();
   tombstones: Record<string, number> = {};
   reviews: Review[] = [];
@@ -778,14 +787,31 @@ export class Store {
     try { await this.loadInner(); }
     catch (e: any) { this.loadError = e?.message ?? String(e); console.error("load failed", e); this.bump(); throw e; }
   }
+  /** 0…1 while the collection is read at start-up (the loading screen shows it). */
+  loadProgress = 0;
+  private lastInput = 0; // the last tap or key: start-up jobs wait until the user pauses
+  /** Run `fn` after `ms`, once the user has paused (no tap or key for 2 s) and the browser is idle — for start-up jobs. */
+  whenIdle(fn: () => void, ms: number) {
+    let waited = 0;
+    const go = () => {
+      const quiet = (typeof performance !== "undefined" ? performance.now() : Date.now()) - this.lastInput;
+      if (this.lastInput && quiet < 2000 && waited < 30000) { waited += 2100 - quiet; setTimeout(go, 2100 - quiet); return; } // never put off for more than ~30 s
+      const ric = (globalThis as any).requestIdleCallback; if (ric) ric(() => fn(), { timeout: 10000 }); else fn();
+    };
+    setTimeout(go, ms);
+  }
   private async loadInner() {
     const mark = (n: string) => { try { performance.mark("yuzu:" + n); } catch { /* fine */ } };
-    mark("load"); const snap = await db.loadSnapshot(); mark("snapshot");
+    // Short pauses between the big steps let the loading screen paint (the read itself comes in chunks, see db.getAll).
+    const pause = () => new Promise<void>((r) => { if (typeof MessageChannel === "undefined") { setTimeout(r, 0); return; } const c = new MessageChannel(); c.port1.onmessage = () => { c.port1.close(); r(); }; c.port2.postMessage(0); });
+    let shown = 0; const progress = (f: number) => { this.loadProgress = f; const t = Date.now(); if (t - shown > 150) { shown = t; this.bump(); } };
+    mark("load"); const snap = await db.loadSnapshot((f) => progress(f * 0.9)); mark("snapshot"); await pause();
     this.notetypes = new Map(snap.notetypes.map((n) => [n.id, n]));
-    this.notes = new Map(snap.notes.map((n) => [n.id, n]));
+    this.notes = new RevMap(snap.notes.map((n) => [n.id, n])); snap.notes = []; progress(0.93); await pause();
     // Validate: drop cards whose note is gone, repair impossible numbers so the scheduler can never choke on them.
-    const cards = new Map<string, Card>(); let orphans = 0, repaired = 0;
+    const cards = new Map<string, Card>(); let orphans = 0, repaired = 0; let i = 0;
     for (const c of snap.cards) {
+      if (++i % 40000 === 0) await pause();
       if (!this.notes.has(c.nid)) { orphans++; continue; }
       let x = c;
       if (!Number.isFinite(x.due) || !Number.isFinite(x.stability) || !Number.isFinite(x.difficulty) || !Number.isFinite(x.mod ?? 0)) { x = { ...x, due: Number.isFinite(x.due) ? x.due : Date.now(), stability: Number.isFinite(x.stability) ? x.stability : 0, difficulty: Number.isFinite(x.difficulty) ? x.difficulty : 5, mod: Number.isFinite(x.mod ?? 0) ? x.mod : x.lastReview }; repaired++; }
@@ -794,7 +820,8 @@ export class Store {
     this.cards = cards;
     if (orphans) this.loadNotes.push(`${orphans} cards without a note were ignored`);
     if (repaired) this.loadNotes.push(`${repaired} cards had invalid scheduling values and were repaired`);
-    this.reviews = snap.reviews.filter((r) => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts); mark("maps");
+    snap.cards = []; progress(0.97); await pause();
+    this.reviews = snap.reviews.filter((r) => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts); mark("maps"); progress(1);
     // Media (tens of thousands of files) is read after the screen is up, a chunk at a time; see loadMedia.
     // The small records are read together rather than one after another.
     const [saved, tombstones, dirty, syncLog, driveIndex, rs, pl, gcache, dismissed, inbox, undoStack, hooks, improve, mastery, packLog, mergeLog] = await Promise.all([
@@ -825,13 +852,17 @@ export class Store {
     try { (navigator as any).storage?.persist?.().then((ok: boolean) => { this.storagePersisted = ok; }).catch(() => {}); } catch { /* fine */ }
     if (this.syncConfigured()) this.syncStatus = { state: "idle", message: "Ready", at: 0 };
     this.bump();
-    this.mediaReady = this.loadMedia();
     if (typeof window !== "undefined") {
+      for (const ev of ["pointerdown", "keydown"]) window.addEventListener(ev, () => { this.lastInput = performance.now(); }, { capture: true, passive: true });
+      // The media library (tens of thousands of files) is read once the first screen is up and the user pauses;
+      // until then a card that needs a file reads just that one (see mediaUrl).
+      this.mediaReady = new Promise<void>((res) => this.whenIdle(() => { this.loadMedia().then(res, res); }, 1500));
+      if (db.journalSize() > 0) db.foldSoon(30000); // last session's answers into their buckets, in idle slices
       // Ask the browser not to evict our data under storage pressure (silently ignored where unsupported).
       navigator.storage?.persist?.().catch(() => {});
       // Re-fit the scheduler in the background once enough new reviews have accumulated.
       const since = this.settings.fit ? this.reviews.filter((r) => r.ts > this.settings.fit!.at).length : this.reviews.length;
-      if (since >= 1000) setTimeout(() => { this.optimizeScheduler().catch(() => {}); }, 15000);
+      if (since >= 1000) this.whenIdle(() => { this.optimizeScheduler().catch(() => {}); }, 15000);
       this.scheduleSync(1500);
       // Google: who is signed in, then the daily look round Drive (rota, Citrus's plan, media); status.json after syncs.
       // An expired token waits for a tap (phones block Google's window otherwise).
@@ -842,14 +873,14 @@ export class Store {
       setInterval(() => { if (document.visibilityState === "visible" && this.syncConfigured() && this.settings.sync.auto && this.syncStatus.state !== "syncing") this.sync("poll").catch(() => {}); }, 5 * 60000);
       // Leaving the app: push unsynced changes right away (the 8 s debounce would otherwise lose the last reviews
       // if the phone kills the tab). Coming back: pull what other devices did.
-      setTimeout(() => { this.autoMaster().catch(() => {}); }, 3000); // retire cards past 20 years (after start-up settles)
+      this.whenIdle(() => { this.autoMaster().catch(() => {}); }, 3000); // retire cards past 20 years (after start-up settles)
       db.getMeta<{ key: string; names: string[] } | null>("mediaRefs", null).then((r) => { if (r && !this.savedRefs) this.savedRefs = r; }).catch(() => {});
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "hidden") { if (this.dirty && this.syncConfigured()) { if (this.syncTimer) clearTimeout(this.syncTimer); this.syncTimer = null; this.sync("hidden").catch(() => {}); } }
         else { this.scheduleSync(this.dirty ? 500 : 2000); this.resumeMedia(); }
       });
       window.addEventListener("online", () => this.resumeMedia());
-    }
+    } else this.mediaReady = this.loadMedia();
   }
 
   async saveSettings(patch: Partial<Settings>) {
@@ -917,19 +948,22 @@ export class Store {
    * Until it's all in, a card that needs a file reads just that one; everything that walks the whole library waits.
    */
   mediaLoaded = false; mediaReady: Promise<void> = Promise.resolve();
-  private mediaEarly = new Set<string>();
+  private mediaEarly = new Set<string>(); private mediaMissed = false;
   private async loadMedia(): Promise<void> {
     if (typeof indexedDB === "undefined") { this.mediaLoaded = true; return; }
     try { await db.eachMediaChunk((rows) => { for (const m of rows) if (!this.media.has(m.name)) this.media.set(m.name, m.blob); }); }
     catch (e: any) { console.error("media load", e); }
     try { performance.mark("yuzu:media"); } catch { /* fine */ }
-    this.mediaLoaded = true; this.mediaUrls.clear(); this.mediaVersion++; this.bump();
+    this.mediaLoaded = true; this.mediaUrls.clear(); this.mediaVersion++;
+    // Redraw only when a screen asked for a file that wasn't there yet (it may now come from Drive); Today shows no media,
+    // and redrawing every screen here cost up to 1.3 s on a phone right after start-up.
+    if (this.mediaMissed) { this.mediaMissed = false; this.bump(); }
   }
   mediaUrl = (name: string): string | null => {
     const hit = this.mediaUrls.get(name); if (hit) return hit;
     const b = this.media.get(name);
     if (!b && !this.mediaLoaded) { // not read yet: this one file now
-      if (!this.mediaEarly.has(name)) { this.mediaEarly.add(name); db.getOne<{ name: string; blob: Blob }>("media", name).then((r) => { if (r?.blob) { if (!this.media.has(name)) this.media.set(name, r.blob); this.mediaVersion++; this.bump(); } }).catch(() => {}); }
+      if (!this.mediaEarly.has(name)) { this.mediaEarly.add(name); db.getOne<{ name: string; blob: Blob }>("media", name).then((r) => { if (r?.blob) { if (!this.media.has(name)) this.media.set(name, r.blob); this.mediaVersion++; this.bump(); } else this.mediaMissed = true; }).catch(() => { this.mediaMissed = true; }); }
       return null;
     }
     if (!b) { this.driveFetchOne(name); return null; }
@@ -1058,11 +1092,18 @@ export class Store {
   improve: Record<string, ImproveMark> = {};
   static IMPROVE_REASONS: Record<string, string> = { split: "Too much on one card — split it", unclear: "Unclear question or answer", wrong: "Wrong or outdated", format: "Messy formatting", media: "Picture/sound problem", confusion: "I mix it up with something similar", other: "Something else" };
   improveFor(nid: string): ImproveMark | null { const m = this.improve[nid]; return m && m.r.length ? m : null; }
+  private askCache: { rev: string; notes: Note[] } | null = null;
+  /** Notes tagged ask-claude: the walk over every note only after a note changed. */
+  private askClaudeNotes(): Note[] {
+    const rev = this.notesRev(); if (rev && this.askCache?.rev === rev) return this.askCache.notes;
+    const notes: Note[] = []; for (const n of this.notes.values()) if (n.tags.includes("ask-claude")) notes.push(n);
+    this.askCache = { rev, notes }; return notes;
+  }
   /** Notes marked for improving (plus leeches marked "mixed up with something similar"), newest first. */
   improveList(): { note: Note; mark: ImproveMark }[] {
     const out: { note: Note; mark: ImproveMark }[] = []; const seen = new Set<string>();
     for (const [nid, m] of Object.entries(this.improve)) { const n = this.notes.get(nid); if (n && m.r.length) { out.push({ note: n, mark: m }); seen.add(nid); } }
-    for (const n of this.notes.values()) if (!seen.has(n.id) && n.tags.includes("ask-claude")) out.push({ note: n, mark: { r: ["confusion"], t: "", m: n.modified } });
+    for (const n of this.askClaudeNotes()) if (!seen.has(n.id)) out.push({ note: n, mark: { r: ["confusion"], t: "", m: n.modified } });
     return out.sort((a, b) => b.mark.m - a.mark.m);
   }
   async markImprove(nids: string[], reasons: string[], text = "") {
@@ -1294,7 +1335,13 @@ export class Store {
   // ---- Sketchy out (12/11/2026, the user's call): empty every field named "Sketchy…" and drop every tag with "sketchy" in it.
   // The notes' previous fields and tags are kept on this device (meta "sketchyUndo") so "Put Sketchy back" can restore them.
   private static isSketchyTag(t: string) { return /sketchy/i.test(t); }
+  private sketchyCache: { key: string; out: { notes: number; tags: number } } | null = null;
   sketchyCount(): { notes: number; tags: number } {
+    const rev = this.notesRev(); const key = rev && `${rev}|${[...this.notetypes.keys()].join(",")}`;
+    if (key && this.sketchyCache?.key === key) return this.sketchyCache.out;
+    const out = this.sketchyCountNow(); if (key) this.sketchyCache = { key, out }; return out;
+  }
+  private sketchyCountNow(): { notes: number; tags: number } {
     let notes = 0, tags = 0; const idx = this.sketchyFieldIdx();
     for (const n of this.notes.values()) { const fi = idx.get(n.ntid) ?? []; const hasF = fi.some((i) => (n.fields[i] ?? "").trim()); const ts = n.tags.filter(Store.isSketchyTag).length; if (hasF || ts) notes++; tags += ts; }
     return { notes, tags };
@@ -1315,12 +1362,21 @@ export class Store {
     }
     if (!changed.length) return { notes: 0, tags: 0 };
     const prev = await db.getMeta<{ id: string; fields: string[]; tags: string[] }[]>("sketchyUndo", []); const seen = new Set(prev.map((x) => x.id));
-    await db.setMeta("sketchyUndo", [...prev, ...undo.filter((x) => !seen.has(x.id))]); // the first copy of a note wins: it's the one with Sketchy in it
+    const kept = [...prev, ...undo.filter((x) => !seen.has(x.id))];
+    await db.setMeta("sketchyUndo", kept); // the first copy of a note wins: it's the one with Sketchy in it
+    this.sketchyKept = kept.length; await db.setMeta("sketchyUndoN", kept.length);
     for (const n of changed) this.notes.set(n.id, n);
     await this.persist("removing Sketchy", db.putMany("notes", changed)); this.treeCache.clear(); this.touch(); this.bump();
     return { notes: changed.length, tags };
   }
-  async sketchyBackupSize(): Promise<number> { return (await db.getMeta<any[]>("sketchyUndo", [])).length; }
+  /** How many notes the device copy holds: a small key of its own (the copy is ~24k notes with every field; Settings asked on every change). */
+  private sketchyKept: number | null = null;
+  async sketchyBackupSize(): Promise<number> {
+    if (this.sketchyKept !== null) return this.sketchyKept;
+    let n = await db.getMeta<number | null>("sketchyUndoN", null);
+    if (n === null) { n = (await db.getMeta<any[]>("sketchyUndo", [])).length; await db.setMeta("sketchyUndoN", n).catch(() => {}); } // once, for a copy made before the count was kept
+    return (this.sketchyKept = n);
+  }
   /** Put the Sketchy fields and tags back from this device's copy. */
   async restoreSketchy(): Promise<number> {
     const prev = await db.getMeta<{ id: string; fields: string[]; tags: string[] }[]>("sketchyUndo", []); const now = stamp(); const back: Note[] = [];
@@ -1334,7 +1390,7 @@ export class Store {
   get keepSketchy() { return (this.settings.applied ?? []).includes("keep-sketchy"); }
   async stripSketchyOnce(): Promise<{ notes: number; tags: number } | null> {
     if (this.keepSketchy || !this.sketchyCount().notes) return null;
-    if (this.syncBackend() === "drive" && tokenValid() && !(await db.getMeta<any[]>("sketchyUndo", [])).length) await this.backupNow(true).catch(() => "");
+    if (this.syncBackend() === "drive" && tokenValid() && !(await this.sketchyBackupSize())) await this.backupNow(true).catch(() => "");
     return this.stripSketchy();
   }
 
@@ -1464,8 +1520,13 @@ export class Store {
   /** Media the cards reference vs what this device holds. */
   private refsCache: { key: string; refs: Set<string> } | null = null;
   /** Fingerprint of everything media references depend on: every note's edit time, the note types, the hidden fields. Cheap (no regexes). */
+  /** Changes whenever a note is added, replaced or removed ("" when that can't be told: then nothing is cached). */
+  notesRev(): string { const m = this.notes; return m instanceof RevMap ? `${m.id}.${m.rev}` : ""; }
+  private notesSig: { rev: string; sig: number } | null = null;
   refsKey(): string {
-    let sig = 0; for (const n of this.notes.values()) sig = (sig + n.modified + n.fields.length) % 1e15;
+    const rev = this.notesRev(); let sig = 0;
+    if (rev && this.notesSig?.rev === rev) sig = this.notesSig.sig;
+    else { for (const n of this.notes.values()) sig = (sig + n.modified + n.fields.length) % 1e15; this.notesSig = { rev, sig }; }
     let ntSig = 0; for (const nt of this.notetypes.values()) ntSig += nt.css.length + nt.templates.length;
     return `${this.notes.size}:${sig}:${this.notetypes.size}:${ntSig}:${this.settings.hiddenFields.join("|")}`;
   }
@@ -1480,14 +1541,18 @@ export class Store {
     const names = [...this.refsCache.refs]; this.savedRefs = { key, names }; db.setMeta("mediaRefs", { key, names }).catch(() => {});
     return this.refsCache.refs;
   }
+  private mediaStatCache: { refs: Set<string>; size: number; mv: number; out: ReturnType<Store["mediaStatus"]> } | null = null;
   mediaStatus(): { total: number; stored: number; bytes: number; images: { total: number; stored: number }; sounds: { total: number; stored: number }; missing: string[] } {
     let bytes = 0; for (const b of this.media.values()) bytes += b.size;
+    const refs = this.mediaRefs(); const c = this.mediaStatCache; // the walk over every referenced file only when files or references changed
+    if (c && c.refs === refs && c.size === this.media.size && c.mv === this.mediaVersion) return { ...c.out, bytes };
     const images = { total: 0, stored: 0 }, sounds = { total: 0, stored: 0 }; let total = 0, stored = 0; const missing: string[] = [];
-    for (const r of this.mediaRefs()) {
+    for (const r of refs) {
       const has = this.media.has(r); total++; if (has) stored++; else if (missing.length < 200) missing.push(r);
       const k = IMG.test(r) ? images : AUDIO.test(r) ? sounds : null; if (k) { k.total++; if (has) k.stored++; }
     }
-    return { total, stored, bytes, images, sounds, missing };
+    const out = { total, stored, bytes, images, sounds, missing }; this.mediaStatCache = { refs, size: this.media.size, mv: this.mediaVersion, out };
+    return out;
   }
   /** Remember Anki's media folder (PC). From then on every sync sends the other devices what they are missing. */
   async linkAnkiFolder(handle: any) { this.ankiDir = handle; this.ankiList = null; await db.setMeta("ankiDir", handle); this.ankiDirName = handle?.name ?? ""; this.ankiDirAccess = handle ? "granted" : "none"; this.bump(); if (handle) this.scheduleSync(1000); }
@@ -2126,6 +2191,27 @@ export class Store {
   backup() {
     const { sync, ...settings } = this.settings;
     return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks, improve: this.improve, mastery: this.mastery };
+  }
+  /**
+   * The full backup as a file, built a slice at a time with pauses (the same JSON as `backup()`), so a big collection
+   * doesn't freeze the screen while it is written.
+   */
+  async backupBlob(onProgress?: (frac: number) => void): Promise<Blob> {
+    const all = this.backup() as Record<string, unknown>; const big = ["notes", "cards", "reviews"] as const;
+    const head: Record<string, unknown> = { ...all }; for (const k of big) delete head[k];
+    const parts: string[] = [JSON.stringify(head).slice(0, -1)]; // "{…" — the big arrays follow, then "}"
+    const total = big.reduce((n, k) => n + (all[k] as unknown[]).length, 0) || 1; let doneN = 0; const step = 4000;
+    for (const k of big) {
+      const arr = k === "reviews" ? (all[k] as unknown[]).slice() : all[k] as unknown[]; parts.push(`,${JSON.stringify(k)}:[`); // reviews: a copy, answers may come in meanwhile
+      for (let i = 0; i < arr.length; i += step) {
+        parts.push((i ? "," : "") + arr.slice(i, i + step).map((x) => JSON.stringify(x) ?? "null").join(","));
+        doneN += Math.min(step, arr.length - i); onProgress?.(doneN / total);
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      parts.push("]");
+    }
+    parts.push("}");
+    return new Blob(parts, { type: "application/json" });
   }
   /** Small backup: everything irreplaceable (reviews, settings, personal notes, scheduling), without the card text that the repository or Anki can restore. */
   quickBackup() {

@@ -60,7 +60,7 @@ function shouldNudge(n, now) {
   if (n.skipLight && n.light && n.light[today]) return false; // a night shift or the day after: Yuzu stays quiet
   return true;
 }
-const metaDb = () => new Promise((res, rej) => { const r = indexedDB.open("yuzu"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const metaDb = () => new Promise((res, rej) => { const r = indexedDB.open("yuzu"); r.onsuccess = () => { r.result.onversionchange = () => r.result.close(); res(r.result); }; r.onerror = () => rej(r.error); }); // let a newer app version upgrade the database
 async function metaGet(key) { const db = await metaDb(); return new Promise((res) => { const q = db.transaction("meta").objectStore("meta").get(key); q.onsuccess = () => res(q.result ? q.result.value : undefined); q.onerror = () => res(undefined); }); }
 async function metaPut(key, value) { const db = await metaDb(); return new Promise((res) => { const tx = db.transaction("meta", "readwrite"); tx.objectStore("meta").put({ key, value }); tx.oncomplete = () => res(); tx.onerror = () => res(); }); }
 async function nudge() {
