@@ -1,0 +1,13 @@
+import { chromium } from "playwright"; import { spawn } from "node:child_process";
+const dir = process.argv[2]; const port = 4189;
+const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
+await new Promise((r) => setTimeout(r, 800));
+const ctx = await chromium.launchPersistentContext(dir, { serviceWorkers: "block", viewport: { width: 412, height: 915 }, args: ["--js-flags=--expose-gc"] });
+const page = ctx.pages()[0] ?? await ctx.newPage(); const cdp = await ctx.newCDPSession(page);
+await page.goto(`http://127.0.0.1:${port}/`); await page.evaluate(() => localStorage.removeItem("yuzu-session"));
+await page.goto(`http://127.0.0.1:${port}/`); await page.waitForFunction(() => (window as any).yuzu?.loaded, null, { timeout: 120000 });
+const heap = async (l: string) => { await cdp.send("HeapProfiler.collectGarbage"); const m = await cdp.send("Runtime.getHeapUsage"); console.log(l, Math.round(m.usedSize / 1048576), "MB"); };
+await page.waitForTimeout(3000); await heap("after open");
+await page.waitForTimeout(12000); await heap("after idle warm-up (search index, trees)");
+await page.click("nav.tabs >> text=Library"); await page.fill('input[placeholder^="Search cards"]', "pneumothorax"); await page.waitForTimeout(4000); await heap("after a search");
+await ctx.close(); server.kill();
