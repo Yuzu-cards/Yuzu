@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 
 let depth = 0;
 let ignorePops = 0; // pops we caused ourselves (closing by tap), not to be treated as the user pressing back
+let ignored: Event | null = null; // the pop being ignored: every open overlay's listener sees the same event, and none may act on it
 
 export function useBack(open: boolean, onClose: () => void) {
   const closeRef = useRef(onClose); closeRef.current = onClose;
@@ -12,8 +13,9 @@ export function useBack(open: boolean, onClose: () => void) {
     const id = ++depth;
     history.pushState({ yuzu: id }, "");
     let popped = false;
-    const onPop = () => {
-      if (ignorePops > 0) { ignorePops--; return; }
+    const onPop = (e: PopStateEvent) => {
+      if (e === ignored) return;
+      if (ignorePops > 0) { ignorePops--; ignored = e; return; }
       // Only the topmost overlay reacts to a back press.
       if (id !== depth) return;
       popped = true; closeRef.current();

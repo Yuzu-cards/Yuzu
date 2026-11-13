@@ -9,7 +9,7 @@ import { IconChevron, IconPlay, IconClose, IconPin, IconEdit } from "./icons";
 import { useEffect, useRef } from "react";
 import { Duplicates } from "./Duplicates";
 import { OcclusionEditor } from "./Occlusion";
-import { CardEditor } from "./CardEditor";
+import { CardEditor, NoteEditor } from "./CardEditor";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
@@ -40,7 +40,7 @@ function findNode(root: TreeNode, path: string): TreeNode | null {
   return n;
 }
 
-function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () => void; onStudy: (cards: Card[], title: string) => void }) {
+function Preview({ card: card0, onClose, onStudy, onTag }: { card: Card; onClose: () => void; onStudy: (cards: Card[], title: string) => void; onTag: (tag: string) => void }) {
   const [sub, setSub] = useState<null | "edit" | "improve">(null);
   useBack(true, onClose); // the editor and the improve sheet stack their own back step on top of this one
   store.getVersion(); const card = store.cards.get(card0.id) ?? card0; // live: edits, flags and pauses show at once
@@ -48,13 +48,14 @@ function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () =>
   if (!note || !nt) return null; // deleted meanwhile
   const r = renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl });
   const mark = store.improveFor(note.id);
-  if (sub === "edit") return <CardInfo card={card} onClose={() => setSub(null)} onSaved={() => setSub(null)} />;
+  if (sub === "edit") return <NoteEditor card={card} onClose={() => setSub(null)} onTag={onTag} />;
   if (sub === "improve") return <ImproveSheet nids={[note.id]} onClose={() => setSub(null)} />;
   return (
     <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
       <div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b>{card.flag ? <span className="chip orange">flagged</span> : null}{mark ? <span className="chip orange">to improve</span> : null}<span className="chip">{card.suspended ? "paused" : card.state}</span><button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>
       <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any}><CardView html={r.back} css={r.css} dark side="back" /></div>
-      <p className="small muted">{card.source}{note.tags.length ? " · " + note.tags.filter((t) => !t.startsWith("auto::")).join(", ") : ""}{mark ? ` · to improve: ${mark.r.join(", ")}${mark.t ? ` — “${mark.t}”` : ""}` : ""}</p>
+      <p className="small muted">{card.source}{mark ? ` · to improve: ${mark.r.join(", ")}${mark.t ? ` — “${mark.t}”` : ""}` : ""}</p>
+      {note.tags.some((t) => !t.startsWith("manual::")) && <div className="row small" style={{ flexWrap: "wrap", gap: 6, margin: "-4px 0 10px" }}>{note.tags.filter((t) => !t.startsWith("manual::")).map((t) => <button key={t} className={"chip" + (t.startsWith("auto::") ? " orange" : "")} title="Show the cards with this tag" onClick={() => onTag(t)}>{t.replace(/^auto::(System|Specialty|Exam|Level)::/, "$1: ")}</button>)}</div>}
       <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
         <button className="btn primary grow" onClick={() => onStudy([card], "This card")}><IconPlay /> Study</button>
         <button className="btn grow" onClick={() => setSub("edit")}><IconEdit /> Edit</button>
@@ -73,11 +74,17 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
   const [sd, setSd] = useState<SmartDeck>(initial ?? { id: String(Date.now()), name: "", systems: [], specialties: [], decks: [], tags: [], states: [] });
   const specialties = useMemo(() => store.tree("specialties").children.map((c) => c.name).filter((n) => n !== "Other"), []);
   const decks = useMemo(() => store.tree("decks").children.map((c) => c.name), []);
-  const toggle = (key: "systems" | "specialties" | "decks" | "states", v: string) => setSd({ ...sd, [key]: (sd[key] as string[]).includes(v) ? (sd[key] as string[]).filter((x) => x !== v) : [...(sd[key] as string[]), v] });
-  const Group = ({ title, items, k }: { title: string; items: string[]; k: "systems" | "specialties" | "decks" | "states" }) => (
+  // tags: the top level of the Tags tree (housekeeping #, !, ~ tags left out); deeper ones through the search box
+  const tagTree = useMemo(() => store.tree("tags"), []);
+  const topTags = useMemo(() => tagTree.children.map((c) => c.path).filter((t) => !/^[#!~]/.test(t) && t !== "Untagged"), [tagTree]);
+  const allTags = useMemo(() => { const out: string[] = []; const walk = (n: TreeNode, d: number) => { for (const c of n.children) { if (/^[#!~]/.test(c.name) || c.name === "Untagged") continue; out.push(c.path); if (d < 3) walk(c, d + 1); } }; walk(tagTree, 0); return out.slice(0, 3000); }, [tagTree]);
+  const [tagQ, setTagQ] = useState("");
+  const toggle = (key: "systems" | "specialties" | "decks" | "states" | "tags", v: string) => setSd({ ...sd, [key]: (sd[key] as string[]).includes(v) ? (sd[key] as string[]).filter((x) => x !== v) : [...(sd[key] as string[]), v] });
+  const Group = ({ title, items, k }: { title: string; items: string[]; k: "systems" | "specialties" | "decks" | "states" | "tags" }) => (
     <><h2 style={{ marginTop: 10 }}>{title}</h2><div className="row" style={{ flexWrap: "wrap", gap: 6 }}>{items.map((x) => <button key={x} className={"chip" + ((sd[k] as string[]).includes(x) ? " orange" : "")} onClick={() => toggle(k, x)}>{x}</button>)}</div></>
   );
-  const n = store.cardsMatching(sd).length;
+  // counted over the whole collection, so only when what it matches changes (not on every letter of the name)
+  const n = useMemo(() => store.cardsMatching(sd).length, [sd.systems, sd.specialties, sd.decks, sd.tags, sd.states]);
   return (
     <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
       <div className="row"><b className="grow">{initial ? "Edit smart deck" : "New smart deck"}</b><button className="icon-btn" aria-label="Close editor" onClick={onClose}><IconClose /></button></div>
@@ -86,9 +93,14 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
       <Group title="Systems" items={SYSTEM_NAMES} k="systems" />
       <Group title="Specialties" items={specialties} k="specialties" />
       <Group title="Decks" items={decks} k="decks" />
+      <Group title="Tags" items={[...new Set([...topTags, ...sd.tags])]} k="tags" />
+      <div className="field" style={{ marginTop: 6 }}><div className="row" style={{ gap: 6 }}><input className="grow" style={{ minWidth: 0 }} list="smart-tags" aria-label="Add a deeper tag" placeholder="Add a tag, e.g. step1::high-yield" autoCapitalize="none" value={tagQ} onChange={(e) => setTagQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && tagQ.trim()) { e.preventDefault(); if (!sd.tags.includes(tagQ.trim())) toggle("tags", tagQ.trim()); setTagQ(""); } }} />
+        <button className="btn" disabled={!tagQ.trim()} onClick={() => { if (!sd.tags.includes(tagQ.trim())) toggle("tags", tagQ.trim()); setTagQ(""); }}>Add</button></div>
+        <datalist id="smart-tags">{allTags.map((t) => <option key={t} value={t} />)}</datalist></div>
       <Group title="State" items={["new", "learning", "review", "relearning"]} k="states" />
       <div className="row" style={{ marginTop: 14 }}>
-        {initial && <button className="btn danger" onClick={async () => { await store.saveSettings({ smart: store.settings.smart.filter((x) => x.id !== sd.id) }); onClose(); }}>Delete</button>}
+        {initial && <button className="btn danger" onClick={async () => { if (!(await confirmSheet({ title: `Delete the smart deck “${initial.name}”?`, sub: "Only the smart deck goes; its cards stay where they are.", yes: "Delete" }))) return; const at = store.settings.smart.findIndex((x) => x.id === sd.id); await store.saveSettings({ smart: store.settings.smart.filter((x) => x.id !== sd.id) }); onClose();
+          snackbar(`Deleted “${initial.name}”`, async () => { const l = store.settings.smart; if (!l.some((x) => x.id === initial.id)) await store.saveSettings({ smart: [...l.slice(0, at), initial, ...l.slice(at)] }); }); }}>Delete</button>}
         <button className="btn primary grow" disabled={!sd.name.trim()} onClick={async () => { const list = store.settings.smart; const at = list.findIndex((x) => x.id === sd.id); await store.saveSettings({ smart: at >= 0 ? list.map((x) => (x.id === sd.id ? sd : x)) : [...list, sd] }); onClose(); /* editing keeps its place */ }}>Save</button>
       </div>
     </div></div>
@@ -156,6 +168,12 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [improveFor, setImproveFor] = useState<string[] | null>(null);
   const [sheet, setSheet] = useState<{ title: string; sub?: string; items: SheetItem[] } | null>(null);
   const [editCard, setEditCard] = useState<Card | null>(null);
+  const [infoCard, setInfoCard] = useState<Card | null>(null);
+  /** A tag chip (preview, editor, card info): show the cards with that tag here in the Library. */
+  const openTag = (t: string) => {
+    const [v, p] = (t.startsWith("auto::System::") ? ["systems", t.slice(14)] : t.startsWith("auto::Specialty::") ? ["specialties", t.slice(17)] : t.startsWith("auto::Exam::") ? ["exams", t.slice(12)] : ["tags", t]) as [View, string];
+    setPreview(null); setEditCard(null); setInfoCard(null); setView(v); go(p); setQuery(""); setOnly(null); setShowCards(true);
+  };
   const smartList = useRef<HTMLDivElement>(null);
   const smartDrag = useDragReorder({ listRef: smartList, onMove: (a, b) => { const l = [...store.settings.smart]; const [x] = l.splice(a, 1); l.splice(b, 0, x); store.saveSettings({ smart: l }); } });
   const isPinned = (p: string, v: View) => store.settings.pins.some((x) => x.path === p && x.view === v);
@@ -173,11 +191,12 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     { label: "Preview", onClick: () => setPreview(card) },
     { label: "Study it", onClick: () => onStudy(path, view, { preset: [card], title: "This card" }) },
     { label: "Edit", onClick: () => setEditCard(card) },
+    { label: "Card info", onClick: () => setInfoCard(card) },
     { label: n && store.improveFor(n.id) ? "Change improve mark" : "Needs improving…", onClick: () => n && setImproveFor([n.id]) },
     { label: card.flag ? "Unflag" : "Flag", onClick: () => store.setFlag(card.id, card.flag ? 0 : 1) },
     { label: card.suspended ? "Unpause" : "Pause", onClick: async () => { await store.setSuspended(card.id, !card.suspended); snackbar(card.suspended ? "Unpaused" : "Paused", () => store.setSuspended(card.id, card.suspended)); } },
     { label: "Select", onClick: () => { setSelecting(true); setSelected(new Set([card.id])); } },
-    { label: "Delete", danger: true, onClick: async () => { if (!n) return; await store.deleteNotes([n.id]); snackbar("Deleted", () => { store.undoDelete(); }); } },
+    { label: "Delete", danger: true, onClick: async () => { if (!n) return; const k = store.cardsOfNote(n.id).length; if (!(await confirmSheet({ title: k > 1 ? `Delete this note and its ${k} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([n.id]); snackbar("Deleted", () => { store.undoDelete(); }); } },
   ] }); };
 
   if (store.cards.size === 0) {
@@ -189,12 +208,13 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
 
   return (
     <div className="screen">
-      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pairs</button>}<button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("card")}>＋ Card</button><button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("occlusion")}>＋ Image</button></div>
+      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pair{similarCount === 1 ? "" : "s"}</button>}<button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("card")}>＋ Card</button><button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("occlusion")}>＋ Image</button></div>
       {tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}
-      {tool === "card" && <CardEditor full onClose={() => setTool(null)} />}
+      {tool === "card" && <CardEditor full onClose={() => setTool(null)} onSimilar={() => setTool("dupes")} />}
       <div className="seg">
         {[...VIEWS, { id: "smart" as View, label: "Smart" }].map((x) => <button key={x.id} className={view === x.id ? "on" : ""} onClick={() => { setView(x.id); go(""); }}>{x.label}</button>)}
       </div>
+      {smart && <div className="crumbs"><button style={{ minWidth: 44, minHeight: 32 }} onClick={() => go("")}>Smart</button><span className="row" style={{ gap: 4 }}><span className="muted">›</span><button aria-current="page">{smart.name}</button></span></div>}
       {view !== "smart" && (
         <div className="crumbs">
           <button style={{ minWidth: 44, minHeight: 32 }} onClick={() => go("")}>All</button>
@@ -319,7 +339,12 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <p className="small muted" style={{ marginTop: 4 }}>Edit the full path. Change the last part to rename; change the part before it to move the category (and everything inside it) somewhere else.</p>
           <div className="field"><label>Full path</label><input value={rename} list="deckpaths" onChange={(e) => setRename(e.target.value)} /></div>
           <datalist id="deckpaths">{[...new Set([...store.cards.values()].map((c) => c.source))].sort().map((p) => <option key={p} value={p} />)}</datalist>
-          <button className="btn primary block" disabled={!rename.trim() || rename.trim() === path} onClick={async () => { const to = rename.trim(); await store.renamePath(path, to); setRename(null); go(to.replace(/\s*::\s*/g, "::")); }}>Apply</button>
+          <button className="btn primary block" disabled={!rename.trim() || rename.trim() === path} onClick={async () => {
+            const from = path, to = rename.trim().replace(/\s*::\s*/g, "::").replace(/^::|::$/g, ""); const k = store.renameClash(from, to);
+            if (k.existing && !(await confirmSheet({ title: `“${to.split("::").pop()}” already exists — merge ${k.moving.toLocaleString()} card${k.moving === 1 ? "" : "s"} into it?`, sub: `${to.replace(/::/g, " › ")} already has ${k.existing.toLocaleString()} card${k.existing === 1 ? "" : "s"}. The two become one category. You can undo right after.`, yes: "Merge" }))) return;
+            const n = await store.renamePath(from, to); setRename(null); go(to);
+            snackbar(`${k.existing ? "Merged" : "Moved"} ${n.toLocaleString()} card${n === 1 ? "" : "s"} into ${to.replace(/::/g, " › ")}`, async () => { await store.undoRename(); go(from); });
+          }}>Apply</button>
         </div></div>
       )}
       {classify && (
@@ -336,9 +361,10 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn block" style={{ marginTop: 10 }} onClick={() => setClassify(null)}>Done</button>
         </div></div>
       )}
-      {preview && <Preview card={preview} onClose={() => setPreview(null)} onStudy={(cards, t) => { setPreview(null); onStudy(path, view, { preset: cards, title: t }); }} />}
+      {preview && <Preview card={preview} onClose={() => setPreview(null)} onTag={openTag} onStudy={(cards, t) => { setPreview(null); onStudy(path, view, { preset: cards, title: t }); }} />}
       {sheet && <ActionSheet title={sheet.title} sub={sheet.sub} items={sheet.items} onClose={() => setSheet(null)} />}
-      {editCard && <CardInfo card={editCard} onClose={() => setEditCard(null)} onSaved={() => setEditCard(null)} />}
+      {editCard && <NoteEditor card={editCard} onClose={() => setEditCard(null)} onTag={openTag} />}
+      {infoCard && <CardInfo card={infoCard} onClose={() => setInfoCard(null)} onSaved={() => setInfoCard(null)} onTag={openTag} />}
       {improveFor && <ImproveSheet nids={improveFor} onClose={() => { setImproveFor(null); setSelected(new Set()); setSelecting(false); }} />}
       {editSmart && <SmartEditor initial={editSmart === "new" ? undefined : editSmart} onClose={() => { setEditSmart(null); if (view === "smart" && path && !store.settings.smart.some((s) => s.id === path)) go(""); }} />}
     </div>

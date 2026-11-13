@@ -29,6 +29,8 @@ export interface Note {
   ankiMod?: number;
   /** Last time the user edited the fields in Yuzu (ms). */
   edited?: number;
+  /** Set on a note tagged needs-review::similar when it was added: the existing note it resembles. */
+  similarTo?: string;
 }
 
 export interface Card {
