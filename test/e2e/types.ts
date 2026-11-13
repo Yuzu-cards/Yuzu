@@ -45,7 +45,7 @@ try {
   await drawBox(0.1, 0.15, 0.37, 0.4); await drawBox(0.6, 0.5, 0.87, 0.8); await drawBox(0.5, 0.05, 0.505, 0.06); // the third is a stray tap, too small to count
   ok("dragging draws one box per drag (a tiny stray one is ignored)", (await p2.locator('input[aria-label^="Name of box"]').count()) === 2);
   await p2.fill('input[aria-label="Name of box 1"]', "Red room"); await p2.fill('input[aria-label="Name of box 2"]', "Blue room");
-  await p2.click("button:has-text('Make 2 cards')"); await p2.waitForSelector("text=/cards? added/", { timeout: 10000 });
+  await p2.click("button:has-text('Make 2 cards')"); await p2.waitForSelector("text=/cards?[)]? added/", { timeout: 10000 });
   ok("each box became a card of one note", (await p2.evaluate(() => { const y = (window as any).yuzu; const n = [...y.notes.values()].filter((n: any) => n.ntid === "yuzu-io"); return n.length === 1 && y.cardsOfNote(n[0].id).length === 2; })));
   await p2.evaluate(() => (document.querySelector(".sheet-backdrop .icon-btn") as HTMLElement)?.click());
   await p2.click("nav.tabs >> text=Today"); await p2.click(".hero >> text=Study"); await p2.waitForSelector(".study .card-host", { timeout: 15000 });

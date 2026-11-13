@@ -4,10 +4,12 @@ import * as db from "./db";
 import { rate, replay, retrievability, DEFAULT_CONFIG, type SchedulerConfig, DAY, toFsrs6, setActiveWeights } from "../scheduler/fsrs";
 import { fit as fitWeights, calibration as calib } from "../scheduler/optimize";
 import type { ImportResult } from "../import/anki";
-import { parsePack, describePack } from "../import/pack";
+import { parsePack, summarizePack, packOrds, countOf, type PackSummary } from "../import/pack";
+import { cleanNote, cleanCardSource, dataUrlToBytes, normCategory, str, strTags, strList } from "./sanitize";
 import { noteTitle, renderCard } from "./render";
 import { stamp, observe } from "./clock";
 import { MCQ_ID, parseOptions } from "./mcq";
+import { IO_ID, parseMasks } from "./occlusion";
 import { diagnoseWorkload, type Cause } from "./diagnose";
 import { spokenText, backOnly } from "./voice";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
@@ -559,6 +561,7 @@ export class Store {
             if (dr.length) { const set = new Set(dr); this.reviews = this.reviews.filter((r) => !set.has(r.id)); await db.deleteMany("reviews", dr); }
             if (dn.length) await db.deleteMany("notes", dn); if (dc.length) { await db.deleteMany("cards", dc); this.dropUndo(new Set(dc)); }
           }
+          if (got.notes) got.notes = got.notes.map((n) => cleanNote(n).note); // a wrongly typed value from another device must not crash this one
           if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes, this.tombstones); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
           if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
           if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
@@ -763,6 +766,31 @@ export class Store {
     }
   }
 
+  /**
+   * Stored records a bad pack, curation file or backup could have broken: a number as a tag or an object as a field crashed
+   * every screen at launch. They are made text again (and saved, so sync carries the fix). Notes from a pack that an interrupted
+   * import left without cards get their cards back as new cards (mod 0: a real copy from another device always wins).
+   */
+  private async repairLoaded() {
+    const now = stamp(); const notesOut: Note[] = []; const cardsOut: Card[] = [];
+    for (const n of this.notes.values()) { const r = cleanNote(n); if (r.changed) { const m = { ...r.note, modified: now }; this.notes.set(n.id, m); notesOut.push(m); } }
+    const withCards = new Set<string>(); let badSource = 0;
+    for (const c of this.cards.values()) { withCards.add(c.nid); if (typeof c.source !== "string") { const m = { ...cleanCardSource(c), mod: now }; this.cards.set(c.id, m); cardsOut.push(m); badSource++; } }
+    const kinds: Record<string, string> = { "yuzu-cloze": "cloze", "yuzu-basic": "basic", "yuzu-mcq": "mcq", "yuzu-io": "occlusion", "yuzu-vocab": "vocab" };
+    let rebuilt = 0;
+    for (const n of this.notes.values()) {
+      const kind = n.ntid === IO_ID ? "occlusion" : kinds[n.ntid]; if (!kind || withCards.has(n.id)) continue;
+      const ords = packOrds(kind, n.fields[0], kind === "occlusion" ? parseMasks(n.fields[1] ?? "").length : 0);
+      let any = false;
+      for (const ord of ords) { const id = `${n.id}-${ord}`; if (this.tombstones["c:" + id] !== undefined) continue; const c: Card = { id, nid: n.id, ord, state: "new", suspended: false, flag: 0, due: now, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: now, mod: 0, source: "Medicine::Inbox" }; this.cards.set(id, c); cardsOut.push(c); any = true; }
+      if (any) rebuilt++;
+    }
+    if (notesOut.length) this.loadNotes.push(`${notesOut.length.toLocaleString()} ${notesOut.length === 1 ? "note had" : "notes had"} fields or tags that were not text and ${notesOut.length === 1 ? "was" : "were"} repaired`);
+    if (badSource) this.loadNotes.push(`${badSource.toLocaleString()} ${badSource === 1 ? "card had" : "cards had"} a broken category and ${badSource === 1 ? "was" : "were"} put back in a readable one`);
+    if (rebuilt) this.loadNotes.push(`${rebuilt.toLocaleString()} ${rebuilt === 1 ? "note" : "notes"} from a pack had no cards (an import was interrupted); ${rebuilt === 1 ? "its cards were" : "their cards were"} made again in Medicine::Inbox`);
+    if (notesOut.length || cardsOut.length) { await this.persist("repairing damaged cards", db.putAtomic({ notes: notesOut, cards: cardsOut })); this.dirty = true; }
+  }
+
   /** Run a persistence write; a failure is remembered and shown instead of silently losing data. */
   protected async persist<T>(what: string, p: Promise<T>): Promise<T | undefined> {
     try { const r = await p; if (this.saveError) { this.saveError = null; this.bump(); } return r; }
@@ -818,6 +846,7 @@ export class Store {
     if (!(this.settings.applied ?? []).includes("qa-2026-11-12")) { this.settings = { ...this.settings, planScreen: false, showStreak: false, retireAutoYears: 0, leechAction: "claude", citrusPlans: false, applied: [...(this.settings.applied ?? []), "qa-2026-11-12"] }; await db.setMeta("settings", this.settings); }
     setActiveWeights(this.settings.scheduler.w);
     this.rota = this.settings.google?.rota ?? {}; this.rebuildShiftWeights();
+    await this.repairLoaded();
     await this.migrations(); mark("meta");
     this.loaded = true;
     this.watchDayTurn();
@@ -940,10 +969,17 @@ export class Store {
   async addOcclusion(o: { title: string; image: string; masks: import("./occlusion").Mask[]; category: string }): Promise<string> {
     return this.importPack({ yuzu_pack: 1, id: "occlusion", category: o.category || "Medicine::Inbox", cards: [{ type: "occlusion", front: o.title || "Image occlusion", image: o.image, masks: o.masks }] });
   }
-  async importPack(json: unknown): Promise<string> {
-    const r = parsePack(json, this.notes.values());
-    for (const nt of r.notetypes) this.notetypes.set(nt.id, nt);
-    for (const n of r.notes) this.notes.set(n.id, n);
+  async importPack(json: unknown, opts: { restoreDeleted?: boolean } = {}): Promise<string> { return (await this.importPackDetailed(json, opts)).message; }
+  /**
+   * Add a card pack and say exactly what happened (added / updated / unchanged / repaired / skipped and why).
+   * Nothing changes in memory until the disk has all of it (one transaction): an interrupted or failed save leaves no half-import.
+   * Notes the user deleted stay deleted unless `restoreDeleted`. Notes already here without cards get their cards back.
+   */
+  async importPackDetailed(json: unknown, opts: { restoreDeleted?: boolean } = {}): Promise<PackSummary> {
+    let withCards: Set<string> | null = null;
+    const hasCards = (nid: string) => { if (!withCards) { withCards = new Set(); for (const c of this.cards.values()) withCards.add(c.nid); } return withCards.has(nid); };
+    const r = parsePack(json, this.notes.values(), Date.now(), { tombstones: this.tombstones, restoreDeleted: opts.restoreDeleted, hasCards });
+    const summary = summarizePack(r);
     // Revised notes keep their existing cards (and scheduling); new cloze numbers get new cards,
     // cloze numbers that disappeared are suspended rather than deleted so sync stays consistent.
     // Existing cards are matched by note + template/cloze number, not by id: an Anki card keeps its Anki id
@@ -953,26 +989,42 @@ export class Store {
     if (updated.size) for (const c of this.cards.values()) if (updated.has(c.nid)) byNoteOrd.set(c.nid + "#" + c.ord, c);
     const kept = new Set<string>();
     for (const c of r.cards) {
-      const prev = updated.has(c.nid) ? (this.cards.get(c.id) ?? byNoteOrd.get(c.nid + "#" + c.ord)) : undefined;
+      const prev = updated.has(c.nid) ? (this.cards.get(c.id) ?? byNoteOrd.get(c.nid + "#" + c.ord)) : this.cards.get(c.id);
       if (prev) { kept.add(prev.id); continue; }
-      this.cards.set(c.id, c); cardsOut.push(c); kept.add(c.id);
+      if (this.tombstones["c:" + c.id] !== undefined && !opts.restoreDeleted) continue; // a card the user removed stays removed
+      cardsOut.push(c); kept.add(c.id);
     }
     if (updated.size) {
       const now = stamp();
-      for (const c of this.cards.values()) if (updated.has(c.nid) && !kept.has(c.id) && !c.suspended) { const s2 = { ...c, suspended: true, mod: now }; this.cards.set(c.id, s2); cardsOut.push(s2); }
+      for (const c of this.cards.values()) if (updated.has(c.nid) && !kept.has(c.id) && !c.suspended) cardsOut.push({ ...c, suspended: true, mod: now });
     }
-    r.cards = cardsOut;
     const blobs: { name: string; blob: Blob }[] = [];
-    for (const m of r.media) { const res = await fetch(m.dataUrl); const blob = await res.blob(); this.media.set(m.name, blob); blobs.push({ name: m.name, blob }); }
-    await db.putMany("notetypes", r.notetypes); await db.putMany("notes", r.notes); await db.putMany("cards", r.cards); if (blobs.length) await db.putMany("media", blobs);
+    for (const m of r.media) { try { const { mime, bytes } = dataUrlToBytes(m.dataUrl); blobs.push({ name: m.name, blob: new Blob([bytes as BlobPart], { type: mime }) }); } catch { /* checked by parsePack already */ } }
+    const lift = opts.restoreDeleted ? [...r.notes.map((n) => "n:" + n.id), ...cardsOut.map((c) => "c:" + c.id)].filter((k) => this.tombstones[k] !== undefined) : [];
+    const saved = await this.persist("saving the new cards", (async () => {
+      await db.putAtomic({ notetypes: r.notetypes, notes: r.notes, cards: cardsOut, media: blobs });
+      if (lift.length) { const t = { ...this.tombstones }; for (const k of lift) delete t[k]; await db.setMeta("tombstones", t); this.tombstones = t; }
+      return true;
+    })());
+    if (!saved) throw new Error(`Nothing was added: ${this.saveError ?? "the cards could not be saved"}.`);
+    for (const nt of r.notetypes) this.notetypes.set(nt.id, nt);
+    for (const n of r.notes) this.notes.set(n.id, n);
+    for (const c of cardsOut) this.cards.set(c.id, c);
+    for (const b of blobs) this.media.set(b.name, b.blob);
     this.bump(); this.touch();
-    return describePack(r);
+    return summary;
   }
 
   /** Apply a curation file made by Claude: deck moves, note merges (keep one note, drop the copies, union tags) and tag additions. */
   async importCuration(json: unknown, onProgress?: (msg: string, frac: number) => void): Promise<string> {
     const c = json as { yuzu_curation: 1; name?: string; decks?: Record<string, string | null>; merges?: { keep: string; drop: string[]; tags?: string[] }[]; review?: string[][]; tags?: Record<string, string[]>; suspend?: string[]; edits?: { id: string; fields: Record<string, string>; tags?: string[] }[]; packs?: unknown[] };
     if (!c || c.yuzu_curation !== 1) throw new Error("Not a Yuzu curation file");
+    // Every part is checked: one number where text belongs used to break the collection for good (and "toString" is a deck name, not a built-in).
+    const merges = (Array.isArray(c.merges) ? c.merges : []).filter((m) => m && typeof m.keep === "string").map((m) => ({ keep: m.keep, drop: strList(m.drop), tags: strTags(m.tags) }));
+    const reviewGroups = (Array.isArray(c.review) ? c.review : []).map(strList).filter((g) => g.length);
+    const tagMap: [string, string[]][] = c.tags && typeof c.tags === "object" && !Array.isArray(c.tags) ? Object.entries(c.tags).map(([t, ids]) => [t.trim(), strList(ids)] as [string, string[]]).filter(([t]) => !!t) : [];
+    const edits = (Array.isArray(c.edits) ? c.edits : []).filter((e) => e && typeof e.id === "string" && (e.fields == null || typeof e.fields === "object")).map((e) => ({ id: e.id, fields: Object.fromEntries(Object.entries(e.fields ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, str(v)])), tags: strTags(e.tags) }));
+    const suspendIds = strList(c.suspend); const packs = Array.isArray(c.packs) ? c.packs : [];
     const now = stamp();
     const changedNotes = new Map<string, Note>(); const changedCards = new Map<string, Card>();
     const delNotes: string[] = []; const delCards: string[] = [];
@@ -983,7 +1035,7 @@ export class Store {
     const log: { keep: string; dropped: Note[]; cards: Card[] }[] = [];
     const keepSnap = new Map<string, { note: Note; cards: Card[] }>();
     const byNid = new Map<string, Card[]>(); for (const card of this.cards.values()) (byNid.get(card.nid) ?? byNid.set(card.nid, []).get(card.nid)!).push(card);
-    for (const m of c.merges ?? []) {
+    for (const m of merges) {
       if (!this.notes.has(m.keep)) continue;
       const entry = { keep: m.keep, dropped: [] as Note[], cards: [] as Card[] };
       if (!keepSnap.has(m.keep)) keepSnap.set(m.keep, { note: this.notes.get(m.keep)!, cards: byNid.get(m.keep) ?? [] });
@@ -994,38 +1046,39 @@ export class Store {
         this.tombstones["n:" + d] = now; dropped++;
       }
       if (entry.dropped.length) { log.push(entry); merged++; }
-      if (m.tags?.length) touchNote(m.keep, (n) => { for (const t of m.tags!) if (!n.tags.includes(t)) n.tags.push(t); });
+      if (m.tags.length) touchNote(m.keep, (n) => { for (const t of m.tags) if (!n.tags.includes(t)) n.tags.push(t); });
     }
     // 2. deck moves (exact deck path → new path; null = drop the deck)
     onProgress?.("Moving decks", 0.4);
-    const decks = c.decks ?? {};
+    const decks = new Map<string, string | null>();
+    if (c.decks && typeof c.decks === "object") for (const [k, v] of Object.entries(c.decks)) { if (v === null) decks.set(k, null); else { const to = normCategory(v); if (to) decks.set(k, to); } }
     for (const card of [...this.cards.values()]) {
-      if (!(card.source in decks)) continue;
-      const to = decks[card.source];
+      if (!decks.has(card.source)) continue;
+      const to = decks.get(card.source)!;
       if (to === null) { delCards.push(card.id); this.cards.delete(card.id); this.tombstones["c:" + card.id] = now; const sibs = byNid.get(card.nid) ?? []; if (sibs.every((x) => !this.cards.has(x.id)) && this.notes.has(card.nid)) { delNotes.push(card.nid); this.notes.delete(card.nid); this.tombstones["n:" + card.nid] = now; } dropped++; continue; }
       if (to === card.source) continue;
       const m = { ...card, source: to, mod: now }; this.cards.set(card.id, m); changedCards.set(card.id, m); moved++;
     }
     // 3. tags
     onProgress?.("Tagging", 0.7);
-    for (const [tag, ids] of Object.entries(c.tags ?? {})) for (const id of ids) { const n = this.notes.get(id); if (n && !n.tags.includes(tag)) { touchNote(id, (x) => x.tags.push(tag)); tagged++; } }
-    for (const g of c.review ?? []) for (const id of g) { const n = this.notes.get(id); if (n && !n.tags.includes("needs-review::similar")) touchNote(id, (x) => x.tags.push("needs-review::similar")); }
+    for (const [tag, ids] of tagMap) for (const id of ids) { const n = this.notes.get(id); if (n && !n.tags.includes(tag)) { touchNote(id, (x) => x.tags.push(tag)); tagged++; } }
+    for (const g of reviewGroups) for (const id of g) { const n = this.notes.get(id); if (n && !n.tags.includes("needs-review::similar")) touchNote(id, (x) => x.tags.push("needs-review::similar")); }
     // 4. edits: rewrite fields of existing notes in place (note type, cards and review history stay).
     // Marked as edited, so a later Anki update of the same note is flagged instead of overwriting the fix.
     let edited = 0;
-    for (const e of c.edits ?? []) {
+    for (const e of edits) {
       const n = changedNotes.get(e.id) ?? this.notes.get(e.id); if (!n) continue;
       const fields = [...n.fields]; let diff = false;
       for (const [k, v] of Object.entries(e.fields)) { const i = Number(k); if (Number.isInteger(i) && i >= 0 && i < fields.length && fields[i] !== v) { fields[i] = v; diff = true; } }
-      if (!diff && !e.tags?.length) continue;
-      touchNote(e.id, (x) => { x.fields = fields; x.edited = now; for (const t of e.tags ?? []) if (!x.tags.includes(t)) x.tags.push(t); });
+      if (!diff && !e.tags.length) continue;
+      touchNote(e.id, (x) => { x.fields = fields; x.edited = now; for (const t of e.tags) if (!x.tags.includes(t)) x.tags.push(t); });
       if (diff) edited++;
     }
     // 5. suspend (e.g. notes the deck's author removed in Anki): history kept, reversible from the Library.
     let suspended = 0;
-    for (const id of c.suspend ?? []) for (const card of byNid.get(id) ?? []) { const cur = changedCards.get(card.id) ?? this.cards.get(card.id); if (cur && !cur.suspended) { const m = { ...cur, suspended: true, mod: now }; this.cards.set(card.id, m); changedCards.set(card.id, m); suspended++; } }
+    for (const id of suspendIds) for (const card of byNid.get(id) ?? []) { const cur = changedCards.get(card.id) ?? this.cards.get(card.id); if (cur && !cur.suspended) { const m = { ...cur, suspended: true, mod: now }; this.cards.set(card.id, m); changedCards.set(card.id, m); suspended++; } }
     // Remember where Anki decks belong, so later imports land new cards in the right category by themselves.
-    const learned = Object.fromEntries(Object.entries(decks).filter(([, v]) => typeof v === "string")) as Record<string, string>;
+    const learned = Object.fromEntries([...decks].filter(([, v]) => typeof v === "string")) as Record<string, string>;
     if (Object.keys(learned).length) await this.saveSettings({ deckMap: { ...this.settings.deckMap, ...learned } });
     onProgress?.("Saving", 0.85);
     await db.putMany("notes", [...changedNotes.values()]); await db.putMany("cards", [...changedCards.values()]);
@@ -1035,12 +1088,13 @@ export class Store {
     await db.setMeta("mergeLog2", this.mergeLog);
     this.bump(); this.touch();
     // 6a. Marks "needs improving" on the notes this file dealt with are cleared.
-    const dealt = [...new Set([...(c.edits ?? []).map((e) => e.id), ...(c.suspend ?? []), ...((c as any).resolved ?? [])])].filter((id) => this.improve[id]?.r.length || this.notes.get(id)?.tags.includes("ask-claude"));
+    const dealt = [...new Set([...edits.map((e) => e.id), ...suspendIds, ...strList((c as any).resolved)])].filter((id) => this.improve[id]?.r.length || this.notes.get(id)?.tags.includes("ask-claude"));
     if (dealt.length) await this.clearImprove(dealt);
     // 6. card packs carried in the same file (new cards, placed by their own category)
     const packMsgs: string[] = [];
-    for (const [i, p] of (c.packs ?? []).entries()) { onProgress?.(`Adding cards (${i + 1}/${c.packs!.length})`, 0.9 + (0.1 * i) / c.packs!.length); packMsgs.push(`${(p as any)?.name ?? "Pack"}: ${await this.importPack(p)}.`); }
-    return `${merged} duplicate groups merged (${dropped} notes removed), ${moved.toLocaleString()} cards moved to new categories, ${tagged.toLocaleString()} tags added${c.review?.length ? `, ${c.review.length} similar pairs tagged needs-review::similar` : ""}${edited ? `, ${edited.toLocaleString()} cards improved` : ""}${suspended ? `, ${suspended} cards suspended` : ""}.${packMsgs.length ? " " + packMsgs.join(" ") : ""}`;
+    for (const [i, p] of packs.entries()) { onProgress?.(`Adding cards (${i + 1}/${packs.length})`, 0.9 + (0.1 * i) / packs.length); packMsgs.push(`${str((p as any)?.name) || "Pack"}: ${await this.importPack(p).catch((e: any) => e?.message ?? String(e))}.`); }
+    const k = countOf; const did = [merged ? `${k(merged, "duplicate group")} merged (${k(dropped, "note")} removed)` : dropped ? `${k(dropped, "note")} removed` : "", moved ? `${k(moved, "card")} moved to new categories` : "", tagged ? `${k(tagged, "tag")} added` : "", reviewGroups.length ? `${k(reviewGroups.length, "similar pair")} tagged needs-review::similar` : "", edited ? `${k(edited, "card")} improved` : "", suspended ? `${k(suspended, "card")} suspended` : ""].filter(Boolean);
+    return `${did.length ? did.join(", ").replace(/^./, (x) => x.toUpperCase()) + "." : "Nothing to change."}${packMsgs.length ? " " + packMsgs.join(" ") : ""}`;
   }
 
   // ---- hooks (personal notes on cards) --------------------------------------
@@ -2139,6 +2193,7 @@ export class Store {
     if (data.improve) { const merged = { ...this.improve }; for (const [k, v] of Object.entries(data.improve as typeof this.improve)) if ((merged[k]?.m ?? -1) < v.m) merged[k] = v; this.improve = merged; await db.setMeta("improve", merged); }
     if (data.mastery) { const ids = new Set(this.mastery.log.map((e) => e.id)); this.mastery = { log: [...this.mastery.log, ...(data.mastery.log ?? []).filter((e: any) => !ids.has(e.id))], kept: { ...(data.mastery.kept ?? {}), ...this.mastery.kept } }; await db.setMeta("mastery", this.mastery); }
     if (data.hooks) { const merged = { ...this.hooks }; for (const [k, v] of Object.entries(data.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) merged[k] = v; this.hooks = merged; await db.setMeta("hooks", merged); }
+    if (Array.isArray(data.notes)) data.notes = data.notes.map((x: Note) => cleanNote(x).note); if (Array.isArray(data.cards)) data.cards = data.cards.map((x: Card) => cleanCardSource(x)); // wrongly typed values must not reach the screens
     const n = mergeNotes(this.notes, data.notes ?? [], this.tombstones); const c = mergeCards(this.cards, data.cards ?? [], this.tombstones);
     const known = new Set(this.reviews.map((r) => r.id));
     const m = mergeReviews(this.reviews, data.reviews ?? []); this.reviews = m.list;
