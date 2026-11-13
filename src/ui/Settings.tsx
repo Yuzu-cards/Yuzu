@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
 import { ImproveSection } from "./Improve";
-import { Slider, snackbar, DateField, confirmSheet } from "./kit";
+import { Slider, snackbar, DateField, confirmSheet, ActionSheet } from "./kit";
 import { retentionTradeoff } from "../scheduler/optimize";
 import { importAnki } from "../import/anki";
 import { inflateRaw, zstd } from "../lib/decompress";
@@ -135,7 +135,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         onProgress: (m, f) => { setMsg(m); if (f !== undefined) setFrac(f); },
       }, { skipDeckPrefixes: skipLanguages ? ["Languages"] : [] });
       const merged = await store.applyImport(res, (m, f) => { setMsg(m); setFrac(f); });
-      setResult(`Imported ${res.summary.notes.toLocaleString()} notes, ${res.summary.cards.toLocaleString()} cards and ${res.summary.reviews.toLocaleString()} reviews (${merged.newCards.toLocaleString()} new cards${merged.organized ? `, ${merged.organized.toLocaleString()} placed in your categories` : ""}, ${merged.updated.toLocaleString()} notes updated from Anki). ${res.summary.media ? `${res.summary.media.toLocaleString()} images and sounds referenced.` : ""}`);
+      setResult(`Imported ${res.summary.notes.toLocaleString()} notes, ${res.summary.cards.toLocaleString()} cards and ${res.summary.reviews.toLocaleString()} reviews (${merged.newCards.toLocaleString()} new cards${merged.organized ? `, ${merged.organized.toLocaleString()} placed in your categories` : ""}, ${merged.updated.toLocaleString()} notes updated from Anki). ${res.summary.media ? (() => { const m = store.mediaStatus(); return `Your cards use ${m.total.toLocaleString()} media files (${mediaParts(m)}).`; })() : ""}`);
       // The same file may carry the media: continue straight into adding it.
       if (res.summary.media && await hasMedia(file)) { setBusy(false); await onMedia(file); }
     } catch (e: any) {
@@ -147,7 +147,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   return (
     <div className="screen">
       <h1>Settings</h1>
-      <JumpRow />
+      <JumpRow hide={reversible.length ? [] : ["s-lang"]} />
       <div className="settings-cols">
       <details className="section" id="s-look" open><summary>Look and sound <span className="small muted">interface, colours, sound</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
         <div className="card-box">
@@ -159,8 +159,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <div className="row" style={{ gap: 8, margin: "4px 0 4px" }}><span className="small grow">Colours</span></div>
           <div className="themes">{THEMES.map((t) => <button key={t.id} className={s.theme === t.id ? "on" : ""} onClick={() => { store.saveSettings({ theme: t.id }); sfx.tap(); }}><span className="sw">{t.sw.map((c) => <i key={c} style={{ background: c }} />)}</span>{t.name}</button>)}</div>
           <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={s.sfx} onChange={(e) => { store.saveSettings({ sfx: e.target.checked }); if (e.target.checked) setTimeout(() => sfx.answer(3), 50); }} /> Sound effects (short 8-bit blips on answers, goal and boss fights)</label>
-          <div className="row" style={{ marginTop: 12, gap: 8 }}><span className="small grow">Card look</span>
-            <div className="seg">{(["yuzu", "deck"] as const).map((v) => <button key={v} className={s.cardStyle === v ? "on" : ""} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div></div>
+          <div className="row" style={{ gap: 8, margin: "12px 0 4px" }}><span className="small grow">Card look</span></div>
+          <div className="seg card-seg" role="radiogroup" aria-label="Card look">{(["yuzu", "deck"] as const).map((v) => <button key={v} role="radio" aria-checked={s.cardStyle === v} className={s.cardStyle === v ? "on" : ""} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div>
           <p className="small muted" style={{ margin: "6px 0 0" }}>Yuzu gives every deck the same calm type, orange cloze answers and tidy extras; the deck's own look shows each Anki deck as it was designed.</p>
           <DeviceToggles />
         </div>
@@ -205,8 +205,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           </select></div>
         <div className="field"><label>New day starts at</label>
           <select value={s.rollover} onChange={(e) => store.saveSettings({ rollover: Number(e.target.value) })}>
-            {[0, 1, 2, 3, 4, 5, 6].map((h) => <option key={h} value={h}>{h}:00</option>)}
-          </select></div>
+            {Array.from({ length: 13 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+          </select><span className="small muted">After a night shift (to 08:00), 09:00 or 10:00 keeps the whole post-shift session in one day.</span></div>
       </div>
 
       </details>
@@ -214,9 +214,9 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <ReminderSettings />
       {reversible.length > 0 && <details className="section" id="s-lang"><summary>Language cards <span className="small muted">reverse and typed cards</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
         <div className="card-box">
-          <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German). Turning one off suspends its reverse cards; history is kept.</p>
+          <p className="small muted" style={{ marginTop: 0 }}>Reverse cards ask the other direction (German → English as well as English → German), only for cards in your Languages decks — medical cards of the same note type are left alone. Turning one off pauses its reverse cards; history is kept.</p>
           {reversible.map(({ nt, notes, on }) => (
-            <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={revOn.get(nt.id) ?? false} onChange={async (e) => { setRevMsg("Working…"); const n = await store.setReverse(nt.id, e.target.checked); setRevMsg(`${n?.toLocaleString()} reverse cards ${e.target.checked ? "added" : "suspended"}.`); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
+            <label key={nt.id} className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={revOn.get(nt.id) ?? false} onChange={async (e) => { const on = e.target.checked; setRevMsg("Working…"); const n = (await store.setReverse(nt.id, on)) ?? 0; const said = (k: boolean, x: number) => `${x.toLocaleString()} reverse card${x === 1 ? "" : "s"} ${k ? "added" : "paused"} (Languages decks only).`; setRevMsg(said(on, n)); if (n) snackbar(said(on, n), async () => { const m = (await store.setReverse(nt.id, !on)) ?? 0; setRevMsg(said(!on, m)); }); }} /> {nt.name} <span className="muted">· {notes.toLocaleString()} notes</span></label>
           ))}
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
         </div>
@@ -245,7 +245,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             <div className="stat"><b>{(m.bytes / 1048576).toFixed(0)}<small> MB</small></b><span>{quota ? `${(quota.free / 1073741824).toFixed(1)} GB free` : "used"}</span></div>
           </div>
           {!mediaBusy && <div className="bar" aria-label={`${pct}% of your cards' media is here`}><i style={{ width: `${pct}%` }} /></div>}
-          <p className="small muted">{m.total === 0 ? "None of your cards use images or sounds." : m.stored === m.total ? "Everything your cards use is here." : `${(m.total - m.stored).toLocaleString()} files your cards use are not on this device yet.`}{quota && !quota.persisted && m.bytes > 0 ? " The browser may clear big libraries when space runs low; installing Yuzu to the home screen protects it." : ""}</p>
+          <p className="small muted">{m.total === 0 ? "None of your cards use images or sounds." : m.stored === m.total ? "Everything your cards use is here." : `${(m.total - m.stored).toLocaleString()} of the ${m.total.toLocaleString()} files your cards use (${mediaParts(m)}) are not on this device yet.`}{quota && !quota.persisted && m.bytes > 0 ? " The browser may clear big libraries when space runs low; installing Yuzu to the home screen protects it." : ""}</p>
         </>); })()}
         <input ref={mediaRef} type="file" accept=".apkg,.colpkg,.zip" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && onMedia(e.target.files[0])} />
         <input ref={folderRef} type="file" multiple {...({ webkitdirectory: "", directory: "" } as any)} style={{ display: "none" }} onChange={(e) => e.target.files?.length && onMedia([...e.target.files])} />
@@ -288,7 +288,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         </>)}
         <div className="field" style={{ marginTop: 12 }}><label>Hidden fields <span className="muted">(never shown, their pictures never kept)</span></label>
           <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
-            {s.hiddenFields.map((f) => <button key={f} className="chip" onClick={() => store.saveSettings({ hiddenFields: s.hiddenFields.filter((x) => x !== f) })} aria-label={`Show ${f} again`}>{f} ✕</button>)}
+            {s.hiddenFields.map((f) => <button key={f} className="chip hidden-field" onClick={async () => { await store.saveSettings({ hiddenFields: s.hiddenFields.filter((x) => x !== f) }); snackbar(`${f} shows again on every device`, async () => { if (!store.settings.hiddenFields.includes(f)) await store.saveSettings({ hiddenFields: [...store.settings.hiddenFields, f] }); }); }} aria-label={`Show ${f} again`}>{f} ✕</button>)}
             <input placeholder="Add a field name" style={{ flex: "1 1 140px", minWidth: 0 }} onKeyDown={(e) => { const v = (e.target as HTMLInputElement).value.trim(); if (e.key === "Enter" && v && !s.hiddenFields.includes(v)) { store.saveSettings({ hiddenFields: [...s.hiddenFields, v] }); (e.target as HTMLInputElement).value = ""; } }} />
           </div>
           <button className="btn" style={{ marginTop: 8 }} disabled={busy || !mediaStat.bytes} onClick={async () => { const r = await store.pruneMedia(); setMediaMsg(r.files ? `Removed ${r.files.toLocaleString()} pictures no card shows (${(r.bytes / 1048576).toFixed(0)} MB freed).` : "Every stored picture is used by a card."); }}>Remove pictures no card shows</button>
@@ -361,7 +361,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <button className="btn grow" onClick={() => restoreRef.current?.click()}>Restore backup</button>
           <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const r = await store.restore(JSON.parse(await f.text())); setResult(`Restored: ${r.cards} cards, ${r.notes} notes and ${r.reviews} reviews merged.`); } catch (err: any) { setResult("Restore failed: " + err.message); } e.target.value = ""; }} />
         </div>
-        <button className="btn danger block" style={{ marginTop: 10 }} onClick={async () => { if (await confirmSheet({ title: "Delete everything on this device?", sub: "All cards and reviews here are deleted. A backup or a sync can bring them back.", yes: "Delete everything" })) await store.wipe(); }}>Delete everything on this device</button>
+        <WipeButton media={mediaStat.stored} />
       </div>
       </details>
       <details className="section" id="s-diag"><summary>Diagnostics <span className="small muted">storage, errors, repair</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
@@ -466,6 +466,9 @@ function RetentionSlider() {
   );
 }
 
+/** "3,897 images, 35 sounds, 2 template files": the same set (store.mediaStatus) everywhere the screen counts media. */
+function mediaParts(m: ReturnType<typeof store.mediaStatus>) { const other = m.total - m.images.total - m.sounds.total; return [`${m.images.total.toLocaleString()} images`, `${m.sounds.total.toLocaleString()} sounds`, other > 0 && `${other.toLocaleString()} template file${other === 1 ? "" : "s"}`].filter(Boolean).join(", "); }
+
 /** Today as dd-mm-yyyy for file names. */
 function dmy(d = new Date()) { return `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`; }
 
@@ -479,8 +482,8 @@ function DeviceToggles() {
   const set = (k: string, on: boolean) => { try { localStorage.setItem(k, on ? "on" : "off"); } catch { /* fine */ } };
   return (<>
     <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={h} onChange={(e) => { setH(e.target.checked); set("yuzu-haptics", e.target.checked); if (e.target.checked) navigator.vibrate?.(12); }} /> Vibration (Android): ratings, holds, drags</label>
-    <div className="field" style={{ marginTop: 12 }}><label>Holding a word on a card</label>
-      <div className="seg">{(["yuzu", "system"] as const).map((k) => <button key={k} className={hold === k ? "on" : ""} onClick={() => { setHold(k); try { localStorage.setItem("yuzu-hold", k); } catch { /* fine */ } }}>{k === "yuzu" ? "Yuzu" : "System"}</button>)}</div>
+    <div style={{ marginTop: 12 }}><div className="row" style={{ gap: 8, margin: "0 0 4px" }}><span className="small grow">Holding a word on a card</span></div>
+      <div className="seg card-seg" role="radiogroup" aria-label="Holding a word on a card">{(["yuzu", "system"] as const).map((k) => <button key={k} role="radio" aria-checked={hold === k} className={hold === k ? "on" : ""} onClick={() => { setHold(k); try { localStorage.setItem("yuzu-hold", k); } catch { /* fine */ } }}>{k === "yuzu" ? "Yuzu" : "System"}</button>)}</div>
       <span className="small muted">{hold === "yuzu" ? "Yuzu looks the word up: find it in your other cards, translate or define it, copy, share, or hand it to the phone's own menu." : "The phone's own selection and translator take over, like in any app. The ⋯ button at the top has the card menu."}</span>
     </div>
     <label className="row small" style={{ margin: "8px 0 0" }}><input type="checkbox" checked={fx} onChange={(e) => { setFx(e.target.checked); set("yuzu-effects", e.target.checked); document.documentElement.dataset.effects = e.target.checked ? "on" : "off"; }} /> Animations and effects (card fly-off, sheets sliding)</label>
@@ -499,10 +502,11 @@ function EasyDays() {
         {order.map((d) => <button key={d} className={"chip" + (days[d] < 1 ? " orange" : "")} data-hint={`${names[d]}|Tap to cycle: normal → light (about half the reviews) → off (as few as the schedule allows).`} onClick={() => { const e = [...days]; e[d] = next(e[d]); store.saveSettings({ easyDays: e }); }}>{names[d]} · {days[d] >= 1 ? "normal" : days[d] > 0 ? "light" : "off"}</button>)}
       </div>
       <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-        <span className="small">Break from</span><DateField label="Break from" value={s.breakFrom} onChange={(v) => store.saveSettings({ breakFrom: v })} />
+        <span className="small">Break from</span><DateField label="Break from" value={s.breakFrom} onChange={(v) => { if (v && s.breakTo && s.breakTo < v) { store.saveSettings({ breakFrom: v, breakTo: "" }); snackbar("Break end cleared: it was before the new start"); } else store.saveSettings({ breakFrom: v }); }} />
         <span className="small">to</span><DateField label="Break to" value={s.breakTo} min={s.breakFrom || undefined} onChange={(v) => store.saveSettings({ breakTo: v })} />
         {(s.breakFrom || s.breakTo) && <button className="chip" onClick={() => store.saveSettings({ breakFrom: "", breakTo: "" })}>Clear</button>}
       </div>
+      {s.breakFrom && s.breakTo && s.breakTo < s.breakFrom && <span className="small" role="alert" style={{ color: "var(--again)" }}>The break ends before it starts, so it does nothing: set the end on or after {s.breakFrom.split("-").reverse().join("/")}.</span>}
       <span className="small muted">Each answer's next date moves by a day or two within the scheduler's normal spread to the quietest day — so reviews avoid light days, off days and your break (e.g. a night-shift week). No card is pushed past what the spread allows.</span>
     </div>
   );
@@ -513,6 +517,7 @@ function EasyDays() {
 function GoogleSection() {
   const s = store.settings; const g = s.google; const st = store.googleStatus; const on = store.googleConnected(); const signed = store.googleSignedIn(); const ds = store.driveState();
   const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
+  const ghReady = !!(s.sync.owner && s.sync.repo && s.sync.token); // GitHub filled in: switching to it keeps cards syncing
   const setG = (patch: Partial<typeof g>) => store.saveSettings({ google: { ...g, ...patch } });
   const act = async (f: () => Promise<string | void>) => { setBusy(true); setMsg(""); try { const m = await f(); if (m) setMsg(m); } catch (e: any) { setMsg(e?.message ?? String(e)); } finally { setBusy(false); } };
   const coming: string[] = []; const d = new Date();
@@ -524,13 +529,13 @@ function GoogleSection() {
         <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared with Citrus Maxima, Orange and your other apps. <b>Drive</b> keeps the collection and the master copy of every image and sound (<b>My Apps › Yuzu</b>). Yuzu reports what it needs to <b>Citrus</b> (My Apps › hub › yuzu) and reads back Citrus's plan and your shifts, so nights become light days.</p>
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
           {!on ? <button className="btn primary" disabled={busy} onClick={() => act(() => store.googleConnect())}>{signed ? "Reconnect Google" : "Connect Google"}</button>
-               : <button className="btn" disabled={busy} onClick={() => act(async () => { await store.googleDisconnect(); return "Disconnected"; })}>Disconnect</button>}
+               : <button className="btn" disabled={busy} onClick={async () => { const drive = store.syncBackend() === "drive"; if (!(await confirmSheet(drive ? { title: "Stop syncing through Drive?", sub: `This device will not sync its cards until you connect Google again${ghReady ? "" : " or set up GitHub under Sync"}. Shifts, Citrus's plan and Drive media stop too. Nothing is deleted.`, yes: "Disconnect" } : { title: "Disconnect Google?", sub: "Shifts, Citrus's plan and Drive media stop until you connect again. Nothing is deleted.", yes: "Disconnect" }))) return; act(async () => { await store.googleDisconnect(); return drive ? "Disconnected: cards are not syncing until you connect Google again or set up GitHub" : "Disconnected"; }); }}>Disconnect</button>}
           {on && <button className="btn" disabled={busy || st.state === "working"} onClick={() => act(() => store.googleRefresh("manual"))}>Refresh now</button>}
           <span className={"small " + (st.state === "error" ? "" : "muted")} style={st.state === "error" ? { color: "var(--again)" } : undefined}>{st.message}</span>
         </div>
         {signed && !on && <p className="small muted" style={{ margin: "6px 0 0" }}>Google's sign-in lasts an hour; phones only let it renew from a tap. <b>Sync now</b> or a pull-down on Today renews it without asking again.</p>}
         {msg && <p className="small" style={{ marginBottom: 0 }}>{msg}</p>}
-        {signed && <p className="small muted" style={{ margin: "8px 0 0" }}>Cards sync through <b>{store.syncBackend() === "drive" ? "Google Drive" : "GitHub"}</b>. {store.syncBackend() === "drive" ? <button className="chip" onClick={() => store.saveSettings({ sync: { ...s.sync, backend: "github" } })}>Use GitHub instead</button> : <button className="chip orange" onClick={() => { store.saveSettings({ sync: { ...s.sync, backend: "drive" } }); store.scheduleSync(500); }}>Use Drive</button>}</p>}
+        {signed && <p className="small muted" style={{ margin: "8px 0 0" }}>Cards sync through <b>{store.syncBackend() === "drive" ? "Google Drive" : "GitHub"}</b>. {store.syncBackend() === "drive" ? (ghReady && <button className="chip" onClick={async () => { if (!(await confirmSheet({ title: "Sync through GitHub instead of Drive?", sub: `Cards will sync with ${s.sync.owner}/${s.sync.repo} from now on. Drive keeps its copy but stops getting new changes from this device.`, yes: "Use GitHub", danger: false }))) return; await store.saveSettings({ sync: { ...s.sync, backend: "github" } }); snackbar("Cards now sync through GitHub", async () => { await store.saveSettings({ sync: { ...store.settings.sync, backend: "drive" } }); }); }}>Use GitHub instead</button>) : <button className="chip orange" onClick={() => { store.saveSettings({ sync: { ...s.sync, backend: "drive" } }); store.scheduleSync(500); }}>Use Drive</button>}</p>}
         <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.driveMedia} onChange={(e) => setG({ driveMedia: e.target.checked })} /> Drive is the master copy of my media</label>
         {ds && g.driveMedia && <p className="small muted" style={{ margin: "4px 0 0 24px" }}>{ds.onDrive.toLocaleString()} files on Drive{ds.complete ? "" : " (still listing)"} · {ds.toUpload.toLocaleString()} here that Drive lacks · {ds.toDownload.toLocaleString()} this device's cards need{ds.downBytes ? ` (${(ds.downBytes / 1048576).toFixed(0)} MB)` : ""}.{ds.here ? ` This device's library: ${(ds.here - ds.toUpload).toLocaleString()} of ${ds.here.toLocaleString()} on Drive (${Math.floor(((ds.here - ds.toUpload) / ds.here) * 100)}%).` : ""} Files travel in bundles of a few hundred; while they move the screen stays on, and if Yuzu is closed it carries on from where it stopped. A card that needs a missing file fetches it on the spot.</p>}
         <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={g.shiftDays} onChange={(e) => setG({ shiftDays: e.target.checked })} /> My shifts make light days</label>
@@ -539,13 +544,15 @@ function GoogleSection() {
           {!store.plan?.days && <div className="field"><label>My name as written in the schedule</label><input defaultValue={g.rotaName} onBlur={(e) => setG({ rotaName: e.target.value.trim() || "Amro" })} placeholder="Amro" /></div>}
         </div>}
         {plan.length > 0 && <p className="small" style={{ margin: "10px 0 0" }}>{plan[0].accepted ? "Citrus planned" : "Citrus suggests"} for today: {plan.map((b) => `${b.start || "any time"}${b.end ? `–${b.end}` : ""} · ${b.minutes || "?"} min`).join(", ")}</p>}
-        {signed && store.syncBackend() === "drive" && <details className="how" style={{ marginTop: 10 }} onToggle={(e) => { if ((e.target as HTMLDetailsElement).open) act(async () => { await store.refreshBackups().catch(() => {}); }); }}><summary className="small">Backups on Drive ({store.backups.list.length})</summary>
+        {signed && store.syncBackend() === "drive" && <details className="how" style={{ marginTop: 10 }} onToggle={(e) => { if ((e.target as HTMLDetailsElement).open) act(async () => { await store.refreshBackups().catch(() => {}); }); }}><summary className="small">Backups on Drive{store.backups.at ? ` (${store.backups.list.length})` : ""}</summary>
           <p className="small muted" style={{ margin: "6px 0" }}>Once a day, after a sync that changed something, Drive copies the whole collection into <b>My Apps/Yuzu/backups/&lt;date&gt;</b> (nothing is uploaded again). The last 7 days and one a week for 4 weeks are kept. <b>Bring back deleted</b> restores notes, cards and reviews you deleted since; <b>Roll back</b> also resets any card or note that changed since (its progress since then is lost).</p>
           <div className="row" style={{ gap: 8, flexWrap: "wrap" }}><button className="btn" disabled={busy || store.backups.busy} onClick={() => act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; return store.backupNow(true); })}>Back up now</button>{store.backups.busy && <span className="small muted">{store.backups.message}</span>}</div>
-          {store.backups.list.map((b) => <div key={b.name} className="row small" style={{ gap: 8, margin: "6px 0", flexWrap: "wrap", alignItems: "center" }}>
-            <b>{b.name.split("-").reverse().join("/")}</b>
+          {!store.backups.at && <p className="small muted">Looking on Drive…</p>}
+          {store.backups.at && !store.backups.list.length && <p className="small muted">No backups on Drive yet.</p>}
+          {store.backups.list.map((b) => <div key={b.name} className="backup-row small" data-testid="backup-row">
+            <span className="when"><b>{backupDay(b.name)}</b>{b.at ? <span className="muted"> {fmtTime(b.at)}</span> : null}{b.counts ? <span className="muted" style={{ display: "block" }}>{b.counts.cards.toLocaleString()} cards · {b.counts.notes.toLocaleString()} notes · {b.counts.reviews.toLocaleString()} reviews</span> : null}</span>
             <button className="btn" disabled={busy} onClick={() => act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const r = await store.restoreBackup(b.name, "missing"); return `Brought back ${r.notes} notes, ${r.cards} cards, ${r.reviews} reviews`; })}>Bring back deleted</button>
-            <button className="btn" disabled={busy} onClick={() => { if (!confirm(`Roll back every note and card that changed since ${b.name.split("-").reverse().join("/")}? Progress on those cards since then is lost.`)) return; act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const r = await store.restoreBackup(b.name, "all"); return `Restored ${r.notes} notes, ${r.cards} cards, ${r.reviews} reviews`; }); }}>Roll back</button>
+            <button className="btn danger" disabled={busy} onClick={async () => { if (!(await confirmSheet({ title: `Roll back to ${backupDay(b.name)}?`, sub: `Every note and card that changed since ${backupDay(b.name)}${b.at ? " " + fmtTime(b.at) : ""} goes back to how it was${b.counts ? ` (${b.counts.cards.toLocaleString()} cards in that backup)` : ""}. Progress on those cards since then is lost. “Bring back deleted” only restores what was deleted.`, yes: "Roll back" }))) return; act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const r = await store.restoreBackup(b.name, "all"); return `Restored ${r.notes} notes, ${r.cards} cards, ${r.reviews} reviews`; }); }}>Roll back</button>
           </div>)}
         </details>}
         <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={!!store.settings.citrusPlans} onChange={(e) => store.saveSettings({ citrusPlans: e.target.checked })} /> Let Citrus plan Yuzu time (off: Citrus only sees your numbers)</label>
@@ -561,20 +568,47 @@ function GoogleSection() {
   );
 }
 
+/** "Delete everything": says exactly what goes, offers a full backup first, and needs DELETE typed (the one fully destructive action). */
+function WipeButton({ media }: { media: number }) {
+  const [open, setOpen] = useState(false); const [typed, setTyped] = useState(""); const [saved, setSaved] = useState(false);
+  const s = store.settings; const pl = (x: number, one: string, many = one + "s") => `${x.toLocaleString()} ${x === 1 ? one : many}`;
+  const ready = typed.trim().toUpperCase() === "DELETE";
+  const close = () => { setOpen(false); setTyped(""); setSaved(false); };
+  return (<>
+    <button className="btn danger block" style={{ marginTop: 10 }} onClick={() => setOpen(true)}>Delete everything on this device</button>
+    {open && <ActionSheet title="Delete everything on this device?" sub="This removes, on this device only:" onClose={close}
+      items={[{ label: ready ? "Delete everything" : "Type DELETE above first", danger: true, disabled: !ready, onClick: async () => { await store.wipe(); location.reload(); } }]}>
+      <ul className="small wipe-list" data-testid="wipe-list">
+        <li>{pl(store.cards.size, "card")}, {pl(store.notes.size, "note")} and {pl(store.reviews.length, "review")}</li>
+        <li>{pl(media, "image or sound", "images and sounds")}</li>
+        <li>all settings: new cards per day, goal, {(s.deadlines ?? []).length ? `${s.deadlines.length} exam date${s.deadlines.length === 1 ? "" : "s"}` : "exam dates"}, light days and breaks, hidden fields</li>
+        <li>{s.sync.token ? "your GitHub sync token, " : ""}cards marked to improve, the Mastered log and the kept Sketchy copy (the Google sign-in stays)</li>
+      </ul>
+      <p className="small muted" style={{ margin: "0 0 8px" }}>What is on Google Drive or GitHub is not touched: a sync or a backup file brings it back.</p>
+      <button className="btn block" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); downloadBlob(blob, `yuzu-backup-${dmy()}.json`); try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } setSaved(true); }}>{saved ? "✓ Full backup saved — save again" : "Download a full backup first"}</button>
+      <div className="field" style={{ margin: "10px 0 4px" }}><label htmlFor="wipe-type">Type <b>DELETE</b> to confirm</label>
+        <input id="wipe-type" className="wipe-type" autoCapitalize="characters" autoComplete="off" spellCheck={false} value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="DELETE" /></div>
+    </ActionSheet>}
+  </>);
+}
+
+/** A backup folder's name (yyyy-mm-dd, maybe with a suffix) as dd/mm/yyyy. */
+function backupDay(name: string) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(name); return m ? `${m[3]}/${m[2]}/${m[1]}` : name; }
+
 /** Exam countdowns: a name, a date and the part of the collection it covers; Today shows how it's going. */
 function ExamSettings() {
   const [name, setName] = useState(""); const [date, setDate] = useState(""); const [path, setPath] = useState("");
   const decks = store.tree("decks").children.flatMap((c) => [c, ...c.children.map((g) => ({ ...g, name: c.name + " › " + g.name }))]);
-  const list = [...(store.settings.deadlines ?? [])].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const list = [...(store.settings.deadlines ?? [])].sort((a, b) => (a.date < b.date ? -1 : 1)); const today = store.isoToday();
   return (
     <details className="section" id="s-exam"><summary>Exam countdown <span className="small muted">{list.length ? `${list.length} set` : "dates and scope"}</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Set an exam date and which decks it covers. Today then shows how many new cards a day you need, how much you'd remember on the day, and a drill on the cards most likely to slip. It also tells Citrus when you're behind.</p>
-        {list.map((d) => <div key={d.id} className="row small" style={{ gap: 8, margin: "6px 0" }}><b className="grow">{d.name}</b><span className="muted">{d.date.split("-").reverse().join("/")} · {d.path ? d.path.split("::").slice(-1)[0] : "everything"}</span><button className="btn" onClick={() => store.saveSettings({ deadlines: list.filter((x) => x.id !== d.id) })}>Remove</button></div>)}
+        {list.map((d) => <div key={d.id} className={"row small" + (d.date < today ? " exam-past" : "")} style={{ gap: 8, margin: "6px 0" }}><b className="grow">{d.name}{d.date < today ? <span className="muted"> · finished</span> : null}</b><span className="muted">{d.date.split("-").reverse().join("/")} · {d.path ? d.path.split("::").slice(-1)[0] : "everything"}</span><button className="btn" onClick={async () => { await store.saveSettings({ deadlines: list.filter((x) => x.id !== d.id) }); snackbar(`${d.name} removed`, async () => { await store.saveSettings({ deadlines: [...(store.settings.deadlines ?? []).filter((x) => x.id !== d.id), d] }); }); }}>Remove</button></div>)}
         <div className="field"><label>Name</label><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Step 1" /></div>
-        <div className="field"><label>Date</label><DateField label="Exam date" value={date} min={store.isoToday()} onChange={setDate} /></div>
+        <div className="field"><label>Date</label><DateField label="Exam date" value={date} min={today} onChange={setDate} /></div>
         <div className="field"><label>Covers</label><select value={path} onChange={(e) => setPath(e.target.value)}><option value="">Everything</option>{decks.map((d) => <option key={d.path} value={d.path}>{d.name}</option>)}</select></div>
-        <button className="btn primary" disabled={!name.trim() || !date} onClick={async () => { await store.saveSettings({ deadlines: [...list, { id: "x" + Date.now().toString(36), name: name.trim(), date, view: "decks", path }] }); setName(""); setDate(""); setPath(""); }}>Add exam</button>
+        <button className="btn primary" disabled={!name.trim() || !date || date < today} onClick={async () => { await store.saveSettings({ deadlines: [...list, { id: "x" + Date.now().toString(36), name: name.trim(), date, view: "decks", path }] }); setName(""); setDate(""); setPath(""); }}>Add exam</button>
       </div>
     </details>
   );
@@ -598,10 +632,11 @@ function ReminderSettings() {
 }
 
 /** Jump row (Orange 8.11.0): one tap to a group; it opens the group and scrolls to it. */
-const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"], ["s-exam", "Exams"], ["s-remind", "Reminders"], ["s-google", "Google"], ["s-sync", "Sync"], ["s-media", "Media"], ["s-import", "Import"], ["s-inbox", "Inbox"], ["s-improve", "Improve"], ["s-lang", "Languages"], ["s-data", "Data"], ["s-diag", "Diagnostics"]];
-function JumpRow() {
+// In the page's own order (keep it the same when a group moves).
+const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"], ["s-exam", "Exams"], ["s-remind", "Reminders"], ["s-lang", "Languages"], ["s-improve", "Improve"], ["s-import", "Import"], ["s-media", "Media"], ["s-inbox", "Inbox"], ["s-google", "Google"], ["s-sync", "Sync"], ["s-data", "Data"], ["s-diag", "Diagnostics"]];
+function JumpRow({ hide = [] }: { hide?: string[] }) {
   const go = (id: string) => { const d = document.getElementById(id) as HTMLDetailsElement | null; if (!d) return; d.open = true; d.scrollIntoView({ block: "start", behavior: "smooth" }); };
-  return <nav className="jump-row" aria-label="Settings groups">{GROUPS.map(([id, l]) => <button key={id} className="chip" onClick={() => go(id)}>{l}</button>)}</nav>;
+  return <nav className="jump-row" aria-label="Settings groups">{GROUPS.filter(([id]) => !hide.includes(id)).map(([id, l]) => <button key={id} className="chip" data-to={id} onClick={() => go(id)}>{l}</button>)}</nav>;
 }
 
 /** Sketchy fields and tags: removed on the user's call (12/11/2026); a copy stays on this device to put them back. */
@@ -613,7 +648,7 @@ function SketchyRow() {
     <b>Sketchy</b>: {left.notes ? `${left.notes.toLocaleString()} notes still have Sketchy fields or tags.` : "none left on your cards."}{kept ? ` A copy of ${kept.toLocaleString()} notes is kept on this device.` : ""}
     <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
       {left.notes > 0 && <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { const r = await store.stripSketchy(); snackbar(`Sketchy removed from ${r.notes.toLocaleString()} notes`); } finally { setBusy(false); } }}>Remove Sketchy</button>}
-      {!!kept && <button className="btn" disabled={busy} onClick={async () => { setBusy(true); try { const n = await store.restoreSketchy(); snackbar(`Sketchy put back on ${n.toLocaleString()} notes`); } finally { setBusy(false); } }}>Put Sketchy back</button>}
+      {!!kept && <button className="btn" disabled={busy} onClick={async () => { if (!(await confirmSheet({ title: "Put Sketchy back?", sub: `Sketchy fields and tags return on ${kept.toLocaleString()} notes and sync to every device. “Remove Sketchy” takes them off again.`, yes: "Put Sketchy back" }))) return; setBusy(true); try { const n = await store.restoreSketchy(); snackbar(`Sketchy put back on ${n.toLocaleString()} notes`); } finally { setBusy(false); } }}>Put Sketchy back</button>}
     </div>
   </div>);
 }

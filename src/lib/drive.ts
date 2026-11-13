@@ -345,7 +345,8 @@ export async function listBackups(cache: Record<string, string>): Promise<Backup
   const root = await backupRoot(cache); if (!root) return []; const out: BackupInfo[] = [];
   for (const f of await listFiles({ parent: root, folders: true, all: true })) {
     const mf = (await listFiles({ parent: f.id, name: "manifest.json" }))[0]; if (!mf) continue; // still being written
-    out.push({ name: f.name, id: f.id, rev: mf.props?.rev ?? null, at: Date.parse(mf.modifiedTime ?? "") || 0 });
+    let counts: BackupInfo["counts"]; try { const b = await downloadBytes(mf); if (b) counts = (JSON.parse(new TextDecoder().decode(b)) as Manifest).counts; } catch { /* the row shows without numbers */ }
+    out.push({ name: f.name, id: f.id, rev: mf.props?.rev ?? null, at: Date.parse(mf.modifiedTime ?? "") || 0, counts });
   }
   return out.sort((a, b) => (a.name < b.name ? 1 : -1));
 }
