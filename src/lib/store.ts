@@ -16,6 +16,7 @@ import { writeZip, streamZip, ZipParts } from "./zipwrite";
 import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError } from "./google";
 import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
+import { buildSearchDoc, parseQuery, scoreDoc } from "./search";
 declare const __VERSION__: string;
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
@@ -99,6 +100,9 @@ export const VIEWS: { id: View; label: string }[] = [
   { id: "decks", label: "Decks" }, { id: "systems", label: "Systems" }, { id: "specialties", label: "Specialties" }, { id: "exams", label: "Exams" }, { id: "tags", label: "Tags" },
 ];
 
+interface TreeShape { sv: number; paths: string[]; names: string[]; index: Map<string, number>; parent: Int32Array; order: number[]; ids: string[]; lists: Int32Array[]; members: Map<number, string[]> }
+interface ShapeJob { view: View; sv: number; it: Iterator<Card>; paths: string[]; names: string[]; index: Map<string, number>; parent: number[]; ids: string[]; lists: Int32Array[]; byKey: Map<string, Int32Array>; done: boolean }
+
 export interface TreeNode {
   name: string; path: string; children: TreeNode[];
   total: number; due: number; newCount: number; learning: number; suspended: number; reviewed: number;
@@ -132,10 +136,33 @@ export function mapDeck(source: string, map: Record<string, string>): string | n
   return null;
 }
 
+/** A Map that reports changes that alter the collection's shape (WP16): a record added or removed, or replaced by one that
+ *  `same` says differs where it matters. Lets the Library's tree and search caches stay valid across reviews and flags. */
+class WatchedMap<V> extends Map<string, V> {
+  onChange: (() => void) | null = null; same: ((a: V, b: V) => boolean) | null = null;
+  set(k: string, v: V) { if (this.onChange) { const old = super.get(k); if (old === undefined || !this.same?.(old, v)) this.onChange(); } return super.set(k, v); }
+  delete(k: string) { const had = super.delete(k); if (had) this.onChange?.(); return had; }
+  clear() { if (this.size) this.onChange?.(); super.clear(); }
+}
+
+/** Gives the browser a turn (input, paint) between slices of long work. */
+const slice = () => new Promise<void>((r) => { if (typeof MessageChannel !== "undefined") { const ch = new MessageChannel(); ch.port1.onmessage = () => r(); ch.port2.postMessage(0); } else setTimeout(r, 0); });
+
 export class Store {
   notetypes = new Map<string, Notetype>();
-  notes = new Map<string, Note>();
-  cards = new Map<string, Card>();
+  /** Bumped when notes or cards are added, removed, edited (notes: fields or tags) or moved (cards: deck, note) — not on
+   *  reviews, flags or pauses. The Library's tree structure and search index are keyed on it. */
+  structureVersion = 0;
+  private watchMap<V>(m: Map<string, V>, same: (a: V, b: V) => boolean): WatchedMap<V> {
+    const w = m instanceof WatchedMap ? (m as WatchedMap<V>) : (() => { const x = new WatchedMap<V>(); for (const [k, v] of m) x.set(k, v); return x; })();
+    w.same = same; w.onChange = () => { this.structureVersion++; }; this.structureVersion++; return w;
+  }
+  private _notes = this.watchMap(new Map<string, Note>(), (a, b) => a === b);
+  private _cards = this.watchMap(new Map<string, Card>(), (a, b) => a.source === b.source && a.nid === b.nid);
+  get notes(): Map<string, Note> { return this._notes; }
+  set notes(m: Map<string, Note>) { this._notes = this.watchMap(m, (a, b) => a === b); }
+  get cards(): Map<string, Card> { return this._cards; }
+  set cards(m: Map<string, Card>) { this._cards = this.watchMap(m, (a, b) => a.source === b.source && a.nid === b.nid); }
   tombstones: Record<string, number> = {};
   reviews: Review[] = [];
   media = new Map<string, Blob>();
@@ -843,6 +870,7 @@ export class Store {
       // Leaving the app: push unsynced changes right away (the 8 s debounce would otherwise lose the last reviews
       // if the phone kills the tab). Coming back: pull what other devices did.
       setTimeout(() => { this.autoMaster().catch(() => {}); }, 3000); // retire cards past 20 years (after start-up settles)
+      setTimeout(() => this.warmLibrary(), 8000); // Library tree shapes + search index, in idle slices
       db.getMeta<{ key: string; names: string[] } | null>("mediaRefs", null).then((r) => { if (r && !this.savedRefs) this.savedRefs = r; }).catch(() => {});
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "hidden") { if (this.dirty && this.syncConfigured()) { if (this.syncTimer) clearTimeout(this.syncTimer); this.syncTimer = null; this.sync("hidden").catch(() => {}); } }
@@ -1464,7 +1492,14 @@ export class Store {
   /** Media the cards reference vs what this device holds. */
   private refsCache: { key: string; refs: Set<string> } | null = null;
   /** Fingerprint of everything media references depend on: every note's edit time, the note types, the hidden fields. Cheap (no regexes). */
+  private refsKeyMemo: { v: number; sv: number; key: string } | null = null;
   refsKey(): string {
+    // Hot: called from the Overfilled filter and media checks. Notes only change through the watched map (structureVersion)
+    // and everything else it reads bumps the version, so one scan per (version, structure) is enough.
+    const m = this.refsKeyMemo; if (m && m.v === this.version && m.sv === this.structureVersion) return m.key;
+    const key = this.refsKeyRaw(); this.refsKeyMemo = { v: this.version, sv: this.structureVersion, key }; return key;
+  }
+  private refsKeyRaw(): string {
     let sig = 0; for (const n of this.notes.values()) sig = (sig + n.modified + n.fields.length) % 1e15;
     let ntSig = 0; for (const nt of this.notetypes.values()) ntSig += nt.css.length + nt.templates.length;
     return `${this.notes.size}:${sig}:${this.notetypes.size}:${ntSig}:${this.settings.hiddenFields.join("|")}`;
@@ -1724,25 +1759,14 @@ export class Store {
     return d.getTime();
   }
 
-  /** Category tree for a view. Counts are per card; a card in two categories is counted in both. */
+  /** Category tree for a view. Counts are per card; a card in two categories is counted in both.
+   *  The shape (which categories exist, which card sits where) is built once per structureVersion (treeShape); a
+   *  review or flag only recounts, which is a walk over flat arrays. */
   tree(view: View = "decks"): TreeNode {
     const cached = this.treeCache.get(view);
     if (cached && cached.v === this.version) return cached.tree;
-    const root: TreeNode = { name: "All", path: "", children: [], total: 0, due: 0, newCount: 0, learning: 0, suspended: 0, reviewed: 0 };
+    let sh = this.treeShape(view);
     const now = stamp();
-    const index = new Map<string, TreeNode>();
-    index.set("", root);
-    const getNode = (path: string): TreeNode => {
-      const hit = index.get(path);
-      if (hit) return hit;
-      const parts = path.split("::");
-      const parentPath = parts.slice(0, -1).join("::");
-      const parent = getNode(parentPath);
-      const node: TreeNode = { name: parts[parts.length - 1], path, children: [], total: 0, due: 0, newCount: 0, learning: 0, suspended: 0, reviewed: 0 };
-      parent.children.push(node);
-      index.set(path, node);
-      return node;
-    };
     const count = (node: TreeNode, c: Card) => {
       node.total++;
       if (c.suspended) { node.suspended++; return; }
@@ -1751,21 +1775,78 @@ export class Store {
       if (c.state === "learning" || c.state === "relearning") node.learning++;
       if (c.reps > 0) node.reviewed++;
     };
-    // The same paths repeat across thousands of cards (deck paths, deep tag hierarchies): resolve each path's node chain once.
-    const chains = new Map<string, TreeNode[]>();
-    const chainOf = (p: string) => { let ch = chains.get(p); if (!ch) { const parts = p.split("::"); ch = []; for (let i = 1; i <= parts.length; i++) ch.push(getNode(parts.slice(0, i).join("::"))); chains.set(p, ch); } return ch; };
-    for (const c of this.cards.values()) {
-      count(root, c);
-      const ps = this.paths(c, view);
-      if (ps.length === 1) { for (const n of chainOf(ps[0])) count(n, c); continue; }
-      const seen = new Set<TreeNode>();
-      for (const p of ps) for (const n of chainOf(p)) { if (seen.has(n)) continue; seen.add(n); count(n, c); }
+    let nodes: TreeNode[] = [];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      nodes = sh.paths.map((path, i) => ({ name: sh.names[i], path, children: [], total: 0, due: 0, newCount: 0, learning: 0, suspended: 0, reviewed: 0 }));
+      // The cards map keeps its order while the structure is unchanged; a mismatch means a change slipped past the watch.
+      let i = 0, ok = true; const root = nodes[0];
+      for (const c of this.cards.values()) {
+        if (sh.ids[i] !== c.id) { ok = false; break; }
+        count(root, c); const l = sh.lists[i++]; for (let k = 0; k < l.length; k++) count(nodes[l[k]], c);
+      }
+      if (ok && i === sh.ids.length) break;
+      this.shapes.delete(view === "smart" ? "decks" : view); sh = this.treeShape(view);
     }
-    const sortRec = (n: TreeNode) => { n.children.sort((a, b) => a.name.localeCompare(b.name)); n.children.forEach(sortRec); };
-    sortRec(root);
-    this.treeCache.set(view, { v: this.version, tree: root });
-    return root;
+    for (const j of sh.order) nodes[sh.parent[j]].children.push(nodes[j]); // `order` is sorted by name, so children come out sorted
+    this.treeCache.set(view, { v: this.version, tree: nodes[0] });
+    return nodes[0];
   }
+
+  /** The tree's shape for a view: node paths (0 = root), parents, and per card (in cards-map order) the nodes it counts in. */
+  private shapes = new Map<View, TreeShape>();
+  private shapeJobs = new Map<View, ShapeJob>();
+  private treeShape(view: View): TreeShape {
+    const v = view === "smart" ? "decks" : view;
+    const have = this.shapes.get(v); if (have && have.sv === this.structureVersion) return have;
+    let job = this.shapeJobs.get(v); if (!job || job.sv !== this.structureVersion) job = this.shapeJob(v);
+    this.runShapeJob(job, Infinity); return this.shapes.get(v)!;
+  }
+  private shapeJob(view: View): ShapeJob {
+    const job: ShapeJob = { view, sv: this.structureVersion, it: this.cards.values(), paths: [""], names: ["All"], index: new Map([["", 0]]), parent: [-1], ids: [], lists: [], byKey: new Map(), done: false };
+    this.shapeJobs.set(view, job); return job;
+  }
+  /** Works on a shape for up to `budget` ms; true when finished. Cheap per card: siblings and same-deck cards share one node list. */
+  private runShapeJob(job: ShapeJob, budget: number): boolean {
+    if (job.done) return true;
+    if (job.sv !== this.structureVersion) { job = this.shapeJob(job.view); }
+    const t0 = performance.now(); const { view, paths, names, index, parent, ids, lists, byKey } = job;
+    const nodeOf = (p: string): number => {
+      let j = index.get(p); if (j !== undefined) return j;
+      const parts = p.split("::"); const par = parts.length < 2 ? 0 : nodeOf(parts.slice(0, -1).join("::"));
+      j = paths.length; paths.push(p); names.push(parts[parts.length - 1]); parent.push(par); index.set(p, j); return j;
+    };
+    const chainKey = (ps: string[]): Int32Array => {
+      const out: number[] = [];
+      for (const p of ps) { let j = nodeOf(p); const from = out.length; while (j > 0) { out.push(j); j = parent[j]; } if (ps.length > 1) { /* drop nodes already counted through another path */ const seen = new Set(out.slice(0, from)); let w = from; for (let r = from; r < out.length; r++) if (!seen.has(out[r])) out[w++] = out[r]; out.length = w; } }
+      return Int32Array.from(out);
+    };
+    const empty = new Int32Array(0);
+    for (let n = 0; ; n++) {
+      if ((n & 1023) === 0 && n && performance.now() - t0 > budget) return false;
+      const r = job.it.next(); if (r.done) break; const c = r.value;
+      const key = view === "decks" ? "d" + c.source : c.nid; let l = byKey.get(key);
+      if (!l) { const ps = this.paths(c, view); l = ps.length ? chainKey(ps) : empty; byKey.set(key, l); }
+      ids.push(c.id); lists.push(l);
+    }
+    const order = paths.map((_, i) => i).slice(1).sort((a, b) => names[a].localeCompare(names[b]));
+    job.done = true; this.shapeJobs.delete(view);
+    if (job.sv === this.structureVersion) this.shapes.set(view, { sv: job.sv, paths, names, index, parent: Int32Array.from(parent), order, ids, lists, members: new Map() });
+    return true;
+  }
+  /** Builds the Library's tree shapes and search index in small slices while the app is idle, so the first visit is instant. */
+  warmLibrary() {
+    if (typeof window === "undefined" || this.warming) return; this.warming = true;
+    const views: View[] = ["systems", "tags", "specialties", "exams", "decks"];
+    const idle = (f: () => void) => { const ric = (window as any).requestIdleCallback; if (ric) ric(f, { timeout: 2000 }); else setTimeout(f, 50); };
+    const step = () => {
+      const v = views.find((x) => this.shapes.get(x)?.sv !== this.structureVersion);
+      if (!v) { this.warming = false; this.searchIndex().catch(() => {}); return; }
+      let job = this.shapeJobs.get(v); if (!job || job.sv !== this.structureVersion) job = this.shapeJob(v);
+      this.runShapeJob(job, 8); idle(step);
+    };
+    idle(step);
+  }
+  private warming = false;
 
   /** Cards matching a smart deck: AND across groups, OR within a group. */
   cardsMatching(sd: SmartDeck): Card[] {
@@ -1783,12 +1864,13 @@ export class Store {
   }
 
   cardsIn(path: string, view: View = "decks"): Card[] {
-    const out: Card[] = [];
     if (view === "smart") { const sd = this.settings.smart.find((x) => x.id === path); return sd ? this.cardsMatching(sd) : []; }
     if (!path) return [...this.cards.values()];
-    for (const c of this.cards.values()) {
-      if (this.paths(c, view).some((p) => p === path || p.startsWith(path + "::"))) out.push(c);
-    }
+    // From the tree's shape: the node's members are found once per structure, then only looked up (current card objects).
+    const sh = this.treeShape(view); const j = sh.index.get(path); if (j === undefined) return [];
+    let ids = sh.members.get(j);
+    if (!ids) { ids = []; for (let i = 0; i < sh.ids.length; i++) { const l = sh.lists[i]; for (let k = 0; k < l.length; k++) if (l[k] === j) { ids.push(sh.ids[i]); break; } } sh.members.set(j, ids); }
+    const out: Card[] = []; for (const id of ids) { const c = this.cards.get(id); if (c) out.push(c); }
     return out;
   }
 
@@ -1908,14 +1990,19 @@ export class Store {
   knowledgeNow(now = Date.now()) { let k = 0, n = 0; for (const c of this.cards.values()) if (!c.suspended && c.lastReview && c.state !== "new") { k += retrievability((now - c.lastReview) / DAY, c.stability); n++; } return { known: Math.round(k), of: n }; }
   // ---- card-quality check (Wozniak's minimum-information rule): cards that cram too much ----------------------
   private overCache: { key: string; ids: string[] } | null = null;
+  private overMeasure = new WeakMap<Note, boolean>();
   overfilled(): string[] {
     const key = this.refsKey(); if (this.overCache?.key === key) return this.overCache.ids;
     const ids: string[] = [];
     const plain = (h: string) => h.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<img[^>]*>/gi, "").replace(/\[sound:[^\]]+\]/g, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
     for (const n of this.notes.values()) {
       const nt = this.notetypes.get(n.ntid); if (!nt || nt.kind === "cloze" || n.fields.length < 2) continue;
-      const back = n.fields[1] ?? ""; const items = (back.match(/<li\b/gi)?.length ?? 0) + (back.match(/<br\s*\/?>\s*[-•·*]|(^|>)\s*[-•·*]\s/gi)?.length ?? 0);
-      if (plain(back).length > 700 || items >= 8) ids.push(n.id); // clearly crammed only — a long explanation alone isn't a problem
+      let crammed = this.overMeasure.get(n); // per note object: an edit makes a new object, so only edited notes are measured again
+      if (crammed === undefined) {
+        const back = n.fields[1] ?? ""; const items = (back.match(/<li\b/gi)?.length ?? 0) + (back.match(/<br\s*\/?>\s*[-•·*]|(^|>)\s*[-•·*]\s/gi)?.length ?? 0);
+        crammed = plain(back).length > 700 || items >= 8; this.overMeasure.set(n, crammed); // clearly crammed only — a long explanation alone isn't a problem
+      }
+      if (crammed) ids.push(n.id);
     }
     this.overCache = { key, ids }; return ids;
   }
@@ -2271,6 +2358,45 @@ export class Store {
     let t = this.titles.get(n);
     if (t === undefined) { t = (noteTitle(n) + " " + n.tags.join(" ")).toLowerCase(); this.titles.set(n, t); }
     return t;
+  }
+  // ---- Library search (WP16): all fields, stripped, ranked; the index is built in slices and never blocks typing ----
+  private searchDocs = new WeakMap<Note, string>();
+  /** The note's searchable text (see lib/search.ts), cached per note object. */
+  searchDoc(n: Note): string { let d = this.searchDocs.get(n); if (d === undefined) { d = buildSearchDoc(n); this.searchDocs.set(n, d); } return d; }
+  private sIndex: { sv: number; ids: string[]; docs: string[] } | null = null;
+  private sIndexJob: Promise<{ sv: number; ids: string[]; docs: string[] }> | null = null;
+  /** Every note's text in parallel arrays, per structureVersion; built (or refreshed from the per-note cache) in ~8 ms slices. */
+  searchIndex(): Promise<{ sv: number; ids: string[]; docs: string[] }> {
+    if (this.sIndex && this.sIndex.sv === this.structureVersion) return Promise.resolve(this.sIndex);
+    if (this.sIndexJob) return this.sIndexJob;
+    const job = (async () => {
+      for (;;) {
+        const sv = this.structureVersion; const ids: string[] = [], docs: string[] = []; let t = performance.now(), n = 0;
+        for (const note of this.notes.values()) {
+          ids.push(note.id); docs.push(this.searchDoc(note));
+          if ((++n & 255) === 0 && performance.now() - t > 8) { await slice(); t = performance.now(); if (this.structureVersion !== sv) break; }
+        }
+        if (this.structureVersion === sv) { this.sIndex = { sv, ids, docs }; return this.sIndex; }
+      }
+    })();
+    this.sIndexJob = job; job.finally(() => { if (this.sIndexJob === job) this.sIndexJob = null; }).catch(() => {});
+    return job;
+  }
+  private lastSearch: { sv: number; key: string; phrase: string; hits: Int32Array } | null = null;
+  /** Notes matching a query → their rank (lib/search.ts scoreDoc), or null when cancelled. Runs in slices so a keystroke is never
+   *  blocked; when the query only extends the previous one ("pneu" → "pneum"), only the previous hits are looked at again. */
+  async searchNotes(query: string, cancel?: { cancelled: boolean }): Promise<Map<string, number> | null> {
+    const q = parseQuery(query); const out = new Map<string, number>(); if (!q) return out;
+    const ix = await this.searchIndex(); if (cancel?.cancelled) return null;
+    const prev = this.lastSearch; const narrow = prev && prev.sv === ix.sv && prev.key === q.key && q.phrase.startsWith(prev.phrase) ? prev.hits : null;
+    const n = narrow ? narrow.length : ix.docs.length; const hits: number[] = []; let t = performance.now();
+    for (let k = 0; k < n; k++) {
+      const i = narrow ? narrow[k] : k; const sc = scoreDoc(ix.docs[i], q);
+      if (sc > 0) { hits.push(i); out.set(ix.ids[i], sc); }
+      if ((k & 511) === 511 && performance.now() - t > 8) { await slice(); if (cancel?.cancelled) return null; t = performance.now(); }
+    }
+    if (ix === this.sIndex) this.lastSearch = { sv: ix.sv, key: q.key, phrase: q.phrase, hits: Int32Array.from(hits) };
+    return out;
   }
   noteFor(card: Card): Note | undefined { return this.notes.get(card.nid); }
   notetypeFor(note: Note): Notetype | undefined { return this.notetypes.get(note.ntid); }
