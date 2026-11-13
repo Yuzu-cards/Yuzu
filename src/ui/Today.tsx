@@ -51,10 +51,15 @@ export function YuzuGoal({ value, max, size = 150, center, sub }: { value: numbe
 type OnStudy = (path: string, view?: View, extra?: { only?: "all" | "due" | "new"; preset?: import("../lib/model").Card[]; title?: string; minutes?: number }) => void;
 type Filter = "flagged" | "improve" | "suspended" | "leech" | "overfilled";
 export function Today({ onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
-  const v = store.getVersion();
-  const d = useMemo(() => derive(), [v]);
+  store.getVersion(); // redraws on display changes too (sync chip, a sheet to open), but the numbers below only on data changes
+  const key = `${store.getDataVersion()}:${store.dayStart()}:${Math.floor(Date.now() / 300000)}`; // and every 5 min: learning cards fall due
+  const d = useMemo(() => derived(key), [key]);
   return <TodayView {...d} onStudy={onStudy} onInbox={onInbox} onSearch={onSearch} onBoss={onBoss} onFilter={onFilter} onTab={onTab} />;
 }
+
+// Today's numbers survive leaving the screen (a study session, another tab): coming back with nothing changed costs nothing.
+let lastDerived: { key: string; d: ReturnType<typeof derive> } | null = null;
+function derived(key: string) { if (lastDerived?.key !== key) lastDerived = { key, d: derive() }; return lastDerived.d; }
 
 function derive() {
   const pins = store.settings.pins.map((p) => {
@@ -211,7 +216,7 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
   if (weakest) tips.push({ id: "weak", spine: systemColor(weakest.name), title: `${weakest.name} is slipping`, meta: `${Math.round(weakest.retention * 100)}% recalled this week over ${weakest.n} reviews — a focused session helps`, act: () => onStudy(weakest.name, "systems"), why: "Slipping|This system's recall this week is clearly below your target." });
   if (over >= 10 && onFilter) tips.push({ id: "over", spine: "var(--amber)", title: `${over.toLocaleString()} cards look overfilled`, meta: "Too much on one card — pick some and Claude splits them", act: () => onFilter("overfilled"), why: "Overfilled|Long answers or 6+ list items. One fact per card is recalled better (Wozniak's minimum-information rule)." });
   if (marked >= 5) tips.push({ id: "send", spine: "var(--sky)", title: `Send ${marked} cards to Claude`, meta: "Marked “needs improving” — get them back rewritten or split", act: async () => { const m = await sendImproveToClaude(); if (m) snackbar(m); }, why: "Improve|Claude rewrites them keeping your review history and pictures." });
-  if (!store.syncConfigured() && Date.now() - lastBackup > 30 * DAY && store.cards.size > 100) tips.push({ id: "backup", spine: "var(--line)", title: "No backup in 30 days", meta: "Save one file with everything", act: () => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.json`; a.click(); try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } }, why: "Backup|Without sync, this device holds your only copy." });
+  if (!store.syncConfigured() && Date.now() - lastBackup > 30 * DAY && store.cards.size > 100) tips.push({ id: "backup", spine: "var(--line)", title: "No backup in 30 days", meta: "Save one file with everything", act: async () => { snackbar("Preparing the backup file…"); const blob = await store.backupBlob(); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.json`; a.click(); try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } }, why: "Backup|Without sync, this device holds your only copy." });
   const shown = tips.filter((t) => !gone.includes(t.id)).slice(0, 4);
   if (!shown.length) return null;
   return (<>

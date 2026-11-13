@@ -20,7 +20,7 @@ const MASTERY: { key: "durable" | "mastered" | "developing" | "learning"; label:
 ];
 
 function Calibration() {
-  const v = store.getVersion();
+  store.getVersion(); const v = store.getDataVersion(); // recompute on data changes only
   const rows = useMemo(() => store.calibration(), [v]);
   if (!rows.length) return null;
   const W = 300, H = 120, pad = 30;
@@ -41,7 +41,7 @@ function Calibration() {
 }
 
 export function Progress({ onBoss }: { onBoss?: (path: string, view: "systems", name: string) => void }) {
-  const v = store.getVersion();
+  store.getVersion(); const v = store.getDataVersion(); // recompute on data changes only
   const d = useMemo(() => derive(), [v]);
   return <ProgressView {...d} onBoss={onBoss} />;
 }
@@ -129,7 +129,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
 const yrs = (d: number) => `${(d / 365.25).toFixed(d < 3650 ? 1 : 0)} y`;
 /** Retiring cards: >5 years to the next review → offered here; >20 years → retired on their own. Both go to the log. */
 function Mastered() {
-  const v = store.getVersion();
+  store.getVersion(); const v = store.getDataVersion(); // recompute on data changes only
   const cands = useMemo(() => store.masteryCandidates(), [v]);
   const log = store.mastery.log;
   const [open, setOpen] = useState<"list" | "log" | null>(null);

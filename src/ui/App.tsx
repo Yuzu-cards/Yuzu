@@ -27,9 +27,9 @@ export async function repairApp() {
   location.reload();
 }
 
-function downloadBackup() {
+async function downloadBackup() {
   try {
-    const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" });
+    const blob = await store.backupBlob();
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click();
   } catch (e) { tellSheet("Backup failed", (e as any)?.message); }
 }

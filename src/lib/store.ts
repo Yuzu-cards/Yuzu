@@ -108,6 +108,15 @@ export interface Stats { today: number; goal: number; streak: number }
 
 type Listener = () => void;
 
+/** A Map that counts its writes (`rev`), so caches built from notes or note types can tell cheaply whether anything changed. */
+export class RevMap<K, V> extends Map<K, V> {
+  rev = 0;
+  set(k: K, v: V) { this.rev = (this.rev ?? 0) + 1; return super.set(k, v); }
+  delete(k: K) { this.rev = (this.rev ?? 0) + 1; return super.delete(k); }
+  clear() { this.rev = (this.rev ?? 0) + 1; super.clear(); }
+}
+const idle = () => new Promise<void>((r) => { const ric = (globalThis as any).requestIdleCallback; if (ric) ric(() => r(), { timeout: 2000 }); else setTimeout(r, 0); });
+
 /** Spread cards so neighbours rarely share a group (system / deck): interleaving helps discrimination. Keeps the overall order roughly intact. */
 function hashName(s: string): string { let h1 = 0x811c9dc5, h2 = 0x01000193; for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = Math.imul(h2 ^ c, 2246822507); } return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0"); }
 
@@ -132,9 +141,29 @@ export function mapDeck(source: string, map: Record<string, string>): string | n
   return null;
 }
 
+/** JSON.stringify(obj) as a Blob, built in chunks with a pause between them so the screen keeps responding. */
+export async function jsonBlob(obj: Record<string, unknown>, onProgress?: (frac: number) => void, chunk = 4000): Promise<Blob> {
+  const parts: string[] = ["{"]; let first = true;
+  const total = Object.values(obj).reduce<number>((a, v) => a + (Array.isArray(v) ? v.length : 1), 0); let done = 0, since = 0;
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || typeof v === "function") continue;
+    parts.push((first ? "" : ",") + JSON.stringify(k) + ":"); first = false;
+    if (!Array.isArray(v) || v.length <= chunk) { parts.push(JSON.stringify(v) ?? "null"); done += Array.isArray(v) ? v.length : 1; continue; }
+    parts.push("[");
+    for (let i = 0; i < v.length; i += chunk) {
+      parts.push((i ? "," : "") + v.slice(i, i + chunk).map((x) => JSON.stringify(x) ?? "null").join(","));
+      done += Math.min(chunk, v.length - i); since += chunk;
+      if (since >= chunk) { since = 0; onProgress?.(done / Math.max(1, total)); await new Promise((r) => setTimeout(r, 0)); }
+    }
+    parts.push("]");
+  }
+  parts.push("}"); onProgress?.(1);
+  return new Blob(parts, { type: "application/json" });
+}
+
 export class Store {
-  notetypes = new Map<string, Notetype>();
-  notes = new Map<string, Note>();
+  notetypes = new RevMap<string, Notetype>();
+  notes = new RevMap<string, Note>();
   cards = new Map<string, Card>();
   tombstones: Record<string, number> = {};
   reviews: Review[] = [];
@@ -159,11 +188,18 @@ export class Store {
   private lastWantsKey = "";
   private listeners = new Set<Listener>();
   private version = 0;
+  private dataVersion = 0;
   private treeCache = new Map<View, { v: number; tree: TreeNode }>();
 
   subscribe = (l: Listener) => { this.listeners.add(l); return () => { this.listeners.delete(l); }; };
+  /** Changes on every store change, data or display (sync status, progress, a sheet to open): what the screens subscribe to. */
   getVersion = () => this.version;
-  private bump() { this.version++; this.treeCache.clear(); for (const l of this.listeners) l(); }
+  /** Changes only when the collection itself changes (cards, notes, reviews, note types, settings): what derived numbers are cached on. */
+  getDataVersion = () => this.dataVersion;
+  /** The collection changed: redraw, and drop everything derived from it. */
+  private bump() { this.version++; this.dataVersion++; this.treeCache.clear(); for (const l of this.listeners) l(); }
+  /** Only display state changed (sync or Google status, progress messages, a media file, a sheet to open): redraw, keep the derived numbers. */
+  uiBump() { this.version++; for (const l of this.listeners) l(); }
   private edits = 0; // bumps on every local change, so a sync can tell whether something happened while it uploaded
   private touch() { this.edits++; if (!this.dirty) { this.dirty = true; db.setMeta("syncDirty", true).catch(() => {}); } this.scheduleSync(); }
 
@@ -181,7 +217,7 @@ export class Store {
   googleConnected(): boolean { return tokenValid(); }
   googleSignedIn(): boolean { return !!savedToken(); }
   googleEmail(): string { return savedToken()?.email ?? ""; }
-  private setGoogle(state: typeof this.googleStatus.state, message: string) { this.googleStatus = { state, message, at: Date.now() }; this.bump(); }
+  private setGoogle(state: typeof this.googleStatus.state, message: string) { this.googleStatus = { state, message, at: Date.now() }; this.uiBump(); }
   private clientId() { return this.settings.google.clientId || DEFAULT_CLIENT_ID; }
   private needTap() { this.setGoogle("error", "Google needs a tap: press Sync now (or pull down on Today)"); }
   /** From a tap: Google's window, then Drive becomes Yuzu's home (GitHub stays selectable as the fallback). */
@@ -393,6 +429,7 @@ export class Store {
   async writeHubStatus(force = false): Promise<boolean> {
     if (!tokenValid()) return false;
     try {
+      await idle(); // a few hundred ms on a big collection: not while the user is tapping
       const status = this.hubStatus(); const fp = statusFingerprint(status);
       try { localStorage.setItem("citrus.status.yuzu", JSON.stringify(status)); } catch { /* same-origin readers only */ }
       if (!force && (fp === this.lastStatusFp || Date.now() - this.lastStatusAt < 5 * 60000)) return false;
@@ -463,7 +500,7 @@ export class Store {
     for (const r of refs) if (!this.media.has(r)) { const f = idx.files[r]; if (f?.id) want.push([r, f]); }
     if (!want.length) return { more: false };
     this.holdWake();
-    let got = 0, bytes = 0; const saved: { name: string; blob: Blob }[] = []; const flush = async () => { if (!saved.length) return; const b = saved.splice(0); await db.putMany("media", b); this.mediaUrls.clear(); this.mediaVersion++; progress(`From Drive: ${got.toLocaleString()} of ${want.length.toLocaleString()} files`); this.bump(); };
+    let got = 0, bytes = 0; const saved: { name: string; blob: Blob }[] = []; const flush = async () => { if (!saved.length) return; const b = saved.splice(0); await db.putMany("media", b); this.dropMediaUrls(); this.mediaVersion++; progress(`From Drive: ${got.toLocaleString()} of ${want.length.toLocaleString()} files`); this.uiBump(); };
     let stopDl: unknown = null;
     try {
       await drive.fetchMany(want, async (name, blob) => { this.media.set(name, blob); saved.push({ name, blob }); got++; bytes += blob.size; if (saved.length >= 200) await flush(); }, () => bytes >= 60 * 1048576 || Date.now() - t0 > 50000);
@@ -477,7 +514,7 @@ export class Store {
   private driveFetchOne(name: string) {
     const f = this.driveIndex?.files[name]; if (!f?.id || !this.mediaLoaded || this.driveFetching.has(name) || !tokenValid()) return;
     this.driveFetching.add(name);
-    new DriveMedia(this.gcache).fetchOne(f, name).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.mediaUrls.clear(); this.mediaVersion++; this.bump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
+    new DriveMedia(this.gcache).fetchOne(f, name).then(async (blob) => { if (!blob) return; this.media.set(name, blob); await db.putMany("media", [{ name, blob }]); this.dropMediaUrls(); this.mediaVersion++; this.uiBump(); }).catch(() => {}).finally(() => this.driveFetching.delete(name));
   }
 
   // ---- sync ---------------------------------------------------------------
@@ -489,7 +526,7 @@ export class Store {
     if (this.syncTimer) clearTimeout(this.syncTimer);
     this.syncTimer = setTimeout(() => { this.syncTimer = null; this.sync("auto").catch(() => {}); }, delay);
   }
-  private setSync(state: SyncStatus["state"], message: string) { this.syncStatus = { state, message, at: Date.now() }; this.bump(); }
+  private setSync(state: SyncStatus["state"], message: string) { this.syncStatus = { state, message, at: Date.now() }; this.uiBump(); }
 
   private pausedUntil = 0; private manifestMemo: { rev?: string; m?: any } = {};
   /** One sync at a time even with several tabs open (Web Locks), then the real work. */
@@ -516,7 +553,7 @@ export class Store {
     const t0 = Date.now();
     this.setSync("syncing", "Syncing…");
     let lastBump = 0;
-    const progress = (m: string) => { if (this.syncStatus.state !== "syncing") return; this.syncStatus = { ...this.syncStatus, message: m }; const t = Date.now(); if (t - lastBump > 250) { lastBump = t; this.bump(); } };
+    const progress = (m: string) => { if (this.syncStatus.state !== "syncing") return; this.syncStatus = { ...this.syncStatus, message: m }; const t = Date.now(); if (t - lastBump > 250) { lastBump = t; this.uiBump(); } };
     try {
       let summary = ""; let pulledNotes = false;
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -574,7 +611,7 @@ export class Store {
           }
           if (got.improve) { let changed = false; const merged = { ...this.improve }; for (const [k, v] of Object.entries(got.improve)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.improve = merged; await db.setMeta("improve", merged); } }
           if (got.hooks) { let changed = false; const merged = { ...this.hooks }; for (const [k, v] of Object.entries(got.hooks as typeof this.hooks)) if ((merged[k]?.m ?? -1) < v.m) { merged[k] = v; changed = true; } if (changed) { this.hooks = merged; await db.setMeta("hooks", merged); } }
-          if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.mediaUrls.clear(); } }
+          if (got.media) { const blobs: { name: string; blob: Blob }[] = []; for (const [name, url] of Object.entries(got.media as Record<string, string>)) { if (this.media.has(name)) continue; const blob = await (await fetch(url)).blob(); this.media.set(name, blob); blobs.push({ name, blob }); } if (blobs.length) { await db.putMany("media", blobs); this.dropMediaUrls(); } }
           if (pulledN + pulledC + pulledR) { this.treeCache.clear(); this.dueByDay = null; }
           if (pulledN) pulledNotes = true;
         }
@@ -635,7 +672,7 @@ export class Store {
             const waiting = Object.entries(mediaIndex).filter(([name, v]) => v.p && !this.media.has(name)); const used = waiting.length ? this.mediaRefs() : null; const missing = waiting.filter(([name]) => used!.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
             const q = missing.filter(([, v]) => { if (budget - v.s < 0) return false; budget -= v.s; return true; });
             await Promise.all(Array.from({ length: 4 }, async () => { while (q.length) { const [name, v] = q.shift()!; try { const bytes = await gh.readBinary(v.p); if (bytes) { const blob = new Blob([bytes as BlobPart], { type: v.p.endsWith(".webp") ? "image/webp" : mimeFor(name) }); this.media.set(name, blob); got2.push({ name, blob }); } } catch { /* next time */ } progress(`Downloading images ${++done}/${q.length + done}`); } }));
-            if (got2.length) { await db.putMany("media", got2); this.mediaUrls.clear(); }
+            if (got2.length) { await db.putMany("media", got2); this.dropMediaUrls(); }
             if (missing.length > got2.length) this.scheduleSync(4000); // keep going in the background
             if (got2.length) this.log(true, `${got2.length} shared images and sounds downloaded`, 0);
           }
@@ -731,19 +768,21 @@ export class Store {
   storagePersisted: boolean | null = null;
   /** A sheet Today should open when it shows (deep links: capture, practice, workload). */
   pendingOpen: string | null = null;
-  openOnToday(what: string) { this.pendingOpen = what; this.bump(); }
+  openOnToday(what: string) { this.pendingOpen = what; this.uiBump(); }
   takePendingOpen(what: string): boolean { if (this.pendingOpen !== what) return false; this.pendingOpen = null; return true; }
   /** When the study day turns over (the "new day starts at" hour) everything that counts "today" redraws, without reopening the app.
    *  A timer for the open app, plus a check on return (phones pause timers in the background). */
   private dayTurnTimer: ReturnType<typeof setTimeout> | null = null; private shownDay = 0;
   private watchDayTurn() {
-    const check = () => { const d = this.dayStart(); if (d !== this.shownDay) { const first = !this.shownDay; this.shownDay = d; if (!first) { this.dueByDay = null; this.bump(); } } };
+    const check = () => { const d = this.dayStart(); if (d !== this.shownDay) { const first = !this.shownDay; this.shownDay = d; if (!first) this.dayTurned(); } };
     const arm = () => { if (this.dayTurnTimer) clearTimeout(this.dayTurnTimer); const next = this.dayStart() + DAY - Date.now(); this.dayTurnTimer = setTimeout(() => { check(); arm(); }, Math.max(1000, Math.min(next + 500, 6 * 3600e3))); };
     check(); arm();
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { check(); arm(); } });
   }
+  /** The study day turned over: due counts and "today" numbers change, the notes and mastery don't (kept, not rebuilt). */
+  dayTurned() { const m = this.mbsCache; this.dueByDay = null; this.bump(); if (m) this.mbsCache = { ...m, v: this.dataVersion }; }
   tabBusy = false; movedAway = false; startAfterTakeover: (() => Promise<void>) | null = null; lostTab: (() => void) | null = null;
-  setTabBusy(v: boolean) { this.tabBusy = v; this.bump(); }
+  setTabBusy(v: boolean) { this.tabBusy = v; this.uiBump(); }
   /** "Use Yuzu here": take the lock from the other tab, then open the collection. */
   async useHere() { const { takeTab } = await import("./tabs"); this.tabBusy = false; this.movedAway = false; this.bump(); await takeTab(() => this.lostTab?.()); await this.startAfterTakeover?.(); }
   /** Another tab took over: stop writing. Reload, so this copy shows the "open elsewhere" screen with nothing stale in memory. */
@@ -765,10 +804,10 @@ export class Store {
 
   /** Run a persistence write; a failure is remembered and shown instead of silently losing data. */
   protected async persist<T>(what: string, p: Promise<T>): Promise<T | undefined> {
-    try { const r = await p; if (this.saveError) { this.saveError = null; this.bump(); } return r; }
+    try { const r = await p; if (this.saveError) { this.saveError = null; this.uiBump(); } return r; }
     catch (e: any) {
       const full = e?.name === "QuotaExceededError" || /quota|storage.*full|disk.*full/i.test(String(e?.message ?? ""));
-      this.saveError = full ? `this device's storage for Yuzu is full (${what}). Free some space on the phone; until then, Back up now saves everything as a file` : `${what}: ${e?.message ?? e}`; console.error("save failed", what, e); this.bump();
+      this.saveError = full ? `this device's storage for Yuzu is full (${what}). Free some space on the phone; until then, Back up now saves everything as a file` : `${what}: ${e?.message ?? e}`; console.error("save failed", what, e); this.uiBump();
       db.setMeta("lastError", { at: Date.now(), where: what, message: String(e?.message ?? e) }).catch(() => {});
       return undefined;
     }
@@ -781,8 +820,8 @@ export class Store {
   private async loadInner() {
     const mark = (n: string) => { try { performance.mark("yuzu:" + n); } catch { /* fine */ } };
     mark("load"); const snap = await db.loadSnapshot(); mark("snapshot");
-    this.notetypes = new Map(snap.notetypes.map((n) => [n.id, n]));
-    this.notes = new Map(snap.notes.map((n) => [n.id, n]));
+    this.notetypes = new RevMap(snap.notetypes.map((n) => [n.id, n]));
+    this.notes = new RevMap(snap.notes.map((n) => [n.id, n]));
     // Validate: drop cards whose note is gone, repair impossible numbers so the scheduler can never choke on them.
     const cards = new Map<string, Card>(); let orphans = 0, repaired = 0;
     for (const c of snap.cards) {
@@ -923,18 +962,25 @@ export class Store {
     try { await db.eachMediaChunk((rows) => { for (const m of rows) if (!this.media.has(m.name)) this.media.set(m.name, m.blob); }); }
     catch (e: any) { console.error("media load", e); }
     try { performance.mark("yuzu:media"); } catch { /* fine */ }
-    this.mediaLoaded = true; this.mediaUrls.clear(); this.mediaVersion++; this.bump();
+    this.mediaLoaded = true; this.dropMediaUrls(); this.mediaVersion++; this.uiBump();
   }
   mediaUrl = (name: string): string | null => {
-    const hit = this.mediaUrls.get(name); if (hit) return hit;
+    const hit = this.mediaUrls.get(name); if (hit) { this.mediaUrls.delete(name); this.mediaUrls.set(name, hit); return hit; } // most recently used last
     const b = this.media.get(name);
     if (!b && !this.mediaLoaded) { // not read yet: this one file now
-      if (!this.mediaEarly.has(name)) { this.mediaEarly.add(name); db.getOne<{ name: string; blob: Blob }>("media", name).then((r) => { if (r?.blob) { if (!this.media.has(name)) this.media.set(name, r.blob); this.mediaVersion++; this.bump(); } }).catch(() => {}); }
+      if (!this.mediaEarly.has(name)) { this.mediaEarly.add(name); db.getOne<{ name: string; blob: Blob }>("media", name).then((r) => { if (r?.blob) { if (!this.media.has(name)) this.media.set(name, r.blob); this.mediaVersion++; this.uiBump(); } }).catch(() => {}); }
       return null;
     }
     if (!b) { this.driveFetchOne(name); return null; }
-    const u = URL.createObjectURL(b); this.mediaUrls.set(name, u); return u;
+    const u = URL.createObjectURL(b); this.mediaUrls.set(name, u);
+    // Keep at most a few hundred live (a long session on the Deck shows thousands of pictures); the oldest is let go.
+    if (this.mediaUrls.size > Store.MEDIA_URLS_KEPT) { const [oldName, oldUrl] = this.mediaUrls.entries().next().value!; this.mediaUrls.delete(oldName); this.revokeLater([oldUrl]); }
+    return u;
   };
+  private static MEDIA_URLS_KEPT = 400;
+  /** Object URLs are let go a little later, so a picture still on screen (or still loading) is not cut off. */
+  private revokeLater(urls: string[]) { if (urls.length && typeof URL !== "undefined" && URL.revokeObjectURL) setTimeout(() => { for (const u of urls) { try { URL.revokeObjectURL(u); } catch { /* fine */ } } }, 30000); }
+  private dropMediaUrls() { const old = [...this.mediaUrls.values()]; this.mediaUrls.clear(); this.revokeLater(old); }
 
   /** Image occlusion from the editor: one picture, its boxes; each box is a card. */
   async addOcclusion(o: { title: string; image: string; masks: import("./occlusion").Mask[]; category: string }): Promise<string> {
@@ -1059,7 +1105,12 @@ export class Store {
   static IMPROVE_REASONS: Record<string, string> = { split: "Too much on one card — split it", unclear: "Unclear question or answer", wrong: "Wrong or outdated", format: "Messy formatting", media: "Picture/sound problem", confusion: "I mix it up with something similar", other: "Something else" };
   improveFor(nid: string): ImproveMark | null { const m = this.improve[nid]; return m && m.r.length ? m : null; }
   /** Notes marked for improving (plus leeches marked "mixed up with something similar"), newest first. */
+  private improveCache: { rev: number; marks: Record<string, ImproveMark>; out: { note: Note; mark: ImproveMark }[] } | null = null;
   improveList(): { note: Note; mark: ImproveMark }[] {
+    const c = this.improveCache; if (c && c.rev === this.notes.rev && c.marks === this.improve) return c.out;
+    const out = this.improveListRaw(); this.improveCache = { rev: this.notes.rev, marks: this.improve, out }; return out;
+  }
+  private improveListRaw(): { note: Note; mark: ImproveMark }[] {
     const out: { note: Note; mark: ImproveMark }[] = []; const seen = new Set<string>();
     for (const [nid, m] of Object.entries(this.improve)) { const n = this.notes.get(nid); if (n && m.r.length) { out.push({ note: n, mark: m }); seen.add(nid); } }
     for (const n of this.notes.values()) if (!seen.has(n.id) && n.tags.includes("ask-claude")) out.push({ note: n, mark: { r: ["confusion"], t: "", m: n.modified } });
@@ -1198,20 +1249,20 @@ export class Store {
     const last = await db.getMeta<{ day: string; rev: string | null } | null>("backupAt", null); const day = todayName();
     if (!force && last?.day === day) return "Today's backup exists";
     if (!force && (this.dirty || this.syncStatus.state === "syncing")) return "Waiting for the sync";
-    this.backups = { ...this.backups, busy: true, message: "Backing up…" }; this.bump();
+    this.backups = { ...this.backups, busy: true, message: "Backing up…" }; this.uiBump();
     const sync = new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo);
     try {
       const m = await sync.pullManifest(); const rev = m ? ((m as any).rev ?? String(m.updatedAt)) : null;
       if (!m) return "Nothing on Drive to back up yet";
       if (!force && last?.rev === rev) { await db.setMeta("backupAt", { day, rev }); return "Unchanged since the last backup"; }
       const lock = await sync.acquireLock(this.settings.deviceName || "device", await this.deviceId()); if (!lock.held) return `${lock.by ?? "Another device"} is syncing; backup later`;
-      try { const r = await sync.snapshot(day, (t) => { this.backups = { ...this.backups, message: t }; this.bump(); }); await db.setMeta("backupAt", { day, rev: r?.rev ?? rev }); } finally { await sync.releaseLock(); }
+      try { const r = await sync.snapshot(day, (t) => { this.backups = { ...this.backups, message: t }; this.uiBump(); }); await db.setMeta("backupAt", { day, rev: r?.rev ?? rev }); } finally { await sync.releaseLock(); }
       await pruneBackups(this.gcache); this.backups.list = await listBackups(this.gcache);
       this.log(true, `Backup ${day}`, 0); return `Backed up (${day})`;
     } catch (e: any) { return "Backup failed: " + (e?.message ?? e); }
-    finally { this.backups = { ...this.backups, busy: false, message: "" }; this.bump(); }
+    finally { this.backups = { ...this.backups, busy: false, message: "" }; this.uiBump(); }
   }
-  async refreshBackups(): Promise<BackupInfo[]> { if (!tokenValid()) return this.backups.list; this.backups.list = await listBackups(this.gcache); this.bump(); return this.backups.list; }
+  async refreshBackups(): Promise<BackupInfo[]> { if (!tokenValid()) return this.backups.list; this.backups.list = await listBackups(this.gcache); this.uiBump(); return this.backups.list; }
   /**
    * Put a backup's records back. `missing`: notes, cards and reviews that were deleted since (their tombstones are lifted).
    * `all`: also any note or card that now differs from the backup (progress made since is lost for those cards).
@@ -1294,7 +1345,12 @@ export class Store {
   // ---- Sketchy out (12/11/2026, the user's call): empty every field named "Sketchy…" and drop every tag with "sketchy" in it.
   // The notes' previous fields and tags are kept on this device (meta "sketchyUndo") so "Put Sketchy back" can restore them.
   private static isSketchyTag(t: string) { return /sketchy/i.test(t); }
+  private sketchyMemo: { at: string; out: { notes: number; tags: number } } | null = null;
   sketchyCount(): { notes: number; tags: number } {
+    const at = `${this.notes.rev}:${this.notetypes.rev}:${this.notes.size}`; if (this.sketchyMemo?.at === at) return this.sketchyMemo.out;
+    const out = this.sketchyCountRaw(); this.sketchyMemo = { at, out }; return out;
+  }
+  private sketchyCountRaw(): { notes: number; tags: number } {
     let notes = 0, tags = 0; const idx = this.sketchyFieldIdx();
     for (const n of this.notes.values()) { const fi = idx.get(n.ntid) ?? []; const hasF = fi.some((i) => (n.fields[i] ?? "").trim()); const ts = n.tags.filter(Store.isSketchyTag).length; if (hasF || ts) notes++; tags += ts; }
     return { notes, tags };
@@ -1323,8 +1379,8 @@ export class Store {
   async sketchyBackupSize(): Promise<number> { return (await db.getMeta<any[]>("sketchyUndo", [])).length; }
   /** Put the Sketchy fields and tags back from this device's copy. */
   async restoreSketchy(): Promise<number> {
-    const prev = await db.getMeta<{ id: string; fields: string[]; tags: string[] }[]>("sketchyUndo", []); const now = stamp(); const back: Note[] = [];
-    for (const p of prev) { const n = this.notes.get(p.id); if (!n) continue; const idx = this.sketchyFieldIdx().get(n.ntid) ?? []; back.push({ ...n, fields: n.fields.map((f, i) => (idx.includes(i) ? p.fields[i] ?? f : f)), tags: [...new Set([...n.tags, ...p.tags.filter(Store.isSketchyTag)])], modified: now }); }
+    const prev = await db.getMeta<{ id: string; fields: string[]; tags: string[] }[]>("sketchyUndo", []); const now = stamp(); const back: Note[] = []; const fieldIdx = this.sketchyFieldIdx();
+    for (const p of prev) { const n = this.notes.get(p.id); if (!n) continue; const idx = fieldIdx.get(n.ntid) ?? []; back.push({ ...n, fields: n.fields.map((f, i) => (idx.includes(i) ? p.fields[i] ?? f : f)), tags: [...new Set([...n.tags, ...p.tags.filter(Store.isSketchyTag)])], modified: now }); }
     for (const n of back) this.notes.set(n.id, n);
     if (!this.keepSketchy) await this.saveSettings({ applied: [...(this.settings.applied ?? []), "keep-sketchy"] });
     if (back.length) await this.persist("putting Sketchy back", db.putMany("notes", back)); this.treeCache.clear(); this.touch(); this.bump(); return back.length;
@@ -1333,9 +1389,15 @@ export class Store {
    *  The first real strip on a Drive-connected device takes a Drive backup first. */
   get keepSketchy() { return (this.settings.applied ?? []).includes("keep-sketchy"); }
   async stripSketchyOnce(): Promise<{ notes: number; tags: number } | null> {
-    if (this.keepSketchy || !this.sketchyCount().notes) return null;
+    if (this.keepSketchy) return null;
+    // A clean collection is remembered by its notes' fingerprint: later starts skip the 100k-note count unless notes changed
+    // (an import, a sync from another device). The fingerprint is also what media checks use, so it is usually ready.
+    const key = this.refsKey(); if ((await db.getMeta<string>("sketchyClean", "")) === key) return null;
+    if (!this.sketchyCount().notes) { await db.setMeta("sketchyClean", key).catch(() => {}); return null; }
     if (this.syncBackend() === "drive" && tokenValid() && !(await db.getMeta<any[]>("sketchyUndo", [])).length) await this.backupNow(true).catch(() => "");
-    return this.stripSketchy();
+    const r = await this.stripSketchy();
+    if (!this.sketchyCount().notes) await db.setMeta("sketchyClean", this.refsKey()).catch(() => {});
+    return r;
   }
 
 
@@ -1458,13 +1520,20 @@ export class Store {
     const refs = this.mediaRefs(); const del: string[] = []; let bytes = 0;
     for (const [name, blob] of this.media) if (!refs.has(name) && !name.startsWith("pack-") && !name.startsWith("_")) { del.push(name); bytes += blob.size; }
     for (const n of del) this.media.delete(n);
-    if (del.length) { await db.deleteMany("media", del); this.mediaUrls.clear(); this.bump(); }
+    if (del.length) { await db.deleteMany("media", del); this.dropMediaUrls(); this.bump(); }
     return { files: del.length, bytes };
   }
   /** Media the cards reference vs what this device holds. */
   private refsCache: { key: string; refs: Set<string> } | null = null;
   /** Fingerprint of everything media references depend on: every note's edit time, the note types, the hidden fields. Cheap (no regexes). */
+  private refsKeyMemo: { at: string; key: string } | null = null;
   refsKey(): string {
+    // Walk the notes only when one was written since the last call (the maps count their writes).
+    const at = `${this.notes.rev}:${this.notetypes.rev}:${this.settings.hiddenFields.join("|")}`;
+    if (this.refsKeyMemo?.at === at) return this.refsKeyMemo.key;
+    const key = this.refsKeyRaw(); this.refsKeyMemo = { at, key }; return key;
+  }
+  private refsKeyRaw(): string {
     let sig = 0; for (const n of this.notes.values()) sig = (sig + n.modified + n.fields.length) % 1e15;
     let ntSig = 0; for (const nt of this.notetypes.values()) ntSig += nt.css.length + nt.templates.length;
     return `${this.notes.size}:${sig}:${this.notetypes.size}:${ntSig}:${this.settings.hiddenFields.join("|")}`;
@@ -1575,7 +1644,7 @@ export class Store {
       const r = await importMedia(input, this.notes.values(), (n) => this.media.has(n) || pending.has(n), async (name, blob) => { pending.add(name); batch.push({ name, blob }); if (batch.length >= 40) await flush(); }, env, { notetypes: this.notetypes.values(), skipField: this.skipHidden() });
       await flush();
       const kept = r.stored - unreadable; r.failed += unreadable; r.stored = kept; return r;
-    } finally { this.mediaUrls.clear(); this.bump(); }
+    } finally { this.dropMediaUrls(); this.bump(); }
   }
   /**
    * PC: make the phone's media file straight from Anki's media folder — pictures are shrunk and written into
@@ -1605,7 +1674,7 @@ export class Store {
     return { checked, unreadable, errors };
   }
   /** Forget only the given files (after a check) so "Choose media folder" adds them again. */
-  async dropMedia(names: string[]) { for (const n of names) this.media.delete(n); await db.deleteMany("media", names); this.mediaUrls.clear(); this.bump(); return names.length; }
+  async dropMedia(names: string[]) { for (const n of names) this.media.delete(n); await db.deleteMany("media", names); this.dropMediaUrls(); this.bump(); return names.length; }
   /** This device's media (already shrunk) as one or more Yuzu media files, to carry to another device. */
   /**
    * Pack this device's media into Yuzu media files (split at 1.8 GB / 60k files).
@@ -1650,7 +1719,7 @@ export class Store {
   async clearMedia(keepPacks = true) {
     await this.mediaReady;
     const del: string[] = []; for (const name of this.media.keys()) if (!(keepPacks && name.startsWith("pack-"))) { del.push(name); this.media.delete(name); }
-    await db.deleteMany("media", del); this.mediaUrls.clear(); this.bump(); return del.length;
+    await db.deleteMany("media", del); this.dropMediaUrls(); this.bump(); return del.length;
   }
   /** Small images from packs, as data URLs, for sync (cached per name). */
   private packMediaCache = new Map<string, string>();
@@ -1727,7 +1796,7 @@ export class Store {
   /** Category tree for a view. Counts are per card; a card in two categories is counted in both. */
   tree(view: View = "decks"): TreeNode {
     const cached = this.treeCache.get(view);
-    if (cached && cached.v === this.version) return cached.tree;
+    if (cached && cached.v === this.dataVersion) return cached.tree;
     const root: TreeNode = { name: "All", path: "", children: [], total: 0, due: 0, newCount: 0, learning: 0, suspended: 0, reviewed: 0 };
     const now = stamp();
     const index = new Map<string, TreeNode>();
@@ -1763,7 +1832,7 @@ export class Store {
     }
     const sortRec = (n: TreeNode) => { n.children.sort((a, b) => a.name.localeCompare(b.name)); n.children.forEach(sortRec); };
     sortRec(root);
-    this.treeCache.set(view, { v: this.version, tree: root });
+    this.treeCache.set(view, { v: this.dataVersion, tree: root });
     return root;
   }
 
@@ -1807,21 +1876,27 @@ export class Store {
 
   /** Build today's queue for a scope: learning due → reviews due → new (within budget). */
   queue(path: string, now = Date.now(), view: View = "decks", only: "all" | "due" | "new" = "all"): Card[] {
-    const cards = this.cardsIn(path, view).filter((c) => !c.suspended);
-    const learning = only === "new" ? [] : cards.filter((c) => (c.state === "learning" || c.state === "relearning") && c.due <= now).sort((a, b) => a.due - b.due);
-    let review = only === "new" ? [] : cards.filter((c) => c.state === "review" && c.due <= now);
+    // One pass over the scope (the whole collection for "", without copying it): due learning, due reviews, new cards by category.
+    const budget = only === "due" ? 0 : Math.max(0, this.settings.newPerDay - this.reviewedToday(now).newCards);
+    const learning: Card[] = []; let review: Card[] = []; const byCat = new Map<string, Card[]>();
+    for (const c of path || view === "smart" ? this.cardsIn(path, view) : this.cards.values()) {
+      if (c.suspended) continue;
+      if (c.state === "new") { if (budget > 0) { const k = this.catOf(c.source); (byCat.get(k) ?? byCat.set(k, []).get(k)!).push(c); } }
+      else if (only === "new" || c.due > now) continue;
+      else if (c.state === "review") review.push(c);
+      else learning.push(c);
+    }
+    learning.sort((a, b) => a.due - b.due);
     const order = this.settings.dueOrder;
     if (order === "forgotten") review.sort((a, b) => retrievability((now - a.lastReview) / DAY, a.stability) - retrievability((now - b.lastReview) / DAY, b.stability));
     else if (order === "rescue") review.sort((a, b) => retrievability((now - b.lastReview) / DAY, b.stability) - retrievability((now - a.lastReview) / DAY, a.stability)); // backlog: save the most memory per minute
     else if (order === "shuffle") { for (let i = review.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [review[i], review[j]] = [review[j], review[i]]; } }
     else review.sort((a, b) => a.due - b.due);
     if (this.settings.maxReviewsPerDay > 0) review = review.slice(0, Math.max(0, this.settings.maxReviewsPerDay - this.reviewedToday(now).reviews));
-    review = interleaveBySystem(review, (c) => this.notes.get(c.nid)?.tags.find((t) => t.startsWith("auto::System::")) ?? c.source.split("::").slice(0, 3).join("::"));
-    const budget = only === "due" ? 0 : Math.max(0, this.settings.newPerDay - this.reviewedToday(now).newCards);
+    review = interleaveBySystem(review, (c) => this.notes.get(c.nid)?.tags.find((t) => t.startsWith("auto::System::")) ?? this.catOf(c.source));
     // New cards: oldest first within each category, categories taken in turns so one deck can't hog the daily budget.
-    const byCat = new Map<string, Card[]>();
-    for (const c of cards) if (c.state === "new") { const k = c.source.split("::").slice(0, 3).join("::"); (byCat.get(k) ?? byCat.set(k, []).get(k)!).push(c); }
-    for (const list of byCat.values()) list.sort((a, b) => a.due - b.due || a.created - b.created);
+    // Only the first few of each category are ever taken, so they are picked in order rather than sorting 100k new cards.
+    const lists = [...byCat.values()].map((l) => Store.orderedTaker(l, (a, b) => a.due - b.due || a.created - b.created));
     // Bury siblings: one card per note a day (notes seen today and learning cards count). Reviews are filtered; new cards are
     // picked around it, so a buried sibling's place goes to the next new card and the day's new-card count stays full.
     const seenNotes = new Set<string>(); const bury = this.settings.burySiblings;
@@ -1831,10 +1906,10 @@ export class Store {
       for (const c of learning) seenNotes.add(c.nid);
       review = review.filter((c) => { if (seenNotes.has(c.nid)) return false; seenNotes.add(c.nid); return true; });
     }
-    const fresh: Card[] = []; const lists = [...byCat.values()];
-    for (let i = 0; fresh.length < budget && lists.some((l) => l.length); i++) {
-      const l = lists[i % lists.length]; if (!l.length) continue;
-      const c = l.shift()!; if (bury) { if (seenNotes.has(c.nid)) continue; seenNotes.add(c.nid); } fresh.push(c);
+    const fresh: Card[] = [];
+    for (let i = 0; fresh.length < budget && lists.some((l) => l.left() > 0); i++) {
+      const l = lists[i % lists.length]; if (!l.left()) continue;
+      const c = l.take(); if (bury) { if (seenNotes.has(c.nid)) continue; seenNotes.add(c.nid); } fresh.push(c);
     }
     // Interleave new cards among reviews so a session isn't all-new at the end.
     const out: Card[] = [...learning];
@@ -1846,6 +1921,32 @@ export class Store {
     }
     while (fi < fresh.length) out.push(fresh[fi++]);
     return out;
+  }
+
+  /** Top-three-level category of a deck path (cached: the same few hundred paths repeat across 146k cards). */
+  private catCache = new Map<string, string>();
+  private catOf(source: string): string { let k = this.catCache.get(source); if (k === undefined) { k = source.split("::").slice(0, 3).join("::"); this.catCache.set(source, k); } return k; }
+  /** Hands out a list's items in sorted order (stable, like Array.sort) without sorting all of it while only a few are taken. */
+  static orderedTaker<T>(list: T[], cmp: (a: T, b: T) => number, first = 32): { left: () => number; take: () => T } {
+    // One pass keeps the `first` smallest (ties in list order, as a stable sort would); the rest is sorted only if ever reached.
+    let left = list.length, buf: number[] | null = null, k = 0, rest: T[] | null = null, r = 0;
+    return {
+      left: () => left,
+      take: () => {
+        left--;
+        if (!buf) {
+          buf = [];
+          for (let i = 0; i < list.length; i++) {
+            if (buf.length === first && cmp(list[i], list[buf[first - 1]]) >= 0) continue;
+            let j = buf.length; while (j > 0 && cmp(list[i], list[buf[j - 1]]) < 0) j--;
+            buf.splice(j, 0, i); if (buf.length > first) buf.pop();
+          }
+        }
+        if (k < buf.length) return list[buf[k++]];
+        if (!rest) { const inBuf = new Set(buf); rest = list.filter((_, i) => !inBuf.has(i)).sort(cmp); }
+        return rest[r++];
+      },
+    };
   }
 
   /** Learning cards that are due later today (shown after the main queue drains). */
@@ -1943,7 +2044,9 @@ export class Store {
     // The next card shows at once: the save runs in the background (the database applies writes in the order they're
     // made, and a failed save still raises the red banner). `flushWrites()` waits for it where that matters.
     this.pendingWrite = this.persist("saving the review", Promise.all([db.putOne("cards", next), db.putOne("reviews", review), db.setMeta("undoStack", this.undoStack)]));
+    const mbsFresh = this.mbsCache?.v === this.dataVersion;
     this.bump(); this.touch();
+    if (mbsFresh && this.mbsCache) { this.masteryAfterAnswer(card, next, review, now); this.mbsCache.v = this.dataVersion; }
     return next;
   }
   lastAnswer: { cardId: string; leech: boolean; lapses: number } | null = null;
@@ -2026,16 +2129,16 @@ export class Store {
   /** Fit FSRS weights to this user's review log, then rebuild every reviewed card's memory state with them. */
   async optimizeScheduler(): Promise<string> {
     if (this.fitting) return "Already running";
-    this.fitting = { progress: 0 }; this.bump();
+    this.fitting = { progress: 0 }; this.uiBump();
     try {
-      const res = await fitWeights(this.reviews, this.settings.scheduler.w, { iterations: 120, yieldEvery: 1, onProgress: (i) => { if (i % 10 === 0) { this.fitting = { progress: i / 120 }; this.bump(); } } });
+      const res = await fitWeights(this.reviews, this.settings.scheduler.w, { iterations: 120, yieldEvery: 1, onProgress: (i) => { if (i % 10 === 0) { this.fitting = { progress: i / 120 }; this.uiBump(); } } });
       if (res.iterations === 0) return `Not enough history yet (${res.n} usable reviews; needs about 400). Keep studying — this runs again automatically.`;
       const gain = res.before > 0 ? (1 - res.after / res.before) * 100 : 0;
       if (gain < 0.5) { await this.saveSettings({ fit: { at: Date.now(), n: res.n, before: res.before, after: res.after } }); return "Your weights were already close to optimal; nothing changed."; }
       await this.saveSettings({ scheduler: { ...this.settings.scheduler, w: res.w }, fit: { at: Date.now(), n: res.n, before: res.before, after: res.after } });
       const n = await this.rebuildMemory();
       return `Scheduler tuned to your history: prediction error down ${gain.toFixed(0)}% over ${res.n.toLocaleString()} reviews; ${n.toLocaleString()} cards rescheduled.`;
-    } finally { this.fitting = null; this.bump(); }
+    } finally { this.fitting = null; this.uiBump(); }
   }
   /** Recompute stability/difficulty/due for every reviewed card from its review log with the current weights. */
   async rebuildMemory(): Promise<number> {
@@ -2067,13 +2170,30 @@ export class Store {
     return "mastered";
   }
   /** Mastery distribution and average answer time (last 30 days) per system. */
-  private mbsCache: { v: number; at: number; out: ReturnType<Store["masteryBySystemRaw"]> } | null = null;
-  /** Per-system mastery (cached for a minute per data version: Today and Progress both ask on every render). */
+  private mbsCache: { v: number; at: number; out: ReturnType<Store["masteryBySystemRaw"]>; sum: Map<string, { ms: number; n: number }> } | null = null;
+  /** Per-system mastery, cached per data version (Today and Progress both ask on every render). An answer moves one card
+   *  between buckets, so `answer()` adjusts the counts instead of a 146k-card rescan; a full recount runs when other data changes or after 6 hours (durable vs mastered drifts over days, not minutes). */
   masteryBySystem(now = Date.now()) {
-    const c = this.mbsCache; if (c && c.v === this.version && Math.abs(now - c.at) < 60000) return c.out;
-    const out = this.masteryBySystemRaw(now); this.mbsCache = { v: this.version, at: now, out }; return out;
+    const c = this.mbsCache; if (c && c.v === this.dataVersion && Math.abs(now - c.at) < 6 * 3600000) return c.out;
+    const sum = new Map<string, { ms: number; n: number }>();
+    const out = this.masteryBySystemRaw(now, sum); this.mbsCache = { v: this.dataVersion, at: now, out, sum }; return out;
   }
-  private masteryBySystemRaw(now: number) {
+  private static systemsOf(n: Note | undefined): string[] { const out: string[] = []; if (n) for (const t of n.tags) if (t.startsWith("auto::System::")) out.push(t.slice(14)); return out; }
+  /** One answer: move the card from its old mastery bucket to its new one and add the answer time (keeps the cache exact enough). */
+  private masteryAfterAnswer(before: Card, after: Card, r: Review, now: number) {
+    const c = this.mbsCache; if (!c) return;
+    const systems = Store.systemsOf(this.notes.get(before.nid)); if (!systems.length) return;
+    const out = new Map(c.out); const was = this.masteryOf(before, c.at), is = this.masteryOf(after, now);
+    for (const k of systems) {
+      const e = { ...(out.get(k) ?? { unseen: 0, learning: 0, developing: 0, mastered: 0, durable: 0, total: 0, secs: null }) };
+      if (!before.suspended) { e[was]--; e.total--; }
+      if (!after.suspended) { e[is]++; e.total++; }
+      if (r.durationMs && r.durationMs <= 120000) { const sm = c.sum.get(k) ?? { ms: 0, n: 0 }; sm.ms += r.durationMs; sm.n++; c.sum.set(k, sm); if (sm.n >= 5) e.secs = sm.ms / sm.n / 1000; }
+      out.set(k, e);
+    }
+    c.out = out;
+  }
+  private masteryBySystemRaw(now: number, sum = new Map<string, { ms: number; n: number }>()) {
     const out = new Map<string, { unseen: number; learning: number; developing: number; mastered: number; durable: number; total: number; secs: number | null }>();
     const get = (k: string) => out.get(k) ?? out.set(k, { unseen: 0, learning: 0, developing: 0, mastered: 0, durable: 0, total: 0, secs: null }).get(k)!;
     for (const c of this.cards.values()) {
@@ -2082,7 +2202,6 @@ export class Store {
       const m = this.masteryOf(c, now);
       for (const t of n.tags) if (t.startsWith("auto::System::")) { const e = get(t.slice(14)); e[m]++; e.total++; }
     }
-    const sum = new Map<string, { ms: number; n: number }>();
     for (const r of this.reviews) {
       if (r.ts < now - 30 * DAY || !r.durationMs || r.durationMs > 120000) continue;
       const n = this.notes.get(this.cards.get(r.cid)?.nid ?? ""); if (!n) continue;
@@ -2127,6 +2246,9 @@ export class Store {
     const { sync, ...settings } = this.settings;
     return { app: "yuzu", version: 1, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks, improve: this.improve, mastery: this.mastery };
   }
+  /** The backup as a file, written a few thousand records at a time with pauses (one JSON.stringify of 146k cards froze a
+   *  tablet for 8 s). Same bytes as JSON.stringify(backup()). */
+  async backupBlob(quick = false, onProgress?: (frac: number) => void): Promise<Blob> { return jsonBlob(quick ? this.quickBackup() : this.backup(), onProgress); }
   /** Small backup: everything irreplaceable (reviews, settings, personal notes, scheduling), without the card text that the repository or Anki can restore. */
   quickBackup() {
     const { sync, ...settings } = this.settings;
