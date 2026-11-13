@@ -16,7 +16,7 @@ function masteryHint(k: string) {
 }
 const MASTERY: { key: "durable" | "mastered" | "developing" | "learning"; label: string; color: string }[] = [
   { key: "durable", label: "durable", color: "var(--yuzu)" }, { key: "mastered", label: "mastered", color: "var(--orange)" },
-  { key: "developing", label: "developing", color: "var(--orange-2)" }, { key: "learning", label: "learning", color: "var(--again)" },
+  { key: "developing", label: "developing", color: "var(--orange-dark)" }, { key: "learning", label: "learning", color: "var(--again)" },
 ];
 
 function Calibration() {
@@ -231,6 +231,6 @@ function Areas() {
           <span role="cell" className="num">{pm}%</span>
         </div>); })}
     </div>
-    <p className="small muted" style={{ margin: "6px 0 14px" }}>{all.length > 8 && <button className="btn" style={{ marginRight: 8 }} onClick={() => setMore(!more)}>{more ? "Show fewer" : `All ${all.length} areas`}</button>}Bar: mastered (dark) and started (light) out of each area's cards.</p>
+    <p className="small muted" style={{ margin: "6px 0 14px" }}>{all.length > 8 && <button className="btn" style={{ marginRight: 8 }} onClick={() => setMore(!more)}>{more ? "Show fewer" : `All ${all.length} areas`}</button>}Bar: mastered (solid) and started (faint) out of each area's cards.</p>
   </>);
 }
