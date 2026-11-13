@@ -348,6 +348,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             {store.syncBackend() !== "drive" && <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>}
           </details>
         )}
+        <ReplacedEdits />
       </div>
 
       </details>
@@ -617,3 +618,27 @@ function SketchyRow() {
     </div>
   </div>);
 }
+
+/** Edits that lost to a newer edit of the same field on another device: what was kept, what was replaced, and a way to put it back. */
+function ReplacedEdits() {
+  const list = store.editConflicts; if (!list.length) return null;
+  return (
+    <details className="replaced-edits" style={{ marginTop: 8 }}>
+      <summary className="small">Replaced edits ({list.length})</summary>
+      <p className="small muted" style={{ margin: "6px 0" }}>The same field was edited on two devices before they synced. The newer edit was kept; the other is here so nothing is lost.</p>
+      <ul className="small" style={{ margin: 0, paddingLeft: 0, listStyle: "none" }}>
+        {list.map((c, i) => { const n = store.notes.get(c.nid); const nt = n && store.notetypes.get(n.ntid); return (
+          <li key={c.nid + c.field + c.at} style={{ padding: "8px 0", borderTop: "1px solid var(--line)" }}>
+            <div><b>{n ? noteTitle(n).slice(0, 60) : "Deleted card"}</b> · {nt?.fields[c.field] ?? `field ${c.field + 1}`} · {fmtDateTime(c.at)}</div>
+            <div className="muted" style={{ overflowWrap: "anywhere" }}>Kept ({c.keptOn}): {stripTags(c.kept).slice(0, 160) || "(empty)"}</div>
+            <div style={{ overflowWrap: "anywhere" }}>Replaced ({c.lostOn}): {stripTags(c.lost).slice(0, 160) || "(empty)"}</div>
+            <div className="row" style={{ marginTop: 6 }}>
+              {n && <button className="btn" onClick={async () => { if (await store.useConflict(i)) snackbar("Replaced edit put back"); }}>Use the replaced one</button>}
+              <button className="btn" onClick={() => store.dismissConflict(i)}>Dismiss</button>
+            </div>
+          </li>); })}
+      </ul>
+    </details>
+  );
+}
+const stripTags = (h: string) => h.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();

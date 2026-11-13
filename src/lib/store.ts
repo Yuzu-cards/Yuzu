@@ -17,7 +17,7 @@ import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downlo
 import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
 declare const __VERSION__: string;
-import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
+import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, stampCard, stampNote, type NoteConflict, type ShardCache, type SyncConfig } from "./sync";
 
 export interface Settings {
   newPerDay: number;
@@ -559,8 +559,12 @@ export class Store {
             if (dr.length) { const set = new Set(dr); this.reviews = this.reviews.filter((r) => !set.has(r.id)); await db.deleteMany("reviews", dr); }
             if (dn.length) await db.deleteMany("notes", dn); if (dc.length) { await db.deleteMany("cards", dc); this.dropUndo(new Set(dc)); }
           }
-          if (got.notes) { const before = new Map(this.notes); pulledN = mergeNotes(this.notes, got.notes, this.tombstones); const changed = got.notes.filter((n) => this.notes.get(n.id) === n && before.get(n.id) !== n); await db.putMany("notes", changed); }
-          if (got.cards) { const changed: Card[] = []; for (const c of got.cards) { const l = this.cards.get(c.id); if ((this.tombstones["c:" + c.id] ?? -1) >= (c.mod ?? c.lastReview) || (this.tombstones["n:" + c.nid] ?? -1) >= (c.mod ?? c.lastReview)) continue; if (!l || (c.mod ?? c.lastReview) > (l.mod ?? l.lastReview)) changed.push(c); } pulledC = mergeCards(this.cards, got.cards, this.tombstones); await db.putMany("cards", changed); }
+          // Notes merge per field and tag; an edit made here since the last sync that lost to another device's is kept as a copy.
+          const revived: string[] = [];
+          if (got.notes) { const changed: Note[] = [], conflicts: NoteConflict[] = []; pulledN = mergeNotes(this.notes, got.notes, this.tombstones, { changed, revived, conflicts, since: await db.getMeta<number>("syncDoneAt", 0), from: remote.device || "another device" }); await db.putMany("notes", changed); if (conflicts.length) await this.keepConflicts(conflicts); }
+          // Cards: a note that came back (edited elsewhere after it was deleted here) brings its cards back too.
+          if (got.cards) { const changed: Card[] = []; pulledC = mergeCards(this.cards, got.cards, this.tombstones, { notes: this.notes, changed }); await db.putMany("cards", changed); }
+          if (revived.length) pulledC += await this.reviveCards(revived, gh, remote, got.files, progress);
           if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
           if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
             const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, theme: _th, sfx: _sf, autoplay: _ap, cardStyle: _cs, ...rest } = got.settings as any; // per-device fields stay local
@@ -613,7 +617,7 @@ export class Store {
         // Senders: Anki's folder (PC, linked) or this device's own library (the phone as the master copy).
         if (!drive && (dir || this.media.size)) { const more = await this.sendWanted(dir, wants, me, mediaIndex, mediaBlobs, progress); mediaIndex = more.index; if (more.left) this.scheduleSync(4000); }
         this.mediaWants = wants;
-        progress("Preparing upload"); const editsAtSnapshot = this.edits;
+        progress("Preparing upload"); const editsAtSnapshot = this.edits; const snapAt = stamp();
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
           notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, mastery: this.mastery, improve: this.improve, hooks: this.hooks,
@@ -629,7 +633,7 @@ export class Store {
           }
           const res = await gh.push(hashes, make, remote, this.settings.deviceName, progress, counts, mediaBlobs);
           if (!res.commit) await gh.releaseLock(); // nothing to push: the push did not make a commit, so remove the lock separately
-          await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); if (drive) { await db.setMeta("driveRev", (gh as DriveSync).rev() ?? ""); await db.setMeta("driveFullAt", Date.now()); } await db.setMeta("mediaIndex", mediaIndex); await db.setMeta("mediaWants", wants);
+          await db.setMeta("syncKnown", res.manifest.files); await db.setMeta("syncSeenAt", res.manifest.updatedAt); await db.setMeta("syncDoneAt", snapAt); if (drive) { await db.setMeta("driveRev", (gh as DriveSync).rev() ?? ""); await db.setMeta("driveFullAt", Date.now()); } await db.setMeta("mediaIndex", mediaIndex); await db.setMeta("mediaWants", wants);
           // Shared images missing here: fetch a batch now; the rest on the next sync.
           if (this.settings.mediaDownload && !drive) {
             const waiting = Object.entries(mediaIndex).filter(([name, v]) => v.p && !this.media.has(name)); const used = waiting.length ? this.mediaRefs() : null; const missing = waiting.filter(([name]) => used!.has(name)); let budget = MEDIA_BATCH_BYTES, done = 0; const got2: { name: string; blob: Blob }[] = [];
@@ -687,6 +691,39 @@ export class Store {
       if (this.syncAgain) { this.syncAgain = false; this.scheduleSync(1000); }
     }
   }
+  /** Notes brought back by an edit on another device after this device deleted them: put their cards back — from the deletion's undo
+   *  copy when it is still here, else from the repository's card files (the ones this sync didn't download). */
+  private async reviveCards(nids: string[], gh: GitHubSync | DriveSync, remote: { files: Record<string, string>; stored?: Record<string, string> } & Record<string, any>, pulled: Record<string, string>, progress: (m: string) => void): Promise<number> {
+    const have = new Set<string>(); for (const c of this.cards.values()) have.add(c.nid);
+    let need = new Set(nids.filter((id) => this.notes.has(id) && !have.has(id))); if (!need.size) return 0;
+    const back: Card[] = [];
+    for (const c of this.lastDeleted?.cards ?? []) if (need.has(c.nid) && !this.cards.has(c.id)) { this.cards.set(c.id, c); back.push(c); }
+    for (const c of back) need.delete(c.nid);
+    if (need.size) {
+      progress("Bringing back the cards of a note edited on another device");
+      const files: Record<string, string> = {}; for (const [p, h] of Object.entries(remote.files)) if (p.startsWith("cards/") && !(p in pulled)) files[p] = h;
+      const more = await gh.pullChanged({ ...(remote as any), files }, {}, progress);
+      const mine = (more.cards ?? []).filter((c) => need.has(c.nid));
+      mergeCards(this.cards, mine, this.tombstones, { notes: this.notes, changed: back });
+    }
+    if (back.length) { await db.putMany("cards", back); this.treeCache.clear(); this.dueByDay = null; }
+    return back.length;
+  }
+  /** Edits replaced by a newer edit of the same field on another device (newest first, at most 100). Settings → Sync shows them. */
+  editConflicts: NoteConflict[] = [];
+  private async keepConflicts(list: NoteConflict[]) {
+    this.editConflicts = [...list.reverse(), ...this.editConflicts].slice(0, 100); await db.setMeta("editConflicts", this.editConflicts);
+    const t = (c: NoteConflict) => { const n = this.notes.get(c.nid); return n ? `"${noteTitle(n).slice(0, 40)}"` : "a card"; };
+    this.log(true, list.length === 1 ? `1 edit of ${t(list[0])} from ${list[0].lostOn} was replaced by ${list[0].keptOn}'s newer edit; a copy is kept under Replaced edits` : `${list.length} edits were replaced by newer edits from another device; copies are kept under Replaced edits`, 0);
+  }
+  /** Put a replaced edit back (it becomes the newest edit and syncs as one). */
+  async useConflict(i: number) {
+    const c = this.editConflicts[i]; const n = c && this.notes.get(c.nid); if (!n) return false;
+    const fields = n.fields.slice(); if (c.field >= fields.length) return false; fields[c.field] = c.lost;
+    await this.updateNote(n.id, fields, n.tags.filter((t) => !t.startsWith("auto::")));
+    await this.dismissConflict(i); return true;
+  }
+  async dismissConflict(i: number) { this.editConflicts = this.editConflicts.filter((_, k) => k !== i); await db.setMeta("editConflicts", this.editConflicts); this.bump(); }
   /** Forget the known remote hashes and the shard cache so the next sync compares everything again. */
   async resetSyncState() { await db.setMeta("syncKnown", {}); await db.setMeta("syncSeenAt", 0); await db.setMeta("shardCache", []); this.shardCache.clear(); this.dirty = true; await db.setMeta("syncDirty", true); }
   /** Compact the repository's history now (Settings). */
@@ -794,6 +831,7 @@ export class Store {
     this.cards = cards;
     if (orphans) this.loadNotes.push(`${orphans} cards without a note were ignored`);
     if (repaired) this.loadNotes.push(`${repaired} cards had invalid scheduling values and were repaired`);
+    { const withCards = new Set<string>(); for (const c of cards.values()) withCards.add(c.nid); let empty = 0; for (const id of this.notes.keys()) if (!withCards.has(id)) empty++; if (empty) this.loadNotes.push(`${empty} notes have no cards (nothing to study; Library can delete them)`); }
     this.reviews = snap.reviews.filter((r) => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts); mark("maps");
     // Media (tens of thousands of files) is read after the screen is up, a chunk at a time; see loadMedia.
     // The small records are read together rather than one after another.
@@ -803,6 +841,7 @@ export class Store {
       db.getMeta<Record<string, string>>("gcache", {}), db.getMeta<string[]>("dismissedPairs", []), db.getMeta<typeof this.inbox>("inbox", []), db.getMeta<typeof this.undoStack>("undoStack", []),
       db.getMeta<typeof this.hooks>("hooks", {}), db.getMeta<typeof this.improve>("improve", {}), db.getMeta<typeof this.mastery>("mastery", { log: [], kept: {} }), db.getMeta<typeof this.packLog>("packLog", []), db.getMeta<typeof this.mergeLog>("mergeLog2", []),
     ]);
+    this.editConflicts = await db.getMeta<NoteConflict[]>("editConflicts", []);
     this.captures = await db.getMeta<Capture[]>("captures", []); this.reminders = { ...this.reminders, ...(await db.getMeta<any>("reminders", {})) };
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden" && this.reminders.on) this.updateNudge(); });
     this.tombstones = tombstones; this.dirty = dirty; this.syncLog = syncLog; this.driveIndex = driveIndex;
@@ -1166,7 +1205,7 @@ export class Store {
   }
   private outboxBusy = false;
   /** Delete notes with all their cards (synced; later Anki imports don't bring them back). Returns the last deletion for undo. */
-  lastDeleted: { notes: Note[]; cards: Card[] } | null = null;
+  lastDeleted: { notes: Note[]; cards: Card[]; undo?: { reviewId: string; card: Card }[] } | null = null;
   /** note id → its cards, built once (cardsOfNote scans all cards; fine for one note, not for thousands). */
   private cardsByNote(): Map<string, Card[]> { const m = new Map<string, Card[]>(); for (const c of this.cards.values()) (m.get(c.nid) ?? m.set(c.nid, []).get(c.nid)!).push(c); return m; }
   /** Forget review-undo entries for cards that no longer exist (↶ must never resurrect a deleted card). */
@@ -1175,8 +1214,9 @@ export class Store {
     const now = stamp(); const notes: Note[] = [], cards: Card[] = []; const byNote = this.cardsByNote();
     for (const nid of new Set(nids)) { const n = this.notes.get(nid); if (!n) continue; notes.push(n); this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of byNote.get(nid) ?? []) { cards.push(c); this.cards.delete(c.id); } }
     if (!notes.length) return 0;
-    this.dropUndo(new Set(cards.map((c) => c.id)));
-    this.lastDeleted = { notes, cards };
+    const gone = new Set(cards.map((c) => c.id)); const undo = this.undoStack.filter((u) => gone.has(u.card.id)); // kept with the deletion: Undo puts them back
+    this.dropUndo(gone);
+    this.lastDeleted = { notes, cards, undo };
     await this.persist("deleting", (async () => { await db.deleteMany("notes", notes.map((n) => n.id)); await db.deleteMany("cards", cards.map((c) => c.id)); await db.setMeta("tombstones", this.tombstones); })());
     this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
   }
@@ -1184,7 +1224,9 @@ export class Store {
     const d = this.lastDeleted; if (!d) return 0; this.lastDeleted = null; const now = stamp();
     const notes = d.notes.map((n) => ({ ...n, modified: now })), cards = d.cards.map((c) => ({ ...c, mod: now }));
     for (const n of notes) { this.notes.set(n.id, n); delete this.tombstones["n:" + n.id]; } for (const c of cards) { this.cards.set(c.id, c); delete this.tombstones["c:" + c.id]; }
-    await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); })());
+    // The review undo entries the deletion set aside come back in their places (by review time), so ↶ still undoes that answer.
+    if (d.undo?.length) { const have = new Set(this.undoStack.map((u) => u.reviewId)); const ts = (u: { reviewId: string }) => Number(u.reviewId.slice(u.reviewId.lastIndexOf("-") + 1)) || 0; /* review ids are cardId-time */ this.undoStack = [...this.undoStack, ...d.undo.filter((u) => !have.has(u.reviewId))].sort((a, b) => ts(a) - ts(b)).slice(-20); }
+    await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); if (d.undo?.length) await db.setMeta("undoStack", this.undoStack); })());
     this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
   }
   // ---- Rolling Drive backups: one dated copy a day (server-side), 7 days + 4 weeks kept; restore brings back what's missing -------------
@@ -2115,7 +2157,9 @@ export class Store {
       if (action.suspended !== undefined) next.suspended = action.suspended;
       if (action.flag !== undefined) next.flag = action.flag;
       if (action.source) next.source = action.source;
-      this.cards.set(id, next); cards.push(next);
+      const parts: ("u" | "d")[] = []; if (action.suspended !== undefined || action.flag !== undefined) parts.push("u"); if (action.source) parts.push("d");
+      const out = parts.length ? stampCard(c, next, now, parts) : next;
+      this.cards.set(id, out); cards.push(out);
       if (action.addTag) { const n = this.notes.get(c.nid); if (n && !n.tags.includes(action.addTag)) { const nn = { ...n, tags: [...n.tags, action.addTag], modified: now }; this.notes.set(n.id, nn); notes.push(nn); } }
     }
     await this.persist("saving the bulk change", (async () => { await db.putMany("cards", cards); if (notes.length) await db.putMany("notes", notes); })());
@@ -2156,17 +2200,17 @@ export class Store {
     const n = this.notes.get(noteId); if (!n) return;
     const auto = n.tags.filter((t) => t.startsWith("auto::"));
     const t = stamp(); const fieldsChanged = fields.join("\x1f") !== n.fields.join("\x1f");
-    const next = { ...n, fields, tags: [...new Set([...userTags, ...auto])], modified: t, ...(fieldsChanged ? { edited: t } : {}) };
+    const next = stampNote(n, { ...n, fields, tags: [...new Set([...userTags, ...auto])], modified: t, ...(fieldsChanged ? { edited: t } : {}) }, t);
     this.notes.set(noteId, next); await this.persist("editing the card", db.putOne("notes", next)); this.bump(); this.touch();
   }
 
   async setSuspended(cardId: string, suspended: boolean) {
     const c = this.cards.get(cardId); if (!c) return;
-    const next = { ...c, suspended, mod: stamp() }; this.cards.set(cardId, next); await this.persist("suspending the card", db.putOne("cards", next)); this.bump(); this.touch();
+    const t = stamp(); const next = stampCard(c, { ...c, suspended }, t, ["u"]); this.cards.set(cardId, next); await this.persist("suspending the card", db.putOne("cards", next)); this.bump(); this.touch();
   }
   async setFlag(cardId: string, flag: number) {
     const c = this.cards.get(cardId); if (!c) return;
-    const next = { ...c, flag, mod: stamp() }; this.cards.set(cardId, next); await this.persist("flagging the card", db.putOne("cards", next)); this.bump(); this.touch();
+    const t = stamp(); const next = stampCard(c, { ...c, flag }, t, ["u"]); this.cards.set(cardId, next); await this.persist("flagging the card", db.putOne("cards", next)); this.bump(); this.touch();
   }
 
   stats(now = Date.now()): Stats {

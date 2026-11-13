@@ -29,7 +29,13 @@ export interface Note {
   ankiMod?: number;
   /** Last time the user edited the fields in Yuzu (ms). */
   edited?: number;
+  /** Part stamps for sync (lib/sync.ts mergeNotes): per field [time, hash of the text it stamps], and per user tag
+   *  +time (added) / −time (removed). A stamp whose hash no longer matches was overtaken by a change made elsewhere. */
+  pm?: { f?: PartStamp[]; t?: Record<string, number> };
 }
+
+/** [time of the change (ms), short hash of the value it set]. */
+export type PartStamp = [number, string];
 
 export interface Card {
   id: string;
@@ -48,6 +54,9 @@ export interface Card {
   created: number;
   mod: number;           // ms, last change of any kind (review, suspend, flag); used by sync
   source: string;        // original deck path, kept for reference ("Medicine::EKG")
+  /** Part stamps for sync (lib/sync.ts mergeCards): s = scheduling, u = suspended/flag, d = deck (source), so a suspend on one
+   *  device and a review on another both survive. Optional: cards without it merge whole by `mod`, as before. */
+  pm?: { s?: PartStamp; u?: PartStamp; d?: PartStamp };
 }
 
 export interface Review {
