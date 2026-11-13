@@ -19,7 +19,7 @@ function focusables(): HTMLElement[] {
 function move(dir: 1 | -1) {
   const list = focusables(); if (!list.length) return;
   const cur = document.activeElement as HTMLElement | null; let i = cur ? list.indexOf(cur) : -1;
-  i = i < 0 ? (dir > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, i + dir));
+  i = i < 0 ? (dir > 0 ? 0 : list.length - 1) : (i + dir + list.length) % list.length; // wraps at either end
   const el = list[i]; lastFocus?.classList.remove("pad-focus"); el.classList.add("pad-focus"); lastFocus = el;
   try { (el as any).focus({ focusVisible: true, preventScroll: true }); } catch { el.focus(); }
   el.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -54,7 +54,11 @@ export function startGamepad() {
   const go = () => { if (!running) { running = true; prev = []; requestAnimationFrame(loop); } };
   window.addEventListener("gamepadconnected", go);
   if ([...(navigator.getGamepads?.() ?? [])].some(Boolean)) go();
-  document.addEventListener("pointerdown", () => { lastFocus?.classList.remove("pad-focus"); lastFocus = null; }, true);
+  const clear = () => { lastFocus?.classList.remove("pad-focus"); lastFocus = null; };
+  document.addEventListener("pointerdown", clear, true);
+  // the pad ring goes as soon as focus moves some other way (Tab, a click, a sheet opening), so only one place looks focused
+  document.addEventListener("keydown", (e) => { if (e.isTrusted && e.key === "Tab") clear(); }, true);
+  document.addEventListener("focusin", (e) => { if (lastFocus && e.target !== lastFocus) clear(); }, true);
 }
 /** For tests: act as if a pad button was pressed. */
 export const padPress = press;

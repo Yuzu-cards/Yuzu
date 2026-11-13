@@ -367,7 +367,7 @@ details.how code { font-size: 12px; background: var(--ink-2); padding: 0 4px; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .bar i { background: var(--yuzu); }
 :root:is([data-ui="clean"], [data-ui="paper"]) .forecast i { background: var(--ink-3); border-radius: 4px 4px 0 0 !important; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .forecast .today i { background: var(--accent); }
-:root:is([data-ui="clean"], [data-ui="paper"]) :is(.stack::before, .paper::before) { background: var(--spine, var(--orange)); border-radius: var(--r) 0 0 var(--r); width: 5px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .stack::before, :root:is([data-ui="clean"], [data-ui="paper"]) .paper::before { background: var(--spine, var(--orange)); border-radius: var(--r) 0 0 var(--r); width: 5px; border-right: 0; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .paper { padding-left: 22px; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .paper-under { display: none; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .tabs { border-top-width: 1px; box-shadow: none; }

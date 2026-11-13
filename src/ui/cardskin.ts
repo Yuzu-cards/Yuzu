@@ -4,7 +4,7 @@
 // shadow root after the deck CSS; "Deck's own look" in Settings turns it off.
 export const SKIN_CSS = `
 :host { --c-ink: #1b1710; --c-ink-2: #4a4234; --accent: #c2510b; --accent-soft: rgba(232,98,12,.14); --rule: rgba(27,23,16,.22); --tint: rgba(27,23,16,.05); }
-.night_mode, .nightMode { --c-ink: #f1e8d6; --c-ink-2: #c9bba0; --accent: #ffa25a; --accent-soft: rgba(255,140,60,.16); --rule: rgba(255,255,255,.2); --tint: rgba(255,255,255,.05); }
+.night_mode, .nightMode { --c-ink: #f1e8d6; --c-ink-2: #dcd1bb; --accent: #ffa25a; --accent-soft: rgba(255,140,60,.16); --rule: rgba(255,255,255,.2); --tint: rgba(255,255,255,.05); }
 .card, .card.night_mode, .night_mode .card {
   font-family: var(--sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif) !important;
   font-size: 19px !important; line-height: 1.55 !important; color: var(--c-ink) !important; background: transparent !important;

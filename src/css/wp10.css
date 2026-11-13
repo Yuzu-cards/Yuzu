@@ -1,0 +1,92 @@
+/* WP10 — visual design system: focus that survives the notches, contrast, small pixel labels, tap targets. */
+
+/* ---- Focus colour, one token per interface (08-1, 07-13, 08-8): yellow on dark, ink on Paper; never orange on orange */
+:root { --focus: var(--yuzu); }
+:root[data-ui="paper"] { --focus: #15182A; }
+.pad-focus, :focus-visible { outline-color: var(--focus) !important; }
+/* Arcade clips every notched control with clip-path, which also cuts away an outline drawn outside it, and controls
+   inside a scrolling strip (.seg, sheets) lose it to overflow. Draw the ring inside instead: the border turns yellow and
+   an inner yellow band with a dark line inside it keeps it visible on an orange (primary/selected) fill too. */
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.btn, .chip, .stack, .card-box, .hero, .answer-bar button, .field input, .field select, .typeans, .sheet textarea, .seg button, .kit-item, .mcq-opt, .themes button, .kit-date input[type=text], .notch, .more-today > summary):is(:focus-visible, .pad-focus) {
+  outline: none !important; border-color: var(--focus) !important;
+  box-shadow: inset 0 0 0 3px var(--focus), inset 0 0 0 5px var(--ink) !important;
+}
+/* the suggested rating on a multiple-choice card: a ring inside the button (an outline is clipped in Arcade) */
+:root:not([data-ui="clean"]):not([data-ui="paper"]) .answer-bar button.suggest { outline: none; box-shadow: inset 0 0 0 3px var(--text), inset 0 -4px 0 color-mix(in srgb, currentColor 35%, #000); background: color-mix(in srgb, currentColor 16%, var(--ink-2)); }
+
+/* ---- Small running labels: the 5×7 pixel face at 10 px is the smallest text on screen; use the sans at 12–13 px
+   (Arcade keeps pixel type for headings, numbers and the 20 px answer labels) (08-15) */
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.seg button, .tab, .study-top .num, .stamp, .forecast > div > span:first-child, .recap-card .px, .recap-row b, .kit-cost b, .themes button, .hook-text .small, .kit-hint b, .kit-pull, .stat b small) {
+  font-family: var(--sans); -webkit-font-smoothing: auto; letter-spacing: 0;
+}
+:root:not([data-ui="clean"]):not([data-ui="paper"]) .seg button { font-size: 13px; line-height: 14px; font-weight: 600; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) .tab { font-size: 12px; line-height: 12px; font-weight: 600; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.study-top .num, .kit-cost b) { font-size: 13px; line-height: 14px; font-weight: 700; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.stamp, .recap-card .px, .recap-row b, .kit-hint b, .kit-pull, .hook-text .small) { font-size: 12px; line-height: 12px; font-weight: 700; letter-spacing: .02em; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.forecast > div > span:first-child, .themes button, .stat b small) { font-size: 12px; line-height: 12px; font-weight: 600; }
+
+/* ---- The card's state stamp: dark ink on the card (light ink on a dark card), the system colour stays in the frame
+   and tint, so it reads at ≥4.5:1 on every spine colour and theme (08-14, 08-15) */
+.stamp { color: var(--paper-ink); border-color: var(--spine, var(--orange)); background: color-mix(in srgb, var(--spine, var(--orange)) 12%, transparent); }
+.paper.slate .stamp { color: var(--text); }
+/* the card waiting underneath a dark card is dark too (Night kept a cream strip under the blue card) (08-14) */
+.paper-stage:has(> .paper.slate) > .paper-under { background: var(--ink-3); border-color: var(--line); }
+
+/* ---- Secondary (muted) text on the light card uses the card's ink, not the dark interface's grey (2.2:1 before) (08-8) */
+.paper:not(.slate) .muted { color: color-mix(in srgb, var(--paper-ink) 78%, var(--paper)); }
+
+/* ---- Game Boy: secondary text and chips at ≥4.5:1 (08-14) */
+:root[data-theme="gameboy"] { --muted: #bad27a; --clay: #ff9a5a; }
+:root[data-theme="gameboy"] .themes button.on { color: var(--text); }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .kit-hint b { color: var(--paper-ink); }
+/* Game Boy right/wrong options: shape and a light fill, not a green tint on green */
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .mcq-opt.right { border: 3px solid var(--paper-ink); background: #e0f0a0; color: #0f380f; }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .mcq-opt.wrong { border: 3px dashed var(--paper-ink); background: color-mix(in srgb, var(--paper-ink) 18%, var(--paper-2)); }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .slate .mcq-opt.right { border-color: #e0f0a0; background: color-mix(in srgb, #e0f0a0 22%, var(--ink-3)); color: var(--text); }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .slate .mcq-opt.wrong { border-color: var(--clay); background: color-mix(in srgb, var(--clay) 18%, var(--ink-3)); }
+
+/* ---- Paper contrast (08-8, 08-19) */
+:root[data-ui="paper"] :is(.tab.active, .recap-top .px, .themes button.on) { color: var(--orange-2); }
+:root[data-ui="paper"] :is(details.section > summary) { color: var(--orange-2); }
+:root[data-ui="paper"] .paper.slate { --text: #ECEEF7; --muted: #A7AEC6; --line: #383E57; --ink-3: #262A3D; --orange-2: #FFB566; }
+:root[data-ui="paper"] :is(.field input, .field select, .sheet textarea, .kit-date input[type=text]) { border-color: #828BA2; background: #FFFFFF; box-shadow: none; }
+:root[data-ui="paper"] .typeans { border-color: #828BA2; }
+:root[data-ui="paper"] .slate .typeans { border-color: #6B7290; }
+:root[data-ui="paper"][data-theme="gameboy"] { --accent: #3E7510; --accent-hi: #5A9426; --accent-lo: #2B5A06; --orange: #3E7510; --orange-2: #2B5A06; }
+:root[data-ui="paper"][data-theme="night"] { --accent: #2368BF; --accent-hi: #4A8DDB; --accent-lo: #1A4F91; --orange: #2368BF; --orange-2: #1D5AA3; }
+:root[data-ui="paper"]:is([data-theme="gameboy"], [data-theme="night"]) .btn.primary .muted { color: rgba(255,255,255,.85); }
+
+/* ---- Link-buttons look like buttons (08-17) */
+a.btn { color: inherit; text-decoration: none; }
+a.btn.primary { color: var(--on-accent); }
+
+/* ---- Flat interfaces: soft lift instead of hard black 8-bit offsets (08-18) */
+:root[data-ui="clean"] :is(.recap-card, .menu, .toast, .bulk-bar, .kit-snack, .kit-pull, .kit-hint) { box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+:root[data-ui="paper"] :is(.recap-card, .menu, .toast, .bulk-bar, .kit-snack, .kit-pull, .kit-hint) { box-shadow: 0 1px 2px rgba(21,24,42,.08), 0 4px 12px rgba(21,24,42,.08); }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.recap-card, .toast, .kit-snack, .kit-pull) { border-radius: var(--r) !important; }
+
+/* ---- Keyboard chips keep one box when a combo wraps (08-16) */
+kbd { display: inline-block; line-height: 1.35; max-width: 100%; }
+
+/* ---- Tap targets ≥44 px on touch screens; a mouse keeps the tighter 36 px (08-9, 01-17, 05-13, 03-17).
+   Arcade clips controls with clip-path, which also clips hit-testing, so the control itself grows (no ::after trick). */
+.seg { padding: 2px; }
+.seg button { min-height: 44px; }
+:is(button, a, label, select).chip { min-height: 44px; }
+button.chip { min-width: 44px; justify-content: center; }
+.crumbs button { min-height: 44px !important; } /* Library sets 32 inline */
+.coach-x { width: 44px; }
+.drag-handle { width: 44px; }
+label.row:has(> input[type=checkbox]), label.row:has(> input[type=radio]) { min-height: 44px; }
+label.row > input:is([type=checkbox], [type=radio]) { width: 20px; height: 20px; flex: none; margin: 0 2px; }
+details.section > summary { min-height: 44px; align-items: center; padding-top: 12px; padding-bottom: 12px; margin-top: 10px; margin-bottom: 0; }
+details.section > summary::after { top: 12px; }
+@media (hover: hover) and (pointer: fine) {
+  .seg button, :is(button, a, label, select).chip { min-height: 36px; }
+  .crumbs button { min-height: 36px !important; }
+  button.chip { min-width: 36px; }
+  label.row:has(> input[type=checkbox]), label.row:has(> input[type=radio]) { min-height: 32px; }
+  details.section > summary { min-height: 36px; padding-top: 8px; padding-bottom: 8px; }
+  details.section > summary::after { top: 8px; }
+}
+
