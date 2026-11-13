@@ -142,7 +142,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [rename, setRename] = useState<string | null>(null);
   const [classify, setClassify] = useState<"System" | "Specialty" | null>(null);
   const v = store.getVersion();
-  const similarCount = useMemo(() => store.similarPairs().length, [v]);
+  const similarCount = useMemo(() => store.similarPairs().length, [store.getDataVersion()]);
   const tree = store.tree(view === "smart" ? "decks" : view);
   const node = view === "smart" ? null : (findNode(tree, path) ?? tree);
   const crumbs = path ? path.split("::") : [];

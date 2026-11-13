@@ -52,9 +52,10 @@ export function YuzuGoal({ value, max, size = 150, center, sub }: { value: numbe
 type OnStudy = (path: string, view?: View, extra?: { only?: "all" | "due" | "new"; preset?: import("../lib/model").Card[]; title?: string; minutes?: number }) => void;
 type Filter = "flagged" | "improve" | "suspended" | "leech" | "overfilled";
 export function Today({ onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
-  const v = store.getVersion();
+  store.getVersion(); // redraws on display changes too (sync chip, a sheet to open), but the numbers below only on data changes
   const [tick, setTick] = useState(0);
-  const d = useMemo(() => derive(), [v, tick]);
+  const key = `${store.getDataVersion()}:${store.dayStart()}:${tick}:${Math.floor(Date.now() / 300000)}`; // and every 5 min: learning cards fall due
+  const d = useMemo(() => derived(key), [key]);
   // A learning step (or a review) falling due later today: one timer to the soonest, so "ready" and Study wake up by themselves.
   useEffect(() => { if (!d.nextDue) return; const t = setTimeout(() => setTick((x) => x + 1), Math.min(2 ** 31 - 1, Math.max(250, d.nextDue - Date.now() + 500))); return () => clearTimeout(t); }, [d.nextDue, tick]);
   useEffect(() => { const on = () => { if (document.visibilityState === "visible") setTick((x) => x + 1); }; document.addEventListener("visibilitychange", on); return () => document.removeEventListener("visibilitychange", on); }, []);
@@ -64,6 +65,10 @@ export function Today({ onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: {
 // The boss pool walks the collection, so its size is kept a minute per system (it changes slowly: stability ≥ 7 days).
 const bossCounts = new Map<string, { at: number; n: number }>();
 function bossCount(name: string, now: number) { const c = bossCounts.get(name); if (c && Math.abs(now - c.at) < 60000) return c.n; const n = bossPool(name, "systems").length; bossCounts.set(name, { at: now, n }); return n; }
+// Today's numbers survive leaving the screen (a study session, another tab): coming back with nothing changed costs nothing.
+let lastDerived: { key: string; d: ReturnType<typeof derive> } | null = null;
+function derived(key: string) { if (lastDerived?.key !== key) lastDerived = { key, d: derive() }; return lastDerived.d; }
+
 function derive() {
   const pins = store.settings.pins.map((p) => {
     const cards = store.cardsIn(p.path, p.view); const now = Date.now();
@@ -243,7 +248,7 @@ function Coach({ missed, weakest, bossReady, overdue, newLeft, onStudy, onBoss, 
   if (weakest) tips.push({ id: "weak", spine: systemColor(weakest.name), title: `${weakest.name} is slipping`, meta: `${Math.round(weakest.retention * 100)}% recalled this week over ${weakest.n} reviews — a focused session helps`, act: () => onStudy(weakest.name, "systems"), why: "Slipping|This system's recall this week is clearly below your target." });
   if (over >= 10 && onFilter) tips.push({ id: "over", spine: "var(--amber)", title: `${over.toLocaleString()} cards look overfilled`, meta: "Too much on one card — pick some and Claude splits them", act: () => onFilter("overfilled"), why: "Overfilled|Long answers or 6+ list items. One fact per card is recalled better (Wozniak's minimum-information rule)." });
   if (marked >= 5) tips.push({ id: "send", spine: "var(--sky)", title: `Send ${marked} cards to Claude`, meta: "Marked “needs improving” — get them back rewritten or split", act: async () => { const m = await sendImproveToClaude(); if (m) snackbar(m); }, why: "Improve|Claude rewrites them keeping your review history and pictures." });
-  if (!store.syncConfigured() && Date.now() - lastBackup > 30 * DAY && store.cards.size > 100) tips.push({ id: "backup", spine: "var(--line)", title: lastBackup ? "No backup in 30 days" : "No backup yet", meta: "Save one file with everything", act: () => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.json`; a.click(); try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } }, why: "Backup|Without sync, this device holds your only copy." });
+  if (!store.syncConfigured() && Date.now() - lastBackup > 30 * DAY && store.cards.size > 100) tips.push({ id: "backup", spine: "var(--line)", title: lastBackup ? "No backup in 30 days" : "No backup yet", meta: "Save one file with everything", act: async () => { snackbar("Preparing the backup file…"); const blob = await store.backupBlob(); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.json`; a.click(); try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } }, why: "Backup|Without sync, this device holds your only copy." });
   const shown = tips.filter((t) => !gone.includes(t.id)).slice(0, 4);
   if (!shown.length) return null;
   return (<>
