@@ -225,21 +225,76 @@ export function HoldRow({ onTap, onHold, className = "", children, ...rest }: { 
 }
 
 // ---------------------------------------------------------------- sliders
-/** A labelled slider (native range: touch, mouse, keyboard, screen readers). onChange while dragging; onCommit on release. */
-export function Slider({ label, value, min, max, step = 1, onChange, onCommit, format = (v) => String(v), sub, below, testId }: { label: string; value: number; min: number; max: number; step?: number; onChange?: (v: number) => void; onCommit?: (v: number) => unknown; format?: (v: number) => string; sub?: ReactNode; below?: (v: number) => ReactNode; testId?: string }) {
-  const [live, setLive] = useState(value);
+/**
+ * A labelled slider. The native range stays for the keyboard, gamepad and screen readers, but a finger or a pen only moves
+ * it by dragging the thumb sideways: a press on the track, or a swipe that turns out to be a scroll, changes nothing
+ * (a long Settings page is scrolled right across these). The − / + buttons step it with a deliberate tap. A mouse may
+ * still click the track. onChange while dragging; onCommit on release, followed by a snackbar with Undo (`undo={false}`
+ * where the commit can't be taken back that way).
+ */
+const THUMB = 22; // px, the thumb's width in styles.css (.px-range::-webkit-slider-thumb)
+export function Slider({ label, value, min, max, step = 1, onChange, onCommit, format = (v) => String(v), sub, below, testId, undo = true }: { label: string; value: number; min: number; max: number; step?: number; onChange?: (v: number) => void; onCommit?: (v: number) => unknown; format?: (v: number) => string; sub?: ReactNode; below?: (v: number) => ReactNode; testId?: string; undo?: boolean }) {
+  const [live, setLiveState] = useState(value); const liveRef = useRef(value);
+  const setLive = (v: number) => { liveRef.current = v; setLiveState(v); };
   useEffect(() => setLive(value), [value]);
+  const valueRef = useRef(value); valueRef.current = value;
+  const input = useRef<HTMLInputElement>(null);
   const pct = ((live - min) / (max - min || 1)) * 100;
+  const dec = (String(step).split(".")[1] ?? "").length;
+  const snap = (v: number) => Number(Math.min(max, Math.max(min, min + Math.round((v - min) / step) * step)).toFixed(dec));
+  const geo = () => { const r = input.current!.getBoundingClientRect(); return { left: r.left + THUMB / 2, span: Math.max(1, r.width - THUMB) }; };
+  const atX = (x: number) => { const g = geo(); return snap(min + ((x - g.left) / g.span) * (max - min)); };
+  const thumbX = () => { const g = geo(); return g.left + ((liveRef.current - min) / (max - min || 1)) * g.span; };
+  const move = (v: number) => { if (v === liveRef.current) return; setLive(v); onChange?.(v); };
   // onCommit may answer false (or a promise of false) to refuse the change: the thumb goes back.
-  const commit = () => { if (onCommit && live !== value) Promise.resolve(onCommit(live)).then((ok) => { if (ok === false) setLive(value); }); };
+  const commit = () => {
+    clearTimeout(stepTimer.current); stepTimer.current = undefined;
+    const v = liveRef.current, prev = valueRef.current; if (!onCommit || v === prev) return;
+    Promise.resolve(onCommit(v)).then((ok) => {
+      if (ok === false) { setLive(valueRef.current); return; }
+      if (undo) snackbar(`${label}: ${format(v)}`, async () => { setLive(prev); await onCommit(prev); });
+    });
+  };
+  const stepTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const nudge = (dir: 1 | -1) => { move(snap(liveRef.current + dir * step)); clearTimeout(stepTimer.current); stepTimer.current = setTimeout(commit, 900); };
+  type Gesture = { id: number; x0: number; y0: number; off: number; drag: boolean };
+  const gest = useRef<Gesture | null>(null);
+  const end = (keep: boolean) => { const g = gest.current; gest.current = null; if (!g?.drag) return; if (keep) commit(); else setLive(valueRef.current); };
   return (
     <div className="kit-slider">
-      <div className="row" style={{ alignItems: "baseline", gap: 8 }}>
+      <div className="row" style={{ alignItems: "center", gap: 8 }}>
         <span className="grow"><span className="kit-slider-label">{label}</span>{sub && <span className="small muted" style={{ display: "block" }}>{sub}</span>}</span>
+        <button type="button" className="kit-step" tabIndex={-1} aria-label={`Less: ${label}`} disabled={live <= min} onClick={() => nudge(-1)}>−</button>
         <span className="kit-num" aria-hidden="true">{format(live)}</span>
+        <button type="button" className="kit-step" tabIndex={-1} aria-label={`More: ${label}`} disabled={live >= max} onClick={() => nudge(1)}>+</button>
       </div>
-      <input type="range" className="px-range" aria-label={label} aria-valuetext={format(live)} data-testid={testId} min={min} max={max} step={step} value={live} style={{ "--pct": `${pct}%` } as React.CSSProperties}
-        onChange={(e) => { const v = Number(e.target.value); setLive(v); onChange?.(v); }} onPointerUp={commit} onKeyUp={commit} onBlur={commit} onTouchEnd={commit} />
+      <div className="kit-range" data-testid={testId ? testId + "-box" : undefined}
+        onPointerDown={(e) => {
+          if (e.button != null && e.button !== 0) return; input.current?.focus({ preventScroll: true });
+          const off = e.clientX - thumbX();
+          if (e.pointerType === "mouse") { // a click is deliberate: jump there (or grab the thumb where it is) and drag
+            e.preventDefault(); e.currentTarget.setPointerCapture?.(e.pointerId);
+            gest.current = { id: e.pointerId, x0: e.clientX, y0: e.clientY, off: Math.abs(off) <= THUMB / 2 + 2 ? off : 0, drag: true }; move(atX(e.clientX - gest.current.off)); return;
+          }
+          // Touch and pen: only a press on the thumb itself (with a finger's margin) can become a drag.
+          gest.current = Math.abs(off) <= THUMB / 2 + 14 ? { id: e.pointerId, x0: e.clientX, y0: e.clientY, off, drag: false } : null;
+        }}
+        onPointerMove={(e) => {
+          const g = gest.current; if (!g || g.id !== e.pointerId) return;
+          const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
+          if (!g.drag) {
+            if (Math.abs(dy) > 8 && Math.abs(dy) >= Math.abs(dx)) { gest.current = null; return; } // a scroll, not a drag
+            if (Math.abs(dx) < 8) return;
+            g.drag = true; e.currentTarget.setPointerCapture?.(e.pointerId); buzz(6);
+          }
+          move(atX(e.clientX - g.off));
+        }}
+        onPointerUp={(e) => { if (gest.current?.id === e.pointerId) end(true); }}
+        onPointerCancel={(e) => { if (gest.current?.id === e.pointerId) end(false); }}
+        onLostPointerCapture={(e) => { if (gest.current?.id === e.pointerId) end(true); }}>
+        <input ref={input} type="range" className="px-range" aria-label={label} aria-valuetext={format(live)} data-testid={testId} min={min} max={max} step={step} value={live} style={{ "--pct": `${pct}%` } as React.CSSProperties}
+          onChange={(e) => move(Number(e.target.value))} onKeyUp={commit} onBlur={commit} />
+      </div>
       {below?.(live)}
     </div>
   );
@@ -306,7 +361,7 @@ export function PullToSync({ enabled, onSync }: { enabled: boolean; onSync: () =
     if (!enabled) return undefined;
     let y0: number | null = null, d = 0;
     const atTop = () => (document.scrollingElement?.scrollTop ?? window.scrollY) <= 0;
-    const start = (e: TouchEvent) => { if (!atTop() || document.body.style.overflow === "hidden") return; if ((e.target as Element | null)?.closest?.("[data-drag-handle], input[type=range], [role=dialog], .sheet")) return; y0 = e.touches[0].clientY; d = 0; };
+    const start = (e: TouchEvent) => { if (!atTop() || document.body.style.overflow === "hidden") return; if ((e.target as Element | null)?.closest?.("[data-drag-handle], input[type=range], .kit-range, [role=dialog], .sheet")) return; y0 = e.touches[0].clientY; d = 0; };
     const move = (e: TouchEvent) => { if (y0 == null) return; d = e.touches[0].clientY - y0; if (d <= 0 || !atTop()) { setPull(0); return; } setPull(Math.min(110, d * 0.5)); };
     const end = () => { if (y0 != null && d * 0.5 >= 70) { buzz(15); cb.current(); } y0 = null; d = 0; setPull(0); };
     window.addEventListener("touchstart", start, { passive: true }); window.addEventListener("touchmove", move, { passive: true }); window.addEventListener("touchend", end); window.addEventListener("touchcancel", end);
@@ -335,16 +390,18 @@ const dmyOf = (iso: string) => (/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso.slice(8
 const isoOf = (t0: string) => { const t = latinDigits(t0); const m = /^(\d{1,2})[\/.\-\s]?(\d{1,2})[\/.\-\s]?(\d{4})$/.exec(t.trim()) || /^(\d{2})(\d{2})(\d{4})$/.exec(t.trim()); if (!m) return null; const d = new Date(+m[3], +m[2] - 1, +m[1]); return d.getDate() === +m[1] && d.getMonth() === +m[2] - 1 ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : null; };
 /** A date typed as dd/mm/yyyy (or 03112026), with the phone's own calendar behind the 📅 button. Value is ISO yyyy-mm-dd or "". */
 export function DateField({ value, onChange, min, label, placeholder = "dd/mm/yyyy" }: { value: string; onChange: (iso: string) => void; min?: string; label?: string; placeholder?: string }) {
-  const [text, setText] = useState(dmyOf(value)); const [bad, setBad] = useState(false);
-  useEffect(() => { setText(dmyOf(value)); setBad(false); }, [value]);
+  const [text, setText] = useState(dmyOf(value)); const [bad, setBad] = useState<"" | "form" | "min">("");
+  useEffect(() => { setText(dmyOf(value)); setBad(""); }, [value]);
   const native = useRef<HTMLInputElement>(null);
-  const commit = () => { if (!text.trim()) { setBad(false); onChange(""); return; } const iso = isoOf(text); if (iso) { setBad(false); onChange(iso); } else setBad(true); };
+  // `min` is checked here too: the native picker's own min only guards the calendar, not what is typed.
+  const take = (iso: string) => { if (min && iso < min) { setBad("min"); return; } setBad(""); onChange(iso); };
+  const commit = () => { if (!text.trim()) { setBad(""); onChange(""); return; } const iso = isoOf(text); if (iso) take(iso); else setBad("form"); };
   return (
     <span className="kit-date">
-      <input type="text" aria-label={label ?? "Date (dd/mm/yyyy)"} inputMode="numeric" placeholder={placeholder} maxLength={10} value={text} aria-invalid={bad || undefined} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
+      <input type="text" aria-label={label ?? "Date (dd/mm/yyyy)"} inputMode="numeric" placeholder={placeholder} maxLength={10} value={text} aria-invalid={!!bad || undefined} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
       <button type="button" className="chip" aria-label="Choose from a calendar" onClick={() => { const n = native.current; if (!n) return; if ((n as any).showPicker) try { (n as any).showPicker(); return; } catch { /* falls through */ } n.click(); }}>📅</button>
-      <input ref={native} type="date" tabIndex={-1} aria-hidden="true" value={value} min={min} onChange={(e) => onChange(e.target.value)} style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
-      {bad && <span className="small" style={{ color: "var(--again)" }}>Use dd/mm/yyyy</span>}
+      <input ref={native} type="date" tabIndex={-1} aria-hidden="true" value={value} min={min} onChange={(e) => { if (e.target.value) { setText(dmyOf(e.target.value)); take(e.target.value); } else onChange(""); }} style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
+      {bad && <span className="small" role="alert" style={{ color: "var(--again)" }}>{bad === "min" && min ? `Must be on or after ${dmyOf(min)}` : "Use dd/mm/yyyy"}</span>}
     </span>
   );
 }

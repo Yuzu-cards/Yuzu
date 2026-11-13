@@ -1534,12 +1534,12 @@ export class Store {
       if (!force && last?.rev === rev) { await db.setMeta("backupAt", { day, rev }); return "Unchanged since the last backup"; }
       const lock = await sync.acquireLock(this.settings.deviceName || "device", await this.deviceId()); if (!lock.held) return `${lock.by ?? "Another device"} is syncing; backup later`;
       try { const r = await sync.snapshot(day, (t) => { this.backups = { ...this.backups, message: t }; this.uiBump(); }); await db.setMeta("backupAt", { day, rev: r?.rev ?? rev }); } finally { await sync.releaseLock(); }
-      await pruneBackups(this.gcache); this.backups.list = await listBackups(this.gcache);
+      await pruneBackups(this.gcache); this.backups.list = await listBackups(this.gcache); this.backups.at = new Date().toISOString();
       this.log(true, `Backup ${day}`, 0); return `Backed up (${day})`;
     } catch (e: any) { return "Backup failed: " + (e?.message ?? e); }
     finally { this.backups = { ...this.backups, busy: false, message: "" }; this.uiBump(); }
   }
-  async refreshBackups(): Promise<BackupInfo[]> { if (!tokenValid()) return this.backups.list; this.backups.list = await listBackups(this.gcache); this.uiBump(); return this.backups.list; }
+  async refreshBackups(): Promise<BackupInfo[]> { if (!tokenValid()) return this.backups.list; this.backups.list = await listBackups(this.gcache); this.backups.at = new Date().toISOString(); this.uiBump(); return this.backups.list; }
   /**
    * What putting a backup back would do (the counts the question before it shows; the same plan restoreBackup applies).
    * `missing` ("Bring back deleted"): notes, cards and reviews deleted since, except cards retired as mastered and merged duplicates
@@ -2536,6 +2536,7 @@ export class Store {
     const out: Card[] = [];
     for (const c of [...this.cards.values()]) {
       if (c.ord !== 0) continue; const n = this.notes.get(c.nid); if (!n || n.ntid !== ntid) continue;
+      if (!c.source.startsWith("Languages")) continue; // packs share note types ("Yuzu Basic") with medical cards: those never get a reverse
       const id = `${c.nid}-r${revOrd}`; const existing = this.cards.get(id);
       if (on) { if (existing) { if (existing.suspended) out.push({ ...existing, suspended: false, mod: now }); } else out.push({ id, nid: c.nid, ord: revOrd, state: "new", suspended: false, flag: 0, due: now, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: now, mod: now, source: c.source }); }
       else if (existing && !existing.suspended) out.push({ ...existing, suspended: true, mod: now });
