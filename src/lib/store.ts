@@ -1263,24 +1263,29 @@ export class Store {
   /** note id → its cards, built once (cardsOfNote scans all cards; fine for one note, not for thousands). */
   private cardsByNote(): Map<string, Card[]> { const m = new Map<string, Card[]>(); for (const c of this.cards.values()) (m.get(c.nid) ?? m.set(c.nid, []).get(c.nid)!).push(c); return m; }
   /** Forget review-undo entries for cards that no longer exist (↶ must never resurrect a deleted card). */
-  private dropUndo(cardIds: Set<string>) { if (this.undoStack.some((u) => cardIds.has(u.card.id))) { this.undoStack = this.undoStack.filter((u) => !cardIds.has(u.card.id)); db.setMeta("undoStack", this.undoStack).catch(() => {}); } }
+  private dropUndo(cardIds: Set<string>): { reviewId: string; card: Card }[] { const out = this.undoStack.filter((u) => cardIds.has(u.card.id)); if (out.length) { this.undoStack = this.undoStack.filter((u) => !cardIds.has(u.card.id)); db.setMeta("undoStack", this.undoStack).catch(() => {}); } return out; }
+  /** Put review-undo entries back (a deletion or retirement was undone), in the order their reviews were made. */
+  private restoreUndo(back: { reviewId: string; card: Card }[] | undefined) {
+    if (!back?.length) return; const have = new Set(this.undoStack.map((u) => u.reviewId)); const add = back.filter((u) => !have.has(u.reviewId)); if (!add.length) return;
+    const pos = new Map<string, number>(); for (let i = this.reviews.length - 1, k = 0; i >= 0 && k < 2000; i--, k++) pos.set(this.reviews[i].id, i); // the entries are recent: the tail is enough
+    this.undoStack = [...this.undoStack, ...add].filter((u) => pos.has(u.reviewId)).sort((a, b) => pos.get(a.reviewId)! - pos.get(b.reviewId)!).slice(-20);
+  }
   async deleteNotes(nids: string[]) {
     const now = stamp(); const notes: Note[] = [], cards: Card[] = []; const byNote = this.cardsByNote();
     for (const nid of new Set(nids)) { const n = this.notes.get(nid); if (!n) continue; notes.push(n); this.notes.delete(nid); this.tombstones["n:" + nid] = now; for (const c of byNote.get(nid) ?? []) { cards.push(c); this.cards.delete(c.id); } }
     if (!notes.length) return 0;
-    const gone = new Set(cards.map((c) => c.id)); const undo = this.undoStack.filter((u) => gone.has(u.card.id)); // kept with the deletion: Undo puts them back
-    this.dropUndo(gone);
+    const undo = this.dropUndo(new Set(cards.map((c) => c.id)));
     this.lastDeleted = { notes, cards, undo };
     await this.persist("deleting", (async () => { await db.deleteMany("notes", notes.map((n) => n.id)); await db.deleteMany("cards", cards.map((c) => c.id)); await db.setMeta("tombstones", this.tombstones); })());
     this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
   }
-  async undoDelete() {
-    const d = this.lastDeleted; if (!d) return 0; this.lastDeleted = null; const now = stamp();
+  /** Undo a deletion: the last one, or the one `deleteNotes` left in `lastDeleted` at the time (Study keeps its own). */
+  async undoDelete(which?: Store["lastDeleted"]) {
+    const d = which ?? this.lastDeleted; if (!d) return 0; if (this.lastDeleted === d) this.lastDeleted = null; if (d.notes.length && this.notes.has(d.notes[0].id)) return 0; const now = stamp();
     const notes = d.notes.map((n) => ({ ...n, modified: now })), cards = d.cards.map((c) => ({ ...c, mod: now }));
     for (const n of notes) { this.notes.set(n.id, n); delete this.tombstones["n:" + n.id]; } for (const c of cards) { this.cards.set(c.id, c); delete this.tombstones["c:" + c.id]; }
-    // The review undo entries the deletion set aside come back in their places (by review time), so ↶ still undoes that answer.
-    if (d.undo?.length) { const have = new Set(this.undoStack.map((u) => u.reviewId)); const ts = (u: { reviewId: string }) => Number(u.reviewId.slice(u.reviewId.lastIndexOf("-") + 1)) || 0; /* review ids are cardId-time */ this.undoStack = [...this.undoStack, ...d.undo.filter((u) => !have.has(u.reviewId))].sort((a, b) => ts(a) - ts(b)).slice(-20); }
-    await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); if (d.undo?.length) await db.setMeta("undoStack", this.undoStack); })());
+    this.restoreUndo(d.undo); // the review just before the deletion can be undone again
+    await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); await db.setMeta("undoStack", this.undoStack); })());
     this.treeCache.clear(); this.bump(); this.touch(); return notes.length;
   }
   // ---- Rolling Drive backups: one dated copy a day (server-side), 7 days + 4 weeks kept; restore brings back what's missing -------------
@@ -1504,23 +1509,36 @@ export class Store {
   /** Retire cards as mastered: log what they were, then delete them (the note goes when its last card goes). Synced. */
   async masterCards(ids: string[], by: "auto" | "you") {
     const now = stamp(); const entries: MasteredEntry[] = []; const delCards: string[] = [], delNotes: string[] = [];
-    const want = new Set(ids); const firstSeen = new Map<string, number>();
+    const want = new Set(ids); const firstSeen = new Map<string, number>(); const gone = new Map<string, Card>(), goneNotes = new Map<string, Note>();
     for (const r of this.reviews) if (want.has(r.cid) && !firstSeen.has(r.cid)) firstSeen.set(r.cid, r.ts);
     const left = new Map<string, number>(); for (const c of this.cards.values()) left.set(c.nid, (left.get(c.nid) ?? 0) + 1);
     for (const id of ids) {
       const c = this.cards.get(id); if (!c) continue; const n = this.notes.get(c.nid); const t = this.cardText(c);
       const first = firstSeen.get(id) ?? 0;
       entries.push({ id, nid: c.nid, deck: c.source, front: t.front, back: t.back, tags: (n?.tags ?? []).filter((x) => !x.startsWith("auto::")).slice(0, 12), reps: c.reps, lapses: c.lapses, firstReview: first, lastReview: c.lastReview, intervalDays: Math.round(this.intervalDays(c)), at: now, by });
-      this.cards.delete(id); this.tombstones["c:" + id] = now; delCards.push(id); left.set(c.nid, (left.get(c.nid) ?? 1) - 1);
-      if (n && (left.get(n.id) ?? 0) <= 0) { this.notes.delete(n.id); this.tombstones["n:" + n.id] = now; delNotes.push(n.id); }
+      gone.set(id, c); this.cards.delete(id); this.tombstones["c:" + id] = now; delCards.push(id); left.set(c.nid, (left.get(c.nid) ?? 1) - 1);
+      if (n && (left.get(n.id) ?? 0) <= 0) { goneNotes.set(n.id, n); this.notes.delete(n.id); this.tombstones["n:" + n.id] = now; delNotes.push(n.id); }
     }
     if (!entries.length) return 0;
-    this.dropUndo(new Set(delCards));
+    const undo = this.dropUndo(new Set(delCards));
+    this.lastMastered = { cards: delCards.map((id) => gone.get(id)!).filter(Boolean), notes: delNotes.map((id) => goneNotes.get(id)!).filter(Boolean), entries: entries.map((e) => e.id + ":" + e.at), undo };
     this.mastery = { ...this.mastery, log: [...this.mastery.log, ...entries] };
     await this.persist("retiring mastered cards", (async () => { await db.deleteMany("cards", delCards); if (delNotes.length) await db.deleteMany("notes", delNotes); await db.setMeta("tombstones", this.tombstones); await db.setMeta("mastery", this.mastery); })());
     this.treeCache.clear(); this.bump(); this.touch();
     this.pruneMedia().catch(() => {}); // free the pictures and sounds only these cards used
     return entries.length;
+  }
+  /** The last retirement, for Undo right after (Study's ↶): the cards and notes as they were, and which log entries it added. */
+  lastMastered: { cards: Card[]; notes: Note[]; entries: string[]; undo: { reviewId: string; card: Card }[] } | null = null;
+  /** Bring retired cards back (fresh `mod`, tombstones lifted) and take their entries out of the Mastered log. */
+  async undoMaster(which?: Store["lastMastered"]) {
+    const m = which ?? this.lastMastered; if (!m || !m.cards.length || this.cards.has(m.cards[0].id)) return 0; if (this.lastMastered === m) this.lastMastered = null; const now = stamp();
+    const notes = m.notes.map((n) => ({ ...n, modified: now })), cards = m.cards.map((c) => ({ ...c, mod: now })); const drop = new Set(m.entries);
+    for (const n of notes) { this.notes.set(n.id, n); delete this.tombstones["n:" + n.id]; } for (const c of cards) { this.cards.set(c.id, c); delete this.tombstones["c:" + c.id]; }
+    this.mastery = { ...this.mastery, log: this.mastery.log.filter((e) => !drop.has(e.id + ":" + e.at)) };
+    this.restoreUndo(m.undo);
+    await this.persist("bringing the card back", (async () => { if (notes.length) await db.putMany("notes", notes); await db.putMany("cards", cards); await db.setMeta("tombstones", this.tombstones); await db.setMeta("mastery", this.mastery); await db.setMeta("undoStack", this.undoStack); })());
+    this.treeCache.clear(); this.bump(); this.touch(); return cards.length;
   }
   /** How many cards automatic retirement would take at `years` (for the confirmation before changing the setting). */
   countBeyond(years: number) { const d = years * 365.25; let n = 0; for (const c of this.cards.values()) if (this.intervalDays(c) > d && !c.suspended && !this.mastery.kept[c.id]) n++; return n; }
@@ -2188,6 +2206,11 @@ export class Store {
     return out;
   }
 
+  /** Whether ↶ can still take back the last review (the card it would restore), without changing anything. */
+  canUndoLast(): string | null {
+    const last = this.reviews[this.reviews.length - 1]; const u = this.undoStack[this.undoStack.length - 1];
+    return last && u && u.reviewId === last.id && last.ts >= Date.now() - 10 * 60000 && this.cards.has(u.card.id) ? u.card.id : null;
+  }
   /** Undo the last review: restore the card (with a fresh `mod` so the undo wins on sync) and tombstone the review. */
   async undoLast(): Promise<Card | null> {
     const last = this.reviews[this.reviews.length - 1];

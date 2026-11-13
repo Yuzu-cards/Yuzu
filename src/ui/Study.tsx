@@ -271,7 +271,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const held = keysDown.current.has(e.key); keysDown.current.add(e.key);
-      if (!card || info || leech || improveOpen || improveFor || word) return;
+      if (info || leech || improveOpen || improveFor || word) return;
+      if (!card) { if (plan !== null && e.key === "z" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); } return; } // the done screen: ↶ the last answer
       // Typing in a text field (typed answer, my hook, a sheet's note) is typing, never a shortcut.
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) {
@@ -300,7 +301,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       if (e.key === "m") setMenu((m) => !m);
       if (e.key === "h" && !showAnswer) setHint(true);
       if (e.key === "r") playSounds(cardSounds(document.querySelector(".study .card-host")?.shadowRoot));
-      if (e.key === "z" && (e.ctrlKey || e.metaKey)) undo();
+      if (e.key === "z" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
       // Escape is handled by useBack (topmost overlay only), so an info sheet on top closes first.
     };
     const onUp = (e: KeyboardEvent) => { keysDown.current.delete(e.key); };
@@ -365,7 +366,9 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     const rNow = card.lastReview ? retrievability((Date.now() - card.lastReview) / DAY, card.stability) : 0;
     const sure = g === 1 && card.state === "review" && card.stability >= 21 && rNow >= 0.9;
     sfx.answer(g);
+    const view = snap();
     try { await store.answer(card.id, g, ms); } finally { busy.current = false; }
+    const undoAct: Act = { kind: "grade", cardId: card.id, view }; push(undoAct);
     if (before < store.settings.dailyGoal && before + 1 >= store.settings.dailyGoal) { setTimeout(() => sfx.goal(), 180); flash("Daily goal reached ★"); }
     setResults((r) => [...r, { id: card.id, g, ms, sure }]);
     if (store.lastMatured === card.id) { flash("Matured ★ — next review 3+ weeks away"); setTimeout(() => sfx.goal(), 120); }
@@ -373,27 +376,47 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) {
       const act = store.settings.leechAction ?? "claude"; const lapses = store.lastAnswer.lapses;
       if (act === "ask") setLeech({ cardId: card.id, lapses });
-      else if (act === "pause") { store.bulk([card.id], { suspended: true }); flash(`Forgotten ${lapses} times — paused (Library → Leeches)`); }
+      else if (act === "pause") { store.bulk([card.id], { suspended: true }); undoAct.unpause = true; flash(`Forgotten ${lapses} times — paused (Library → Leeches)`); }
       else flash(`Forgotten ${lapses} times — sent to Claude to rewrite`); // marked by the store
     }
     setIdx((i) => i + 1);
     buzz(g === 1 ? [30, 40, 30] : g === 4 ? [8, 30, 8] : 12); // a pattern per rating (switch off in Settings)
   }
+  // Undo, one session-wide list: whatever was done last (an answer, a pause, a flag, a delete, retiring a card, a bury)
+  // is what ↶ / Ctrl+Z / gamepad X takes back. Each entry keeps the queue as it was (the same card objects, so it's
+  // cheap) and where you were, so taking back an answer shows that card again and nothing graded after it is replayed.
+  type Snap = { queue: Card[]; idx: number; done: number; results: typeof results };
+  type Act = { kind: "grade" | "pause" | "flag" | "delete" | "master"; cardId: string; view?: Snap; flag?: number; unpause?: boolean; del?: typeof store.lastDeleted; master?: typeof store.lastMastered };
+  const acts = useRef<Act[]>([]); const [, setActsRev] = useState(0);
+  const snap = (): Snap => ({ queue, idx, done: doneCount, results });
+  const push = (a: Act) => { acts.current = [...acts.current.slice(-19), a]; setActsRev((n) => n + 1); };
+  const restore = (v?: Snap) => { if (!v) return; setQueue(v.queue); setIdx(v.idx); setDoneCount(v.done); setResults(v.results); };
+  const undoing = useRef(false);
   async function undo() {
-    const del = lastDel.current;
-    if (del && del.at === idx) { // the last thing done was deleting a card: bring it back in place
-      lastDel.current = null; await store.undoDelete();
-      setQueue((q) => [...q.slice(0, idx), del.card, ...q.slice(idx), ...del.removed]); flash("Card restored"); return; // its sibling cards come back too
-    }
-    const prev = await store.undoLast();
-    if (prev) {
-      // Show the undone card again, in place: it is still in the queue at idx-1 (or was inserted later as a lapse).
-      setQueue((q) => { const at = q.findIndex((c, i) => i < idx && c.id === prev.id); if (at >= 0) { const c = [...q]; c[at] = prev; return c; } return [prev, ...q.slice(idx)]; });
-      setIdx((i) => { const at = queue.findIndex((c, k) => k < i && c.id === prev.id); return at >= 0 ? at : 0; });
-      setDoneCount((d) => Math.max(0, d - 1)); setResults((r) => r.slice(0, -1)); flash("Undone");
-    } else flash("Nothing to undo");
+    if (undoing.current || busy.current) return; undoing.current = true;
+    try { await undoTop(); } finally { undoing.current = false; setActsRev((n) => n + 1); }
   }
-  const lastDel = useRef<{ card: Card; at: number; removed: Card[] } | null>(null);
+  async function undoTop() {
+    const a = acts.current[acts.current.length - 1];
+    if (!a) { // nothing done in this session (e.g. just reopened after a reload): the store may still hold the last answer
+      const id = store.canUndoLast(); let at = -1; if (id) for (let k = idx - 1; k >= 0; k--) if (queue[k].id === id) { at = k; break; } // its latest showing, not the first
+      const prev = at >= 0 ? await store.undoLast() : null;
+      if (!prev) { flash("Nothing to undo"); return; }
+      setQueue((q) => q.slice(0, at + 1).concat(q.slice(idx).filter((c) => c.id !== prev.id))); setIdx(at); // nothing handled after it comes back
+      setDoneCount((d) => Math.max(0, d - 1)); setResults((r) => r.slice(0, -1)); flash("Answer undone"); return;
+    }
+    acts.current = acts.current.slice(0, -1);
+    if (a.kind === "grade") {
+      if (store.canUndoLast() !== a.cardId) { flash("Too late to undo that answer"); return; }
+      if (a.unpause) await store.setSuspended(a.cardId, false);
+      await store.undoLast(); restore(a.view); flash("Answer undone"); return;
+    }
+    if (a.kind === "pause") { await store.setSuspended(a.cardId, false); restore(a.view); flash("Unpaused"); return; }
+    if (a.kind === "flag") { await store.setFlag(a.cardId, a.flag ?? 0); flash(a.flag ? "Flag put back" : "Flag removed"); return; }
+    if (a.kind === "delete") { const n = await store.undoDelete(a.del); if (n) { restore(a.view); flash("Card restored"); } else flash("Nothing to undo"); return; } // its sibling cards come back too
+    if (a.kind === "master") { const n = await store.undoMaster(a.master); if (n) { restore(a.view); flash("Brought back — no longer retired"); } else flash("Nothing to undo"); return; }
+  }
+  const canUndo = acts.current.length > 0 || !!store.canUndoLast();
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 1400); }
 
   // Swipe to rate (← Again · ↓ Hard · → Good · ↑ Easy); a swipe on the question shows the answer. A label follows the
@@ -472,11 +495,12 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     const slow = [...graded].sort((a, b) => b.ms - a.ms).slice(0, 3).filter((r) => r.ms > 15000);
     return (
       <div className="study">
-        <div className="study-top"><button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button><div className="grow" />{lastDel.current?.at === idx && <button className="icon-btn" onClick={undo} aria-label="Undo"><IconUndo /></button>}</div>
+        <div className="study-top"><button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button><div className="grow" />{acts.current.length > 0 && <button className="icon-btn" onClick={undo} aria-label="Undo" title="Undo (Ctrl+Z)"><IconUndo /></button>}</div>
         <div className="study-body">
           <div className="done">
             <div className="big">{doneCount}</div>
             <div>cards in {mins} min{results.length ? ` · ${Math.round((ok / results.length) * 100)}% recalled` : ""}</div>
+            {acts.current.length > 0 && <p className="small" style={{ margin: "8px 0 0" }}><button className="btn" onClick={undo}><IconUndo /> {{ grade: "Undo the last answer", pause: "Undo the pause", flag: "Undo the flag", delete: "Undo the delete", master: "Undo retiring it" }[acts.current[acts.current.length - 1].kind]}</button></p>}
             <p className="small muted tip">{TIPS[(doneCount + new Date().getDate()) % TIPS.length]}</p>
             {surprises.length > 0 && (
               <div className="card-box surprise" style={{ textAlign: "left", marginTop: 18 }} data-hint="Confident errors|Cards the scheduler was ≥90% sure you knew. Errors you were sure about are the ones you correct best — if you look again now (the hypercorrection effect).">
@@ -513,7 +537,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button>
         <div className="progress"><i style={{ width: `${total ? (idx / total) * 100 : 0}%` }} /></div>
         <span className="small muted num" style={{ minWidth: 64, textAlign: "right" }} title="cards left · minutes left">{total - idx} left · {Math.max(1, Math.round(((total - idx) * secs) / 60))}m</span>
-        <button className="icon-btn" onClick={undo} aria-label="Undo"><IconUndo /></button>
+        <button className="icon-btn" onClick={undo} aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!canUndo}><IconUndo /></button>
         <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
       </div>
       {improveOpen && <ImproveSheet nids={[card.nid]} onClose={() => setImproveOpen(false)} />}
@@ -530,11 +554,11 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
           <button role="menuitem" onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
           {voiceSupported() && <button role="menuitem" onClick={() => { setMenu(false); setHands((h) => !h); flash(hands ? "Hands-free off" : "Hands-free on — say again, hard, good or easy"); }}>{hands ? "Stop hands-free" : "Hands-free (read aloud, answer by voice)"}</button>}
           <button role="menuitem" onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
-          <button role="menuitem" onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
+          <button role="menuitem" onClick={() => { setMenu(false); push({ kind: "flag", cardId: card.id, flag: card.flag }); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
           <button role="menuitem" onClick={() => { setMenu(false); setImproveOpen(true); }}><IconEdit /> {store.improveFor(card.nid) ? "Marked to improve — change" : "Needs improving…"}</button>
-          <button role="menuitem" className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
-          <button role="menuitem" onClick={async () => { setMenu(false); if (!(await confirmSheet({ title: "Retire this card as mastered?", sub: "It is deleted and kept in the Mastered log (Progress).", yes: "I’ve mastered it", danger: false }))) return; await store.masterCards([card.id], "you"); setQueue((q) => q.filter((c, i) => i <= idx || c.id !== card.id)); flash("Retired as mastered"); setIdx((i) => i + 1); }}><IconFlag /> I've mastered this</button>
-          <button role="menuitem" className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!(await confirmSheet({ title: sibs > 1 ? `Delete this note and its ${sibs} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([card.nid]); lastDel.current = { card, at: idx + 1, removed: queue.filter((c, i) => i > idx && c.nid === card.nid) }; setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>
+          <button role="menuitem" className="danger" onClick={async () => { setMenu(false); const view = snap(); await store.setSuspended(card.id, true); push({ kind: "pause", cardId: card.id, view }); flash("Paused — ↶ to undo"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
+          <button role="menuitem" onClick={async () => { setMenu(false); if (!(await confirmSheet({ title: "Retire this card as mastered?", sub: "It is deleted and kept in the Mastered log (Progress).", yes: "I’ve mastered it", danger: false }))) return; const view = snap(); await store.masterCards([card.id], "you"); push({ kind: "master", cardId: card.id, view, master: store.lastMastered }); setQueue((q) => q.filter((c, i) => i <= idx || c.id !== card.id)); flash("Retired as mastered — ↶ to undo"); setIdx((i) => i + 1); }}><IconFlag /> I've mastered this</button>
+          <button role="menuitem" className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!(await confirmSheet({ title: sibs > 1 ? `Delete this note and its ${sibs} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; const view = snap(); await store.deleteNotes([card.nid]); push({ kind: "delete", cardId: card.id, view, del: store.lastDeleted }); setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>
         </div>
       </>)}
       <div className="study-meta">
@@ -589,7 +613,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "knowledge"); setLeech(null); flash("Marked: never really learned it"); }}>I never really learned it</button>
             <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "retrieval"); setLeech(null); flash("Marked: can't recall it"); }}>I know it but can't recall it</button>
             <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "confusion"); setLeech(null); flash("Added to the list for Claude"); }}>I mix it up with something similar</button>
-            <button className="btn danger block" onClick={async () => { await store.leechReason(leech.cardId, "suspend"); setLeech(null); flash("Suspended"); }}>Suspend it for now</button>
+            <button className="btn danger block" onClick={async () => { await store.leechReason(leech.cardId, "suspend"); push({ kind: "pause", cardId: leech.cardId }); setLeech(null); flash("Suspended — ↶ to undo"); }}>Suspend it for now</button>
           </div>
           <p className="small muted" style={{ marginBottom: 0 }}>Mix-ups are collected under Settings → Cards to improve; send them to Claude from there and you get contrast cards back.</p>
         </div></div>

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { store, Store } from "../lib/store";
 import { useBack } from "./useBack";
+import { snackbar } from "./kit";
 
 export function ImproveSheet({ nids, onClose }: { nids: string[]; onClose: () => void }) {
   useBack(true, onClose);
@@ -44,7 +45,7 @@ export function ImproveSection() {
             <li key={note.id} className="row" style={{ alignItems: "flex-start", gap: 8, padding: "6px 0", borderTop: "1px dashed var(--line)" }}>
               <span className="grow" style={{ minWidth: 0 }}><span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text(note.fields[0] ?? "").slice(0, 90) || "(no text)"}</span>
                 <span className="muted">{mark.r.map((k) => Store_REASON_SHORT[k] ?? k).join(" · ")}{mark.t ? ` — “${mark.t}”` : ""}</span></span>
-              <button className="chip" onClick={() => (mark.r[0] === "confusion" && !store.improveFor(note.id) ? store.clearImprove([note.id]) : store.markImprove([note.id], [], ""))}>Unmark</button>
+              <button className="chip" onClick={async () => { const prev = store.improveFor(note.id), tagOnly = mark.r[0] === "confusion" && !prev; await (tagOnly ? store.clearImprove([note.id]) : store.markImprove([note.id], [], "")); snackbar("Unmarked", async () => { if (prev) await store.markImprove([note.id], prev.r, prev.t); if (tagOnly) { const n = store.notes.get(note.id); if (n && !n.tags.includes("ask-claude")) await store.updateNote(n.id, n.fields, [...n.tags.filter((t) => !t.startsWith("auto::")), "ask-claude"]); } }); }}>Unmark</button>
             </li>))}
         </ul>
         {list.length > 8 && <button className="btn ghost block" style={{ marginTop: 6 }} onClick={() => setShowAll(!showAll)}>{showAll ? "Show fewer" : `Show all ${list.length}`}</button>}
