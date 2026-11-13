@@ -135,7 +135,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
             {store.mastery.log.length > 0 && <div className="stat" data-hint="Mastered|Cards retired because their next review was years away. Their details are in Progress → Mastered → Log."><b>{store.mastery.log.length.toLocaleString()}</b><span>mastered</span></div>}
             <div className="stat" data-hint="Learned|Cards in review: past their learning steps, with a real interval."><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
-          {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
+          {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input type="search" aria-label="Search all cards and tags" placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
           <Countdowns onStudy={onStudy} />
           <Coach missed={missed} weakest={weakest} bossReady={bossReady} overdue={overdue} onStudy={onStudy} onBoss={onBoss} onFilter={onFilter} onRecap={() => setRecap(true)} onTab={onTab} />
           <MoreForToday onStudy={onStudy} />

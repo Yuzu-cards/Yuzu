@@ -12,7 +12,7 @@ import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit 
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
-import { useHold, Slider, buzz, confirmSheet } from "./kit";
+import { useHold, Slider, buzz, confirmSheet, Sheet } from "./kit";
 import { WordSheet, wordAt, type WordHit } from "./Word";
 import { sfx } from "./sfx";
 import { SKIN_CSS, isShortCard } from "./cardskin";
@@ -168,7 +168,6 @@ function estimateSeconds(): number {
 }
 
 export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClose: () => void; onSaved: () => void; onTag?: (tag: string) => void }) {
-  useBack(true, onClose);
   const note = store.noteFor(card)!;
   const nt = store.notetypeFor(note)!;
   const [editing, setEditing] = useState(false);
@@ -179,9 +178,9 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
   const r = card.lastReview ? retrievability((now - card.lastReview) / DAY, card.stability) : null;
   const labels = ["", "Again", "Hard", "Good", "Easy"];
   return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="row" style={{ marginBottom: 8 }}><b className="grow">{editing ? "Edit card" : "Card info"}</b><button className="icon-btn" aria-label="Close info" onClick={onClose}><IconClose /></button></div>
+    <Sheet title={editing ? "Edit card" : "Card info"} closeLabel="Close info" onClose={onClose} discard="Discard your changes to this card?"
+      dirty={editing && (fields.join("\u0001") !== note.fields.join("\u0001") || tags !== note.tags.filter((t) => !t.startsWith("auto::")).join(" "))}>
+      <div>
         {!editing ? (
           <>
             <div className="stat-grid" style={{ marginTop: 0 }}>
@@ -211,7 +210,7 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
           </>
         )}
       </div>
-    </div>
+    </Sheet>
   );
 }
 
@@ -581,6 +580,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
 
   return (
     <div className="study" data-input={inputMode}>
+      <h1 className="sr-only">Studying {title ?? card.source.split("::").slice(-2).join(" › ")}, {total - idx} left</h1>
+      <div className="sr-only" aria-live="polite" data-testid="study-live">{showAnswer ? (mcq && picked !== null ? (mcqRight ? "Correct. Good is suggested. " : "Not quite. Again is suggested. ") : "") + "Answer shown" : ""}</div>
       <div className="study-top">
         <button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button>
         <div className="progress"><i style={{ width: `${total ? (idx / total) * 100 : 0}%` }} /></div>
@@ -658,8 +659,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       {improveFor && <ImproveSheet nids={[improveFor]} onClose={() => setImproveFor(null)} />}
       {info && <CardInfo card={card} onClose={() => setInfo(false)} onSaved={() => { setRev((r) => r + 1); flash("Saved"); }} onTag={onBrowseTag ? (t) => { setInfo(false); onBrowseTag(t); } : undefined} />}
       {leech && (
-        <div className="sheet-backdrop" onClick={() => setLeech(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-          <b>This card keeps slipping</b>
+        <Sheet title="This card keeps slipping" onClose={() => setLeech(null)}>
           <p className="small muted" style={{ marginTop: 4 }}>{leech.lapses} times forgotten after learning it. Why, this time?</p>
           <div style={{ display: "grid", gap: 8 }}>
             <button className="btn block" onClick={async () => { await store.leechReason(leech.cardId, "knowledge"); setLeech(null); flash("Marked: never really learned it"); }}>I never really learned it</button>
@@ -668,7 +668,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             <button className="btn danger block" onClick={async () => { await store.leechReason(leech.cardId, "suspend"); push({ kind: "pause", cardId: leech.cardId }); setLeech(null); flash("Suspended — ↶ to undo"); }}>Suspend it for now</button>
           </div>
           <p className="small muted" style={{ marginBottom: 0 }}>Mix-ups are collected under Settings → Cards to improve; send them to Claude from there and you get contrast cards back.</p>
-        </div></div>
+        </Sheet>
       )}
       {toast && <div className="toast">{toast}</div>}
     </div>

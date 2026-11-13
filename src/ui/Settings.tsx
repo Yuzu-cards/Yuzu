@@ -159,10 +159,10 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <div className="row" style={{ gap: 8, margin: "0 0 4px" }}><span className="small grow">Text size</span></div>
           <div className="seg" role="radiogroup" aria-label="Text size">{([["small", "Small"], ["normal", "Normal"], ["large", "Large"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={size === k} className={size === k ? "on" : ""} onClick={() => { setTextSize(k); setSizeState(k); }}>{l}</button>)}</div>
           <div className="row" style={{ gap: 8, margin: "4px 0 4px" }}><span className="small grow">Colours</span></div>
-          <div className="themes">{THEMES.map((t) => <button key={t.id} className={s.theme === t.id ? "on" : ""} onClick={() => { store.saveSettings({ theme: t.id }); sfx.tap(); }}><span className="sw">{t.sw.map((c) => <i key={c} style={{ background: c }} />)}</span>{t.name}</button>)}</div>
+          <div className="themes">{THEMES.map((t) => <button key={t.id} className={s.theme === t.id ? "on" : ""} aria-pressed={s.theme === t.id} onClick={() => { store.saveSettings({ theme: t.id }); sfx.tap(); }}><span className="sw">{t.sw.map((c) => <i key={c} style={{ background: c }} />)}</span>{t.name}</button>)}</div>
           <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={s.sfx} onChange={(e) => { store.saveSettings({ sfx: e.target.checked }); if (e.target.checked) setTimeout(() => sfx.answer(3), 50); }} /> Sound effects (short 8-bit blips on answers, goal and boss fights)</label>
           <div className="row" style={{ marginTop: 12, gap: 8 }}><span className="small grow">Card look</span>
-            <div className="seg">{(["yuzu", "deck"] as const).map((v) => <button key={v} className={s.cardStyle === v ? "on" : ""} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div></div>
+            <div className="seg">{(["yuzu", "deck"] as const).map((v) => <button key={v} className={s.cardStyle === v ? "on" : ""} aria-pressed={s.cardStyle === v} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div></div>
           <p className="small muted" style={{ margin: "6px 0 0" }}>Yuzu gives every deck the same calm type, orange cloze answers and tidy extras; the deck's own look shows each Anki deck as it was designed.</p>
           <DeviceToggles />
         </div>
@@ -493,7 +493,7 @@ function DeviceToggles() {
   return (<>
     <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={h} onChange={(e) => { setH(e.target.checked); set("yuzu-haptics", e.target.checked); if (e.target.checked) navigator.vibrate?.(12); }} /> Vibration (Android): ratings, holds, drags</label>
     <div className="field" style={{ marginTop: 12 }}><label>Holding a word on a card</label>
-      <div className="seg">{(["yuzu", "system"] as const).map((k) => <button key={k} className={hold === k ? "on" : ""} onClick={() => { setHold(k); try { localStorage.setItem("yuzu-hold", k); } catch { /* fine */ } }}>{k === "yuzu" ? "Yuzu" : "System"}</button>)}</div>
+      <div className="seg">{(["yuzu", "system"] as const).map((k) => <button key={k} className={hold === k ? "on" : ""} aria-pressed={hold === k} onClick={() => { setHold(k); try { localStorage.setItem("yuzu-hold", k); } catch { /* fine */ } }}>{k === "yuzu" ? "Yuzu" : "System"}</button>)}</div>
       <span className="small muted">{hold === "yuzu" ? "Yuzu looks the word up: find it in your other cards, translate or define it, copy, share, or hand it to the phone's own menu." : "The phone's own selection and translator take over, like in any app. The ⋯ button at the top has the card menu."}</span>
     </div>
     <label className="row small" style={{ margin: "8px 0 0" }}><input type="checkbox" checked={fx} onChange={(e) => { setFx(e.target.checked); set("yuzu-effects", e.target.checked); document.documentElement.dataset.effects = e.target.checked ? "on" : "off"; }} /> Animations and effects (card fly-off, sheets sliding)</label>

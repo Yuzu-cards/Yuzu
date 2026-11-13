@@ -2,8 +2,7 @@
 // and each applied fix keeps its own Undo in the sheet.
 import { useMemo, useState } from "react";
 import { store } from "../lib/store";
-import { IconClose } from "./icons";
-import { snackbar } from "./kit";
+import { Sheet, snackbar } from "./kit";
 
 export function DiagnoseSheet({ onClose }: { onClose: () => void }) {
   store.getVersion(); const [busy, setBusy] = useState<string | null>(null); const [done, setDone] = useState<string[]>([]);
@@ -26,8 +25,7 @@ export function DiagnoseSheet({ onClose }: { onClose: () => void }) {
   const d = useMemo(() => store.diagnose(), [store.getVersion()]);
   const shown = d.causes.filter((c) => !done.includes(c.id));
   return (
-    <div className="sheet-backdrop" onClick={onClose}><div className="sheet" role="dialog" aria-label="Why so many reviews" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "92vh", overflow: "auto" }}>
-      <div className="row"><b className="grow">Why so many reviews?</b><button className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button></div>
+    <Sheet title="Why so many reviews?" label="Why so many reviews" onClose={onClose} style={{ maxHeight: "92vh", overflow: "auto" }}>
       <p className="small muted" style={{ marginTop: 4 }}>About <b>{Math.round(d.perDay).toLocaleString()}</b> review{Math.round(d.perDay) === 1 ? "" : "s"} a day over the last 30 days; <b>{d.dueToday.toLocaleString()}</b> due today. What's driving it, biggest first, worked out from your own reviews. Nothing changes until you tap a fix, and every fix you apply here can be undone below it.</p>
       {applied.map((a) => (
         <div key={a.id} className="card-box diag applied" style={{ marginTop: 8 }}>
@@ -43,6 +41,6 @@ export function DiagnoseSheet({ onClose }: { onClose: () => void }) {
           {c.fix && <button className="btn" disabled={!!busy} onClick={() => apply(c)}>{busy === c.id ? "Working…" : c.fix.label}</button>}
         </div>
       ))}
-    </div></div>
+    </Sheet>
   );
 }
