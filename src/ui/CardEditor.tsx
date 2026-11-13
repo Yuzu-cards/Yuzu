@@ -76,7 +76,7 @@ export function CardEditor({ full = false, onClose }: { full?: boolean; onClose:
         {kind === "basic" && <>{field("Front", front, setFront, { area: true })}{field("Back", back, setBack, { area: true })}</>}
         {kind === "mcq" && <>
           {field("Question", question, setQuestion, { area: true, ph: "A 54-year-old man… What is the next step?" })}
-          <div className="field"><label>Options <span className="muted small">tap the circle of the right one</span></label>
+          <div className="field"><label>Options <span className="muted small">tap the letter of the right one</span></label>
             {opts.map((o, i) => <div key={i} style={{ marginBottom: 6 }}>
               <div className="row" style={{ gap: 6 }}><button className={"chip" + (right === i ? " orange" : "")} aria-label={`Option ${String.fromCharCode(65 + i)} is right`} aria-pressed={right === i} onClick={() => setRight(i)}>{right === i ? "✓" : String.fromCharCode(65 + i)}</button>
                 <input className="grow" style={{ minWidth: 0 }} aria-label={`Option ${String.fromCharCode(65 + i)}`} value={o.text} onChange={(e) => setOpts(opts.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))} />

@@ -147,7 +147,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     return out;
   }, [scopeCards, showCards, q, sort, only, store.getVersion()]);
   const filterCounts = useMemo(() => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0, overfilled: 0 }; const over = overSet(); const overN = new Set<string>(); const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); if (over.has(c.nid)) overN.add(c.nid); } k.overfilled = overN.size; k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }, [scopeCards, store.getVersion()]);
-  const list = useMemo(() => matches.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "suspended" : c.state }; }), [matches]);
+  const list = useMemo(() => matches.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "paused" : c.state }; }), [matches]);
 
   // Hooks first, always in the same order (the empty-library screen below returns early).
   const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
@@ -195,7 +195,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
       <div className="seg">
         {[...VIEWS, { id: "smart" as View, label: "Smart" }].map((x) => <button key={x.id} className={view === x.id ? "on" : ""} onClick={() => { setView(x.id); go(""); }}>{x.label}</button>)}
       </div>
-      {view !== "smart" && (
+      {view !== "smart" && path && ( /* 03-15: at the root the crumb would only repeat the title */
         <div className="crumbs">
           <button style={{ minWidth: 44, minHeight: 32 }} onClick={() => go("")}>All</button>
           {crumbs.map((c, i) => (<span key={i} className="row" style={{ gap: 4 }}><span className="muted">›</span><button onClick={() => go(crumbs.slice(0, i + 1).join("::"))}>{c}</button></span>))}
@@ -215,10 +215,10 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
       ) : (
         <>
           <div className="card-box">
-            <div className="row">
+            <div className="row lib-node-head">
               <div className="grow">
                 <div style={{ fontWeight: 700, fontSize: 18 }}>{title}</div>
-                <div className="small muted">{counts.total.toLocaleString()} cards · {counts.susp.toLocaleString()} suspended · {counts.studied.toLocaleString()} studied</div>
+                <div className="small muted">{counts.total.toLocaleString()} cards · {counts.susp.toLocaleString()} paused · {counts.studied.toLocaleString()} studied</div>
               </div>
               {view === "decks" && path && <button className="icon-btn" aria-label="Rename or move" title="Rename or move this category" onClick={() => setRename(path)}><IconEdit /></button>}
               <button className={"icon-btn" + (pinned ? " on" : "")} aria-label="Pin" onClick={() => store.saveSettings({ pins: pinned ? store.settings.pins.filter((p) => !(p.view === view && p.path === path)) : [...store.settings.pins, { view, path }] })}><IconPin /></button>
@@ -237,7 +237,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           </div>
           <div className="field"><input placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
           <div className="row" style={{ flexWrap: "wrap", gap: 6, margin: "-4px 0 10px" }}>
-            {([["flagged", "Flagged"], ["improve", "To improve"], ["overfilled", "Overfilled"], ["leech", "Leeches"], ["suspended", "Paused"]] as const).map(([k, label]) => (
+            {([["flagged", "Flagged"], ["improve", "To improve"], ["overfilled", "Overfilled"], ["leech", "Leeches"], ["suspended", "Paused"]] as const).filter(([k]) => filterCounts[k] > 0 || only === k).map(([k, label]) => (
               <button key={k} data-hint={FILTER_HINT[k]} className={"chip" + (only === k ? " orange" : "")} disabled={!filterCounts[k] && only !== k} onClick={() => setOnly(only === k ? null : k)}>{label} · {filterCounts[k].toLocaleString()}</button>))}
           </div>
           {!query && !only && node && node.children.length > 0 && (
@@ -259,11 +259,11 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
             const rows = [...by].sort((a, b) => b[1].total - a[1].total).slice(0, 12);
             return rows.length > 1 ? (<><h2>Where these cards live</h2>{rows.map(([k, e]) => <div key={k} className="tree-row"><span className="name" style={{ fontWeight: 500 }}>{k}</span><span className="counts">{e.due ? <span><b className="c-due">{e.due.toLocaleString()}</b> due</span> : null}<span><b>{e.total.toLocaleString()}</b> cards</span></span></div>)}</>) : null;
           })()}
-          {!query && !only && !showCards && <button className="btn ghost block" style={{ marginTop: 12 }} onClick={() => setShowCards(true)}>Show cards in {title}</button>}
+          {!query && !only && !showCards && <button className="btn ghost block" style={{ marginTop: 12 }} onClick={() => { setShowCards(true); setTimeout(() => document.getElementById("lib-cards")?.scrollIntoView({ block: "start", behavior: "smooth" }), 60); }}>Show cards in {title}</button>}
           {(showCards || query || only) && (
             <>
-              <div className="row" style={{ marginTop: 18 }}>
-                <h2 className="grow" style={{ margin: 0 }}>{matches.length.toLocaleString()} cards{matches.length > 300 ? ", first 300 shown" : ""}</h2>
+              <div className="row" id="lib-cards" style={{ marginTop: 18 }}>
+                <h2 className="grow list-head" style={{ margin: 0 }}>{matches.length.toLocaleString()} cards{matches.length > 300 ? " · 300 shown" : ""}</h2>
                 {matches.length > 0 && !selecting && <button className="chip orange" onClick={() => { const pool = only ? scopeCards.filter((c) => passes(c, only) && (!q || store.searchText(store.noteFor(c)!).includes(q))) : matches; onStudy(path, view, { preset: pool.filter((c) => only === "suspended" || !c.suspended).slice(0, 500), title: only ? { flagged: "Flagged cards", improve: "Cards to improve", leech: "Leeches", suspended: "Paused cards", overfilled: "Overfilled cards" }[only] : `“${query}”` }); }}><IconPlay /> Study these</button>}
                 <select className="chip" value={sort} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort"><option value="due">by due</option><option value="new">newest</option><option value="state">by state</option><option value="deck">by deck</option></select>
                 <button className="chip" onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}>{selecting ? "Cancel" : "Select"}</button>
@@ -281,18 +281,20 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
       )}
       {selecting && selected.size > 0 && (
         <div className="bulk-bar">
-          <span className="small">{selected.size} selected</span>
-          <button className="btn" onClick={() => doBulk({ suspended: true })}>Suspend</button>
-          <button className="btn" onClick={() => doBulk({ suspended: false })}>Unsuspend</button>
-          <button className="btn" onClick={() => doBulk({ flag: 1 })}>Flag</button>
-          <button className="btn" onClick={() => doBulk({ flag: 0 })}>Unflag</button>
-          <button className="btn" onClick={() => setTagTo("")}>Tag</button>
-          <button className="btn" onClick={() => setMoveTo("")}>Move</button>
-          <button className="btn" onClick={() => setClassify("System")}>System</button>
-          <button className="btn" onClick={() => setClassify("Specialty")}>Specialty</button>
+          <span className="small">{selected.size.toLocaleString()} selected</span>
           <button className="btn primary" onClick={() => { const cards = [...selected].map((id) => store.cards.get(id)!).filter(Boolean); setSelecting(false); setSelected(new Set()); onStudy(path, view, { preset: cards, title: `${cards.length} selected` }); }}>Study</button>
-          <button className="btn" onClick={() => setImproveFor([...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])])}>Needs improving</button>
-          <button className="btn danger" onClick={async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!(await confirmSheet({ title: `Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards?`, sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); }}>Delete</button>
+          <button className="btn" onClick={() => doBulk({ suspended: true })}>Pause</button>
+          <button className="btn" onClick={() => doBulk({ flag: 1 })}>Flag</button>
+          <button className="btn" onClick={() => setTagTo("")}>Tag</button>
+          <button className="btn" aria-haspopup="dialog" onClick={() => setSheet({ title: `${selected.size.toLocaleString()} selected`, items: [ /* 03-12: the rest of the bulk actions, so the bar stays one row */
+            { label: "Unpause", onClick: () => doBulk({ suspended: false }) },
+            { label: "Unflag", onClick: () => doBulk({ flag: 0 }) },
+            { label: "Move to a category…", onClick: () => setMoveTo("") },
+            { label: "Set system…", onClick: () => setClassify("System") },
+            { label: "Set specialty…", onClick: () => setClassify("Specialty") },
+            { label: "Needs improving…", onClick: () => setImproveFor([...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]) },
+            { label: "Delete…", danger: true, onClick: async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!(await confirmSheet({ title: `Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards?`, sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); } },
+          ] })}>More…</button>
         </div>
       )}
       {deleted && deleted.n > 0 && store.lastDeleted === deleted.token && (

@@ -172,11 +172,11 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <Slider label="Max due cards per day" value={Math.min(s.maxReviewsPerDay, 1000)} min={0} max={1000} step={25} format={(v) => (v ? String(v) : "no limit")} onCommit={(v) => store.saveSettings({ maxReviewsPerDay: v })} sub="With a backlog, keeps each day to a size you'll actually finish. The rest waits; nothing is lost." />
         <div className="field"><label>Order of due cards</label>
           <select value={s.dueOrder} onChange={(e) => store.saveSettings({ dueOrder: e.target.value as any })}>
-            <option value="forgotten">Most forgotten first (lowest recall probability)</option>
-            <option value="rescue">Most likely remembered first (best for clearing a backlog)</option>
+            <option value="forgotten">Most forgotten first</option>
+            <option value="rescue">Most remembered first</option>
             <option value="due">By due date</option>
             <option value="shuffle">Shuffled</option>
-          </select><span className="small muted">Cards are also spread across systems so neighbours differ.</span></div>
+          </select><span className="small muted">{({ forgotten: "Lowest recall probability first. ", rescue: "Highest recall probability first — best for clearing a backlog. ", due: "Oldest due date first. ", shuffle: "In random order. " } as Record<string, string>)[s.dueOrder] ?? ""}Cards are also spread across systems so neighbours differ.</span></div>
         <RetentionSlider />
         <EasyDays />
         <div className="field"><label>Scheduler weights</label>
@@ -498,9 +498,9 @@ function EasyDays() {
       <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
         {order.map((d) => <button key={d} className={"chip" + (days[d] < 1 ? " orange" : "")} data-hint={`${names[d]}|Tap to cycle: normal → light (about half the reviews) → off (as few as the schedule allows).`} onClick={() => { const e = [...days]; e[d] = next(e[d]); store.saveSettings({ easyDays: e }); }}>{names[d]} · {days[d] >= 1 ? "normal" : days[d] > 0 ? "light" : "off"}</button>)}
       </div>
-      <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+      <div className="break-dates" style={{ marginTop: 8 }}>
         <span className="small">Break from</span><DateField label="Break from" value={s.breakFrom} onChange={(v) => store.saveSettings({ breakFrom: v })} />
-        <span className="small">to</span><DateField label="Break to" value={s.breakTo} min={s.breakFrom || undefined} onChange={(v) => store.saveSettings({ breakTo: v })} />
+        <span className="small">Break to</span><DateField label="Break to" value={s.breakTo} min={s.breakFrom || undefined} onChange={(v) => store.saveSettings({ breakTo: v })} />
         {(s.breakFrom || s.breakTo) && <button className="chip" onClick={() => store.saveSettings({ breakFrom: "", breakTo: "" })}>Clear</button>}
       </div>
       <span className="small muted">Each answer's next date moves by a day or two within the scheduler's normal spread to the quietest day — so reviews avoid light days, off days and your break (e.g. a night-shift week). No card is pushed past what the spread allows.</span>

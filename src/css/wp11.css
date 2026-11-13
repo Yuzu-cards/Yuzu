@@ -1,0 +1,83 @@
+/* WP11 — layout on small phones (360 px), Large text and tablets. */
+
+/* Guard (05-4): on a phone, anything wider than the screen made the browser widen the whole page, which pushed the fixed tab bar
+   below the bottom edge. The page itself never scrolls sideways (scrollers like .seg keep their own scroll), so the bar stays put
+   even if a future row overflows. body uses clip, not hidden, so position: sticky keeps working. */
+html { overflow-x: hidden; }
+body { overflow-x: clip; }
+
+/* 01-2: the Today header (← Citrus · logo · Yuzu · ＋ Card · ＋ Capture · sync). The logo never shrinks to nothing; on a phone with
+   the Citrus chip or the sync chip the actions move to their own line, right-aligned, instead of running off the edge. */
+.brand { flex-wrap: wrap; row-gap: 8px; }
+.brand > .yuzu-mark, .brand > .chip { flex-shrink: 0; }
+.brand > .grow { min-width: 0; }
+@media (max-width: 440px) {
+  .brand:has(> .back-citrus, > span.chip) > .grow { flex-basis: 100%; height: 0; }
+  .brand:has(> .back-citrus, > span.chip) { row-gap: 6px; }
+  .brand:has(> .back-citrus, > span.chip) > .grow + .chip { margin-left: auto; }
+}
+
+/* 08-6: the Today hero reflows instead of pushing the Study button off the edge. On a narrow phone the ring is 120 px
+   (4 screen pixels per ring cell, so the pixel art stays crisp); with Large text there, the ring sits above the text. */
+.hero { grid-template-columns: auto minmax(0, 1fr); }
+@media (max-width: 400px) {
+  .hero .ring { width: 120px; height: 120px; }
+  :root[data-size="large"] .hero { grid-template-columns: minmax(0, 1fr); justify-items: center; text-align: center; }
+}
+
+/* 08-6 / 03-15: a header row (a title that grows plus chips: Library · similar pairs · ＋ Card · ＋ Image) wraps its chips. */
+.row:has(> h1.grow), .row:has(> h2.grow) { flex-wrap: wrap; row-gap: 8px; }
+
+/* 05-4: a text field next to a button (Settings → Sync → Token + Show) shrinks instead of widening the page;
+   a row of buttons that grow (Back up · Full backup · Restore backup) wraps. */
+.field .row > input { min-width: 0; flex: 1 1 0; }
+.row:has(> .btn.grow) { flex-wrap: wrap; } /* growing buttons still share a line; they wrap only when their text no longer fits */
+
+/* 05-19: Break dates as two labelled rows (Break from / Break to), so nothing dangles at the end of a wrapped line. */
+.break-dates { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 10px; align-items: center; }
+.break-dates > .chip { grid-column: 2; justify-self: start; }
+/* 05-19: a select never runs past its field (Clean and Paper cut the long option text). */
+.field select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+
+/* 04-11: Progress → Systems on a phone: the name keeps line 1 (with ⚔ and Boss), the stats go to line 2; Boss is a full tap target. */
+.sys-head .boss-chip { min-height: 44px; padding: 0 14px; }
+.sys-head > .t { min-width: 0; }
+@media (max-width: 560px) {
+  .sys-head { flex-wrap: wrap; row-gap: 2px; }
+  .sys-head > .t { flex: 1 1 0; white-space: normal; overflow-wrap: break-word; line-height: 1.25; } /* a long name ("Toxicology & Environmental") takes two lines rather than "Toxic…" */
+  .sys-head::after { content: ""; flex-basis: 100%; height: 0; order: 2; }
+  .sys-head > .small.muted { order: 3; }
+}
+
+/* 03-15: Library — the card-list header in the body font (the pixel font wrapped "1,448 cards · 300 shown" onto 4 lines);
+   on a phone the node's stats line gets its own row under the title instead of squeezing beside ✎, pin and Study. */
+.list-head { font-family: var(--sans); font-size: 16px; line-height: 1.3; font-weight: 700; }
+@media (max-width: 560px) {
+  .lib-node-head { flex-wrap: wrap; row-gap: 4px; }
+  .lib-node-head > .grow { display: contents; }
+  .lib-node-head > .grow > :first-child { flex: 1 1 0; min-width: 0; }
+  .lib-node-head > .grow > .small { order: 9; flex-basis: 100%; }
+}
+#lib-cards { scroll-margin-top: 12px; }
+
+/* 01-19: with a sheet open, the snackbar moves to the top so it doesn't cover the sheet's fields (Quick add's Deck, Capture's list).
+   (The "1 37" gap in pixel numbers is fixed in the font itself: in public/fonts/yuzu-pixel.woff the "1" now advances 4 pixels, not 6.) */
+body:has(.sheet-backdrop) .kit-snack { bottom: auto; top: calc(12px + var(--safe-t)); }
+
+/* 03-12: the bulk bar — one row of the main actions (Study · Pause · Flag · Tag · More…), the count above them on a phone,
+   every button a full 44 px target. The rest are in the More… sheet. */
+.bulk-bar .btn { min-height: 44px; }
+@media (max-width: 560px) {
+  .bulk-bar:has(> .btn.primary) > .small:first-child { flex-basis: 100%; text-align: center; }
+  .bulk-bar:has(> .btn.primary) > .btn { flex: 1 1 0; min-width: 0; padding-left: 4px; padding-right: 4px; }
+}
+.list-head { white-space: nowrap; } /* "190 cards · 300 shown" stays one line; the chips beside it wrap instead */
+
+/* 08-6: a segmented control that scrolls sideways (Library views at 360 px with Large text) fades at the edge that has more,
+   so "Tags / Smart" don't look cut off. Driven by its own scroll position: no fade when everything fits or at the end. */
+@property --seg-fade-r { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --seg-fade-l { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@keyframes wp11-seg-fade { from { --seg-fade-l: 0px; --seg-fade-r: 32px; } 10% { --seg-fade-l: 24px; } 90% { --seg-fade-r: 24px; } to { --seg-fade-l: 24px; --seg-fade-r: 0px; } }
+@supports (animation-timeline: scroll()) {
+  .seg { mask-image: linear-gradient(90deg, transparent 0, #000 var(--seg-fade-l), #000 calc(100% - var(--seg-fade-r)), transparent 100%); animation: wp11-seg-fade linear both; animation-timeline: scroll(self inline); scrollbar-width: none; }
+}
