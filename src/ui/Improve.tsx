@@ -36,7 +36,7 @@ export function ImproveSection() {
   async function send() { const m = await sendImproveToClaude(); if (m) setMsg(m); }
   return (
     <div className="card-box">
-      <p className="small muted" style={{ marginTop: 0 }}>Cards you marked “Needs improving” (⋯ menu while studying, or select cards in Library) and leeches you mix up with something similar. Claude rewrites them, splits overfilled ones with each picture on the right card, and sends one file back — your review history stays, and the marks clear themselves.</p>
+      <p className="small muted" style={{ marginTop: 0 }}>Cards you marked “Needs improving” (⋯ menu while studying, or select cards in Library) and leeches you mix up with something similar. Claude rewrites them, splits overfilled ones with each picture on the right card, and sends one file back — your review history stays, and the marks clear themselves. {improveRoute()}</p>
       {list.length ? (<>
         <div className="row" style={{ gap: 8 }}><span className="small grow"><b>{list.length}</b> card{list.length === 1 ? "" : "s"} marked</span><button className="btn primary" onClick={send}>Send to Claude</button></div>
         <ul className="small" style={{ listStyle: "none", padding: 0, margin: "8px 0 0" }}>
@@ -55,12 +55,19 @@ export function ImproveSection() {
 }
 const Store_REASON_SHORT: Record<string, string> = { split: "split", unclear: "unclear", wrong: "wrong/outdated", format: "formatting", media: "picture/sound", confusion: "mixed up", other: "other" };
 
+const IMPORT_AT = "Settings → Import (Anki, packs, Claude files) → Choose file";
+/** How marked cards reach Claude and come back, for this device's sync: one explanation for the leech setting and this section. */
+export function improveRoute(): string {
+  return store.syncBackend() === "drive"
+    ? "With Google Drive connected, marked cards go to Claude by themselves through the Drive outbox, and Claude's rewrite comes back through the Inbox. “Send to Claude” in Settings → Cards to improve also gives you the file now."
+    : `Send them from Settings → Cards to improve → “Send to Claude” (a file to attach in Claude), then import the file Claude sends back in ${IMPORT_AT}.`;
+}
 /** Package the marked cards for Claude: the share sheet on a phone (straight into the Claude app), a file on a PC. */
 export async function sendImproveToClaude(): Promise<string | null> {
   const data = store.improveExport(); const d = new Date();
   const name = `yuzu-improve-${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}.json`;
   const file = new File([JSON.stringify(data, null, 1)], name, { type: "application/json" });
-  try { if ((navigator as any).canShare?.({ files: [file] }) && window.matchMedia?.("(pointer: coarse)").matches) { await navigator.share({ files: [file], title: "Cards to improve", text: `Please improve these ${data.count} Yuzu cards and send back a curation file.` }); return `Shared ${data.count} cards. When Claude sends the file back, import it in Import from Anki → Choose file.`; } } catch (e: any) { if (e?.name === "AbortError") return null; }
+  try { if ((navigator as any).canShare?.({ files: [file] }) && window.matchMedia?.("(pointer: coarse)").matches) { await navigator.share({ files: [file], title: "Cards to improve", text: `Please improve these ${data.count} Yuzu cards and send back a curation file.` }); return `Shared ${data.count} cards. When Claude sends the file back, import it in ${IMPORT_AT}.`; } } catch (e: any) { if (e?.name === "AbortError") return null; }
   const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-  return `Saved ${name}. Attach it in a chat with Claude; import the file Claude sends back in Import from Anki → Choose file.`;
+  return `Saved ${name}. Attach it in a chat with Claude; import the file Claude sends back in ${IMPORT_AT}.`;
 }
