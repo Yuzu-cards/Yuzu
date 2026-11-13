@@ -1,5 +1,5 @@
 // Quick capture: a thought or a photo saved in a few seconds. It waits in Drive's outbox for Claude to turn into cards.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { store } from "../lib/store";
 import { IconClose } from "./icons";
 import { shrinkImage } from "./Occlusion";
@@ -7,6 +7,7 @@ import { snackbar } from "./kit";
 
 export function CaptureSheet({ onClose }: { onClose: () => void }) {
   const [text, setText] = useState(""); const [image, setImage] = useState(""); const [busy, setBusy] = useState(false);
+  useEffect(() => { store.refreshOutbox().catch(() => {}); }, []);
   store.getVersion(); const waiting = store.captures.filter((c) => !c.sent).length;
   return (
     <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "92vh", overflow: "auto" }}>
@@ -28,6 +29,13 @@ export function CaptureSheet({ onClose }: { onClose: () => void }) {
           <button className="icon-btn" aria-label="Remove capture" onClick={() => store.removeCapture(c.id)}><IconClose /></button>
         </div>)}
         {waiting > 0 && <p className="small muted" style={{ marginBottom: 0 }}>{waiting} waiting for Google to be connected.</p>}
+      </>}
+      {store.outboxCaptures.length > 0 && <>
+        <h2 style={{ marginTop: 14 }}>With Claude from your other devices</h2>
+        {store.outboxCaptures.slice(0, 8).map((c) => <div key={c.id} className="row small" style={{ gap: 8, margin: "6px 0", alignItems: "center" }}>
+          <span className="grow" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.text || (c.image ? "(photo)" : "(capture)")}{c.source && c.source !== "yuzu" ? ` · from ${c.source}` : ""}</span>
+          <span className="chip">{c.device ? `kept on ${c.device}` : "with Claude"}</span>
+        </div>)}
       </>}
     </div></div>
   );

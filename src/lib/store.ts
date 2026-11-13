@@ -13,7 +13,7 @@ import { spokenText, backOnly } from "./voice";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError } from "./google";
+import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError, folderAppeared } from "./google";
 import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
 declare const __VERSION__: string;
@@ -87,6 +87,15 @@ export const DEFAULT_SETTINGS: Settings = {
   google: { clientId: "", shiftDays: true, driveMedia: true, rotaName: "Amro", rota: {} },
   fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", planScreen: false, showStreak: false, leechAction: "claude", citrusPlans: false, applied: [], retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
+/** Settings that belong to one device (its name, look, sounds, gestures): never uploaded, never taken from another device. */
+export const DEVICE_ONLY_SETTINGS = ["sync", "deviceName", "nightCards", "swipe", "typeAnswers", "mediaDownload", "theme", "sfx", "autoplay", "cardStyle"] as const;
+/** The settings as they go into settings.json: without the per-device ones, so two devices with the same synced settings upload the same file (no churn every sync). */
+export function syncedSettings(s: Settings | Record<string, unknown>): Record<string, unknown> { const out: Record<string, unknown> = { ...s, updatedAt: (s as any).updatedAt ?? 0 }; for (const k of DEVICE_ONLY_SETTINGS) delete out[k]; return out; }
+/** A capture's few words for its outbox file's appProperties (Drive allows 124 bytes per key and value), so every device can list it. */
+export function captureProps(c: Capture, device: string): Record<string, string> {
+  const cut = (s: string, bytes: number) => { const enc = new TextEncoder(); let t = s.replace(/\s+/g, " ").trim(); while (enc.encode(t).length > bytes) t = t.slice(0, -1); return t; };
+  return { t: cut(c.text, 100), src: cut(c.source, 40), dev: cut(device, 40), at: String(c.at), ...(c.image ? { img: "1" } : {}) };
+}
 export interface Deadline { id: string; name: string; /** yyyy-mm-dd */ date: string; view: View; /** deck path ("" = everything) */ path: string }
 export interface ExamStatus { daysLeft: number; total: number; seen: number; unseen: number; coverage: number; predicted: number | null; weak: number; needPerDay: number; finishOn: string | null; onTrack: boolean; reviewDays: number }
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
@@ -216,7 +225,7 @@ export class Store {
    * opened or pulled to refresh with nothing new costs one request. Flags stay set until the part that reads them has.
    */
   private watch = { token: "", at: 0, collection: true, plan: true, rota: true, inbox: true };
-  private watchP: Promise<void> | null = null;
+  private watchP: Promise<void> | null = null; private watchSyncAt = -1;
   async driveWatch(maxAgeMs = 4000): Promise<typeof this.watch> {
     if (this.watch.token && Date.now() - this.watch.at < maxAgeMs) return this.watch;
     if (!this.watchP) this.watchP = this.watchNow().finally(() => { this.watchP = null; });
@@ -233,8 +242,10 @@ export class Store {
     const coll = id(PATHS.collection), inbox = id(PATHS.inbox), plans = [id(PATHS.planCitrus), id(PATHS.plan)], rotas = [id(PATHS.rotas), id(PATHS.rotasOrange)];
     const myRev = await db.getMeta<string>("driveRev", "");
     const media: typeof r.changes = [];
+    let appeared = false;
     for (const c of r.changes) {
       const ps = c.parents ?? [];
+      if (!c.removed && folderAppeared(this.gcache, ps[0], c.name)) appeared = true; // a folder looked for and missing has been made (e.g. Citrus's hub/citrus)
       if (c.removed || !c.parents) { media.push(c); continue; } // a deleted file has no parents left to say where it was
       if (ps.includes(coll)) { if (c.name === "manifest.json" && (c.props?.rev ?? "?") !== myRev) w.collection = true; }
       else if (ps.includes(inbox)) w.inbox = true;
@@ -243,6 +254,7 @@ export class Store {
       if (this.driveIndex && (ps.includes(this.driveIndex.media) || this.driveIndex.files[c.name ?? ""]?.id === c.id || this.driveIndex.bundles?.[c.id])) media.push(c);
     }
     if (this.driveIndex?.complete && media.length && applyMediaChanges(this.driveIndex, media)) { await db.setMeta("driveMedia", this.driveIndex); this.mediaVersion++; }
+    if (appeared) { w.plan = true; w.rota = true; await db.setMeta("gcache", this.gcache); }
     if (coll === "\u0000") w.collection = true; // folders not known on this device yet: look the slow way
     w.token = r.token; w.at = Date.now(); await db.setMeta("driveWatch", { ...w });
     if (r.more) w.at = 0; // more pages waiting: the next caller reads on
@@ -438,8 +450,9 @@ export class Store {
     const queue = [...local, ...fromDir]; let stop: unknown = null; let lastSave = 0;
     if (queue.length) this.holdWake();
     const say = () => { const at = this.mediaProgress(); if (at) progress(`Sending media to Drive: ${at}`); };
-    // Up to three bundles in flight; each is made of files read just before it goes.
-    await Promise.all(Array.from({ length: 3 }, async () => {
+    // Up to three bundles in flight; each is made of files read just before it goes. A few new files make one bundle, not one each.
+    const queued = queue.length > BUNDLE_FILES || local.reduce((a, n) => a + (this.media.get(n)?.size ?? 0), 0) > BUNDLE_BYTES || fromDir.length > 0 && queue.length > 50;
+    await Promise.all(Array.from({ length: queued ? 3 : 1 }, async () => {
       while (queue.length && !stop && Date.now() - t0 < 40000) {
         const items: { name: string; blob: Blob }[] = []; let bytes = 0;
         while (queue.length && items.length < BUNDLE_FILES && bytes < BUNDLE_BYTES) {
@@ -515,6 +528,10 @@ export class Store {
     const gh: GitHubSync | DriveSync = drive ? new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo) : new GitHubSync(cfg);
     const t0 = Date.now();
     this.setSync("syncing", "Syncing…");
+    // A lock this device left on Drive (its token was rejected mid-sync, or the page was killed): released first, so the other devices aren't kept waiting.
+    let staleLock = false;
+    if (drive && (await db.getMeta<boolean>("driveLockMine", false))) { try { await (gh as DriveSync).releaseOwnLock(this.settings.deviceName || "device", await this.deviceId()); } catch { staleLock = true; /* next time */ } }
+    await this.flushInboxDeletes(gh, drive);
     let lastBump = 0;
     const progress = (m: string) => { if (this.syncStatus.state !== "syncing") return; this.syncStatus = { ...this.syncStatus, message: m }; const t = Date.now(); if (t - lastBump > 250) { lastBump = t; this.bump(); } };
     try {
@@ -524,7 +541,9 @@ export class Store {
         // Fast path: nothing changed here and the repository is exactly what we last saw → a couple of requests, no lock.
         const lastSeen = await db.getMeta<number>("syncSeenAt", 0);
         // Drive: the changes feed says whether another device synced or a pack landed in the inbox (one request, shared with the refresh).
-        const w = drive ? await this.driveWatch(reason === "manual" ? 0 : 4000) : null; const wasColl = w?.collection ?? true, wasInbox = w?.inbox ?? true;
+        // (a look this device's last sync already used is never trusted again: another device may have pushed since)
+        const w = drive ? await this.driveWatch(reason === "manual" || this.watchSyncAt === this.watch.at ? 0 : 4000) : null; const wasColl = w?.collection ?? true, wasInbox = w?.inbox ?? true;
+        if (w) this.watchSyncAt = w.at;
         if (w) { w.collection = false; w.inbox = false; }
         if (!this.dirty && attempt === 0) {
           if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
@@ -532,11 +551,17 @@ export class Store {
           const trust = !!w && lastSeen > 0 && this.shardCache.size > 0 && Date.now() - (await db.getMeta<number>("driveFullAt", 0)) < DAY;
           if (trust && !wasColl) { if (wasInbox) await this.checkInbox(gh); summary = "Up to date"; break; }
           const peek = await gh.pullManifest();
-          if (peek && peek.updatedAt === lastSeen && this.shardCache.size) { if (drive) { await db.setMeta("driveRev", (gh as DriveSync).rev() ?? ""); await db.setMeta("driveFullAt", Date.now()); } if (!w || wasInbox || !trust) await this.checkInbox(gh); summary = "Up to date"; break; }
+          if (peek && peek.updatedAt === lastSeen && this.shardCache.size) { if (drive) { await db.setMeta("driveRev", (gh as DriveSync).rev() ?? ""); await db.setMeta("driveFullAt", Date.now()); await (gh as DriveSync).tidyDupes(this.settings.deviceName || "device", await this.deviceId()).catch(() => 0); } if (!w || wasInbox || !trust) await this.checkInbox(gh); summary = "Up to date"; break; }
         }
         // One device at a time: take the lock first; if another device holds it, come back in a minute instead of colliding.
         const lock = await gh.acquireLock(this.settings.deviceName || "device", await this.deviceId());
-        if (!lock.held) { if (w) { w.collection = wasColl; w.inbox = wasInbox; } this.scheduleSync(60000); throw new SyncError(`${lock.by} is syncing right now; this device will retry in a minute.`, "busy"); }
+        if (!lock.held) {
+          if (w) { w.collection = wasColl; w.inbox = wasInbox; }
+          const l = lock as { by?: string; at?: number; until?: number }; const wait = l.until ? Math.max(5000, Math.min(60000, l.until - Date.now() + 1500)) : 60000; this.scheduleSync(wait);
+          const hm = (t: number) => { const d = new Date(t); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+          throw new SyncError(l.at ? `${l.by} started a sync at ${hm(l.at)} and hasn't finished; trying again at ${hm(Date.now() + wait)}.` : `${l.by} is syncing right now; this device will retry at ${hm(Date.now() + wait)}.`, "busy");
+        }
+        if (drive) await db.setMeta("driveLockMine", true);
         // (the folder was listed for the lock moments ago: one metadata read says whether that listing still stands)
         const remote = drive ? await (gh as DriveSync).pullManifest({ fresh: false }) : await gh.pullManifest();
         let pulledN = 0, pulledC = 0, pulledR = 0; let got: Awaited<ReturnType<GitHubSync["pullChanged"]>> | Awaited<ReturnType<DriveSync["pullChanged"]>> | null = null;
@@ -617,7 +642,7 @@ export class Store {
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
           notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, mastery: this.mastery, improve: this.improve, hooks: this.hooks,
-          settings: { ...this.settings, sync: undefined, updatedAt: (this.settings as any).updatedAt ?? 0 },
+          settings: syncedSettings(this.settings),
         }, this.shardCache);
         try {
           const counts = { notes: this.notes.size, cards: this.cards.size, reviews: this.reviews.length };
@@ -684,6 +709,7 @@ export class Store {
     } finally {
       // Whatever happened — a failed download, a dropped connection — never leave the lock behind for 12 minutes.
       await gh.releaseLock().catch(() => {});
+      if (drive) await db.setMeta("driveLockMine", (gh as DriveSync).lockLeft() || staleLock).catch(() => {});
       if (this.syncAgain) { this.syncAgain = false; this.scheduleSync(1000); }
     }
   }
@@ -1093,21 +1119,52 @@ export class Store {
   // ---- inbox ---------------------------------------------------------------
   inbox: { file: string; sha: string; at: number; pack: any }[] = [];
   packLog: { id: string; name: string; at: number; noteIds: string[] }[] = [];
+  /** Inbox files that couldn't be read as a pack (cut short, not JSON, not Yuzu's): shown in the Inbox with Remove, instead of ignored forever. */
+  inboxBad: { file: string; sha: string; size: number; why: string; text: string }[] = [];
   private async checkInbox(gh: GitHubSync | DriveSync) {
     let files: { name: string; sha: string; size: number }[] = [];
     try { files = await gh.listInbox(); } catch { return; }
     const seen = new Set(await db.getMeta<string[]>("inboxSeen", []));
+    const gone = new Set((await db.getMeta<{ sha: string }[]>("inboxDeletes", [])).map((d) => d.sha)); // handled here, its delete still waiting for a connection
+    if (!this.inboxBad.length) this.inboxBad = await db.getMeta<typeof this.inboxBad>("inboxBad", []);
     let changed = false;
     for (const f of files) {
-      if (seen.has(f.sha) || this.inbox.some((x) => x.sha === f.sha)) continue;
-      try { const t = await gh.readInbox(f.name); if (!t) continue; const pack = JSON.parse(t); if (pack?.yuzu_capture === 1) { await this.takeCapture(pack, gh, f); }
-        else if (pack?.yuzu_pack === 1 || pack?.yuzu_curation === 1) { this.inbox.push({ file: f.name, sha: f.sha, at: Date.now(), pack }); changed = true; } seen.add(f.sha); }
-      catch { /* skip unreadable file */ }
+      if (seen.has(f.sha) || gone.has(f.sha) || this.inbox.some((x) => x.sha === f.sha) || this.inboxBad.some((x) => x.sha === f.sha)) continue;
+      let t: string | null = null;
+      try { t = await gh.readInbox(f.name); if (!t) continue; const pack = JSON.parse(t); if (pack?.yuzu_capture === 1) { await this.takeCapture(pack, gh, f); }
+        else if (pack?.yuzu_pack === 1 || pack?.yuzu_curation === 1) { this.inbox.push({ file: f.name, sha: f.sha, at: Date.now(), pack }); changed = true; }
+        else { this.inboxBad.push({ file: f.name, sha: f.sha, size: f.size, why: "not a Yuzu pack", text: t.slice(0, 4000) }); changed = true; }
+        seen.add(f.sha); }
+      catch (e: any) { if (e instanceof GoogleError && (e.auth || e.retryable)) continue; if (t != null) { this.inboxBad.push({ file: f.name, sha: f.sha, size: f.size, why: "cut short or not valid JSON", text: t.slice(0, 4000) }); changed = true; } }
     }
     // Files removed from the repo (handled on another device) leave the local inbox too.
-    const remote = new Set(files.map((f) => f.sha)); const before = this.inbox.length;
-    this.inbox = this.inbox.filter((x) => remote.has(x.sha)); if (this.inbox.length !== before) changed = true;
-    if (changed) { await db.setMeta("inbox", this.inbox); await db.setMeta("inboxSeen", [...seen]); this.bump(); }
+    const remote = new Set(files.map((f) => f.sha)); const before = this.inbox.length + this.inboxBad.length;
+    this.inbox = this.inbox.filter((x) => remote.has(x.sha)); this.inboxBad = this.inboxBad.filter((x) => remote.has(x.sha)); if (this.inbox.length + this.inboxBad.length !== before) changed = true;
+    if (changed) { await db.setMeta("inbox", this.inbox); await db.setMeta("inboxBad", this.inboxBad); await db.setMeta("inboxSeen", [...seen]); this.bump(); }
+  }
+  /** Remove an unreadable inbox file from Drive (or the repository). */
+  async removeBadInbox(sha: string) {
+    const e = this.inboxBad.find((x) => x.sha === sha); if (!e) return;
+    this.inboxBad = this.inboxBad.filter((x) => x.sha !== sha); await db.setMeta("inboxBad", this.inboxBad); this.bump();
+    await this.deleteInboxFile(e.file, e.sha);
+  }
+  /** Delete an inbox file where it lives; offline (or the call failing) it waits in a queue that every sync works through first. */
+  private async deleteInboxFile(file: string, sha: string) {
+    const backend = this.syncBackend();
+    try {
+      if (backend === "drive") { if (!tokenValid()) throw new Error("no token"); await new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo).deleteInbox(file, sha); }
+      else if (this.syncConfigured()) { const cfg = this.settings.sync; await new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(file, sha); }
+    } catch {
+      const q = await db.getMeta<{ file: string; sha: string; backend: string }[]>("inboxDeletes", []);
+      if (!q.some((x) => x.sha === sha)) await db.setMeta("inboxDeletes", [...q, { file, sha, backend }]);
+    }
+  }
+  /** The inbox deletes that didn't reach Drive (offline, a lapsed token): retried at the start of every sync. */
+  private async flushInboxDeletes(gh: GitHubSync | DriveSync, drive: boolean) {
+    const q = await db.getMeta<{ file: string; sha: string; backend: string }[]>("inboxDeletes", []); if (!q.length) return;
+    const left: typeof q = [];
+    for (const d of q as (typeof q[number] & { n?: number })[]) { if ((d.backend === "drive") !== drive) { left.push(d); continue; } try { await gh.deleteInbox(d.file, d.sha); } catch { if ((d.n ?? 0) < 8) left.push({ ...d, n: (d.n ?? 0) + 1 } as any); } }
+    await db.setMeta("inboxDeletes", left);
   }
   /** Add the chosen cards of an inbox pack, remember them for undo, and clear the file from the repo. */
   async acceptInbox(sha: string, keepIndexes: number[] | "all"): Promise<string> {
@@ -1128,8 +1185,7 @@ export class Store {
   async dismissInbox(sha: string) {
     const e = this.inbox.find((x) => x.sha === sha); if (!e) return;
     this.inbox = this.inbox.filter((x) => x.sha !== sha); await db.setMeta("inbox", this.inbox); this.bump();
-    if (this.syncBackend() === "drive") { if (tokenValid()) await new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo).deleteInbox(e.file, e.sha).catch(() => {}); }
-    else if (this.syncConfigured()) { const cfg = this.settings.sync; await new GitHubSync({ owner: cfg.owner, repo: cfg.repo, token: cfg.token }).deleteInbox(e.file, e.sha).catch(() => {}); }
+    await this.deleteInboxFile(e.file, e.sha);
   }
   // ---- Captures: a thought or a photo saved in a few seconds, left in Drive's outbox for Claude to turn into cards ------------------
   captures: Capture[] = [];
@@ -1154,7 +1210,7 @@ export class Store {
     try {
       const d = new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo); let n = 0;
       for (const c of this.captures.filter((x) => !x.sent)) {
-        await d.putOutbox(`capture-${c.id}.json`, JSON.stringify({ yuzu_capture: 1, id: c.id, at: new Date(c.at).toISOString(), from: c.source, text: c.text, image: c.image, for_claude: "Turn this note or photo into Yuzu cards (a pack: {\"yuzu_pack\":1, ...}) and put the JSON file in ../inbox. Delete this file when done." }));
+        await d.putOutbox(`capture-${c.id}.json`, JSON.stringify({ yuzu_capture: 1, id: c.id, at: new Date(c.at).toISOString(), from: c.source, text: c.text, image: c.image, for_claude: "Turn this note or photo into Yuzu cards (a pack: {\"yuzu_pack\":1, ...}) and put the JSON file in ../inbox. Delete this file when done. Two files with the same id are one capture: make its cards once." }), undefined, captureProps(c, this.settings.deviceName || "a device"));
         this.captures = this.captures.map((x) => (x.id === c.id ? { ...x, sent: true } : x)); n++;
       }
       if (n) await db.setMeta("captures", this.captures);
@@ -1165,6 +1221,16 @@ export class Store {
     } finally { this.outboxBusy = false; }
   }
   private outboxBusy = false;
+  /** Captures waiting in Drive's outbox that this device didn't make or take (another device's, or another app's taken there), read from one listing. */
+  outboxCaptures: { id: string; text: string; source: string; device: string; image: boolean; at: number }[] = [];
+  async refreshOutbox(): Promise<void> {
+    if (this.syncBackend() !== "drive" || !tokenValid()) return;
+    try {
+      const list = await new DriveSync(this.gcache, this.settings.deviceName || "device", this.manifestMemo).listOutbox(); const mine = new Set(this.captures.map((c) => c.id));
+      this.outboxCaptures = list.filter((f) => /^capture-.+\.json$/.test(f.name)).map((f) => ({ id: f.name.slice(8, -5), text: f.props?.t ?? "", source: f.props?.src ?? "", device: f.props?.dev ?? "", image: f.props?.img === "1", at: Number(f.props?.at) || 0 })).filter((c) => !mine.has(c.id));
+      this.bump();
+    } catch { /* offline: the list stays as it was */ }
+  }
   /** Delete notes with all their cards (synced; later Anki imports don't bring them back). Returns the last deletion for undo. */
   lastDeleted: { notes: Note[]; cards: Card[] } | null = null;
   /** note id → its cards, built once (cardsOfNote scans all cards; fine for one note, not for thousands). */

@@ -1,0 +1,4 @@
+/* WP04: an unreadable inbox file's text, shown on request */
+.wp04-bad-text { white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; margin: 4px 0 8px; padding: 8px; border: 1px solid var(--line, currentColor); border-radius: 6px; font-family: ui-monospace, monospace; }
+.wp04-bad .list-row { flex-wrap: wrap; gap: 6px; }
+.wp04-bad .list-row .t { white-space: normal; overflow-wrap: anywhere; min-width: 0; flex: 1 1 160px; }
