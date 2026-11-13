@@ -2,17 +2,15 @@
 // to Claude from Settings → Cards to improve; importing Claude's file clears them.
 import { useState } from "react";
 import { store, Store } from "../lib/store";
-import { useBack } from "./useBack";
+import { Sheet } from "./kit";
 
 export function ImproveSheet({ nids, onClose }: { nids: string[]; onClose: () => void }) {
-  useBack(true, onClose);
   const cur = nids.length === 1 ? store.improveFor(nids[0]) : null;
   const [r, setR] = useState<string[]>(cur?.r ?? []);
   const [t, setT] = useState(cur?.t ?? "");
   const toggle = (k: string) => setR((x) => (x.includes(k) ? x.filter((y) => y !== k) : [...x, k]));
   return (
-    <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-      <b>{nids.length === 1 ? "What's wrong with this card?" : `What's wrong with these ${nids.length} cards?`}</b>
+    <Sheet title={nids.length === 1 ? "What's wrong with this card?" : `What's wrong with these ${nids.length} cards?`} onClose={onClose}>
       <p className="small muted" style={{ margin: "4px 0 10px" }}>Marked cards collect in Settings → Cards to improve. Send them to Claude from there; the improved versions come back as one file, keeping your review history and pictures.</p>
       <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
         {Object.entries(Store.IMPROVE_REASONS).map(([k, label]) => <button key={k} className={"chip" + (r.includes(k) ? " orange" : "")} onClick={() => toggle(k)}>{label}</button>)}
@@ -22,7 +20,7 @@ export function ImproveSheet({ nids, onClose }: { nids: string[]; onClose: () =>
         <button className="btn primary grow" disabled={!r.length && !t.trim()} onClick={async () => { await store.markImprove(nids, r.length ? r : ["other"], t); onClose(); }}>{cur ? "Update mark" : "Mark for improving"}</button>
         {cur && <button className="btn" onClick={async () => { await store.markImprove(nids, [], ""); onClose(); }}>Remove mark</button>}
       </div>
-    </div></div>
+    </Sheet>
   );
 }
 

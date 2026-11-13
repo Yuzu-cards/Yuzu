@@ -79,7 +79,7 @@ try {
   await p3.click("text=More for today"); await p3.click("button:has-text('Practice with Claude')"); await p3.waitForSelector('textarea[aria-label="Prompt for Claude"]');
   const pr = await p3.inputValue('textarea[aria-label="Prompt for Claude"]');
   ok("Practice with Claude builds a prompt from the weak cards", /\n1\. (Cardio|Renal) question \d+ about topic/.test(pr) && /Step 1/.test(pr) === false && /yuzu_pack/.test(pr), pr.slice(0, 120).replace(/\n/g, " "));
-  await p3.click("button:has-text('Patient case')"); ok("…the style changes the role it plays", /emergency department consultant/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
+  await p3.click("[role=dialog] button:has-text('Patient case')"); ok("…the style changes the role it plays", /emergency department consultant/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
   await p3.selectOption("select >> nth=0", { label: "Step 1 (exam)" }); ok("…and an exam can be chosen as the source", /revising for Step 1/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
   await p3.click('button[aria-label="Close practice"]');
   if (!(await p3.locator("button:has-text('Mixed drill')").isVisible())) await p3.click("text=More for today"); await p3.click("button:has-text('Mixed drill')"); await p3.waitForSelector(".study .card-host", { timeout: 10000 });

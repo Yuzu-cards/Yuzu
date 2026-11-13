@@ -3,7 +3,7 @@ import { useRef, useState } from "react";
 import { store } from "../lib/store";
 import { boxFrom, type Mask } from "../lib/occlusion";
 import { IconClose } from "./icons";
-import { snackbar } from "./kit";
+import { FileButton, Sheet, snackbar } from "./kit";
 
 /** A picture file → a data URL no larger than 1600 px on its long side (phone photos are 4000+). */
 export async function shrinkImage(file: Blob, max = 1600): Promise<string> {
@@ -19,11 +19,10 @@ export function OcclusionEditor({ onClose }: { onClose: () => void }) {
   const pt = (e: React.PointerEvent) => { const r = box.current!.getBoundingClientRect(); return [Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)), Math.max(0, Math.min(100, ((e.clientY - r.top) / r.height) * 100))] as const; };
   const live = drag ? boxFrom(drag.ax, drag.ay, drag.bx, drag.by) : null;
   return (
-    <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "92vh", overflow: "auto" }}>
-      <div className="row"><b className="grow">Image occlusion</b><button className="icon-btn" aria-label="Close editor" onClick={onClose}><IconClose /></button></div>
+    <Sheet title="Image occlusion" closeLabel="Close editor" onClose={onClose} dirty={!!img || !!title.trim()} discard="Discard this picture and its boxes?" style={{ maxHeight: "92vh", overflow: "auto" }}>
       {!img ? <>
         <p className="small muted" style={{ marginTop: 4 }}>Pick a diagram or photo, then drag a box over each thing you want to learn. Every box becomes one card: that box is hidden, you name it.</p>
-        <input type="file" accept="image/*" aria-label="Picture" onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; setBusy(true); try { setImg(await shrinkImage(f)); } catch { setMsg("That file couldn't be read as a picture"); } finally { setBusy(false); } }} />
+        <FileButton label="Choose a picture" inputLabel="Picture" accept="image/*" disabled={busy} onFile={async (f) => { setBusy(true); try { setImg(await shrinkImage(f)); } catch { setMsg("That file couldn't be read as a picture"); } finally { setBusy(false); } }} />
         {busy && <p className="small muted">Preparing the picture…</p>}
       </> : <>
         <p className="small muted" style={{ margin: "4px 0 8px" }}>Drag on the picture to draw a box.</p>
@@ -46,6 +45,6 @@ export function OcclusionEditor({ onClose }: { onClose: () => void }) {
         </div>
       </>}
       {msg && <p className="small" style={{ marginBottom: 0 }}>{msg}</p>}
-    </div></div>
+    </Sheet>
   );
 }

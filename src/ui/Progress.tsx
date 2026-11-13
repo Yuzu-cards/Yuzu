@@ -1,11 +1,9 @@
 import { store } from "../lib/store";
-import { confirmSheet } from "./kit";
+import { confirmSheet, Sheet } from "./kit";
 import { fmtDate } from "../lib/dates";
 import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
 import { useMemo, useState } from "react";
-import { createPortal } from "react-dom";
-import { useBack } from "./useBack";
 import { Recap } from "./Recap";
 import { DiagnoseSheet } from "./Diagnose";
 
@@ -135,7 +133,6 @@ function Mastered() {
   const [open, setOpen] = useState<"list" | "log" | null>(null);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
-  useBack(open !== null, () => setOpen(null)); // Android back closes the sheet
   const monthAgo = Date.now() - 30 * 86400000;
   const byYou = log.filter((e) => e.by === "you").length, auto = log.length - byYou, recent = log.filter((e) => e.at > monthAgo).length;
   const ask = (store.settings.retireAskYears ?? 5) * 365.25;
@@ -156,9 +153,8 @@ function Mastered() {
         {log.length > 0 && <button className="btn" onClick={() => setOpen("log")}>Log · {log.length.toLocaleString()}</button>}
       </div>
       <p className="small muted" style={{ margin: "8px 0 0" }}>Next review more than {store.settings.retireAskYears ?? 5} year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"} away: you decide here. {store.settings.retireAutoYears ? `More than ${store.settings.retireAutoYears} years: retired automatically.` : "Nothing is retired automatically."} Change both in Settings → Studying. “I've mastered this” in a card's ⋯ menu retires it right away. Retired cards are deleted (their pictures too) and kept in the log.</p>
-      {open === "list" && createPortal(
-        <div className="sheet-backdrop" onClick={() => setOpen(null)}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "85vh", overflow: "auto" }}>
-          <b>{cands.length.toLocaleString()} cards next due in more than {store.settings.retireAskYears ?? 5} year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"}</b>
+      {open === "list" && (
+        <Sheet title={`${cands.length.toLocaleString()} cards next due in more than ${store.settings.retireAskYears ?? 5} year${(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"}`} onClose={() => setOpen(null)} style={{ maxHeight: "85vh", overflow: "auto" }}>
           <p className="small muted">Ticked cards are retired: deleted, with their question and answer kept in the Mastered log. “Keep studying” takes them off this list for good.</p>
           <div className="row" style={{ gap: 8, margin: "6px 0" }}>
             <button className="btn" onClick={() => setSel(new Set(cands.map((c) => c.id)))}>All</button>
@@ -178,12 +174,11 @@ function Mastered() {
             <button className="btn primary grow" disabled={!sel.size} onClick={async () => { if (!(await confirmSheet({ title: `Retire ${sel.size.toLocaleString()} card${sel.size === 1 ? "" : "s"} as mastered?`, sub: "They are deleted; the Mastered log keeps what they said.", yes: "Mark mastered" }))) return; await store.masterCards([...sel], "you"); setSel(new Set()); setOpen(null); }}>Mark mastered ({sel.size.toLocaleString()})</button>
             <button className="btn grow" disabled={!sel.size} onClick={async () => { await store.keepCards([...sel]); setSel(new Set()); setOpen(null); }}>Keep studying</button>
           </div>
-        </div></div>, document.body
+        </Sheet>
       )}
-      {open === "log" && createPortal(
-        <div className="sheet-backdrop" onClick={() => setOpen(null)}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "85vh", overflow: "auto" }}>
-          <b>Mastered log · {log.length.toLocaleString()} cards</b>
-          <input placeholder="Search the log" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: "100%", margin: "8px 0", background: "var(--ink-3)", color: "var(--text)", border: "2px solid var(--line)", padding: "8px 10px", font: "inherit" }} />
+      {open === "log" && (
+        <Sheet title={`Mastered log · ${log.length.toLocaleString()} cards`} onClose={() => setOpen(null)} style={{ maxHeight: "85vh", overflow: "auto" }}>
+          <input type="search" aria-label="Search the log" placeholder="Search the log" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: "100%", margin: "8px 0", background: "var(--ink-3)", color: "var(--text)", border: "2px solid var(--line)", padding: "8px 10px", font: "inherit" }} />
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {shownLog.slice(0, 300).map((e) => (
               <li key={e.id + e.at} style={{ padding: "8px 0", borderBottom: "1px dashed var(--line)" }}>
@@ -192,7 +187,7 @@ function Mastered() {
               </li>))}
             {shownLog.length > 300 && <li className="small muted">… {(shownLog.length - 300).toLocaleString()} more — search to narrow</li>}
           </ul>
-        </div></div>, document.body
+        </Sheet>
       )}
     </div>
   );

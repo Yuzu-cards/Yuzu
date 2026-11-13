@@ -6,7 +6,7 @@ import { store } from "../lib/store";
 import { fmtDate } from "../lib/dates";
 import { useBack } from "./useBack";
 import { IconClose } from "./icons";
-import { snackbar, tellSheet } from "./kit";
+import { snackbar, tellSheet, useDialog } from "./kit";
 
 type Period = "month" | "last-month" | "year";
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -17,7 +17,7 @@ function range(p: Period, now = new Date()) {
 }
 
 export function Recap({ onClose, initial = "month" }: { onClose: () => void; initial?: Period }) {
-  useBack(true, onClose);
+  useBack(true, onClose); const dialog = useDialog();
   const [p, setP] = useState<Period>(initial);
   const r = useMemo(() => { const g = range(p); return { ...store.recap(g.from, g.to), label: g.label }; }, [p]);
   const text = () => [`Yuzu Recap · ${r.label}`, `${r.persona} — ${r.personaWhy}`, `${r.reviews.toLocaleString()} reviews · ${r.minutes.toLocaleString()} min · ${r.daysStudied} days`, r.recall !== null ? `${Math.round(r.recall * 100)}% recalled on mature cards` : "", `${r.fresh.toLocaleString()} new cards · ${r.matured.toLocaleString()} matured · ${r.retired} retired as mastered`, `I know about ${r.knowledge.toLocaleString()} cards right now.`].filter(Boolean).join("\n");
@@ -28,10 +28,10 @@ export function Recap({ onClose, initial = "month" }: { onClose: () => void; ini
   }
   const empty = r.reviews === 0;
   return createPortal(
-    <div className="recap" role="dialog" aria-modal="true" aria-label="Recap">
+    <div ref={dialog} tabIndex={-1} className="recap" role="dialog" aria-modal="true" aria-label="Recap">
       <div className="row recap-top"><b className="grow px">Recap</b><button className="icon-btn" aria-label="Close recap" onClick={onClose}><IconClose /></button></div>
       <div className="seg" style={{ margin: "0 16px 10px" }}>
-        {(["month", "last-month", "year"] as Period[]).map((k) => <button key={k} className={p === k ? "on" : ""} onClick={() => setP(k)}>{k === "month" ? "This month" : k === "last-month" ? "Last month" : "This year"}</button>)}
+        {(["month", "last-month", "year"] as Period[]).map((k) => <button key={k} className={p === k ? "on" : ""} aria-pressed={p === k} onClick={() => setP(k)}>{k === "month" ? "This month" : k === "last-month" ? "Last month" : "This year"}</button>)}
       </div>
       <div className="recap-cards">
         <section className="recap-card hero-card"><span className="px small">{r.label}</span>

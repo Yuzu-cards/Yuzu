@@ -10,7 +10,7 @@ import { Boss } from "./Boss";
 import { Inbox } from "./Inbox";
 import { ShortcutsSheet } from "./Shortcuts";
 import { startGamepad } from "../lib/gamepad";
-import { ConfirmHost, HintLayer, SnackbarHost, confirmSheet, tellSheet, snackbar } from "./kit";
+import { ConfirmHost, FieldLabels, HintLayer, SnackbarHost, confirmSheet, tellSheet, snackbar } from "./kit";
 
 type Tab = "today" | "library" | "progress" | "settings";
 const TAB_HINTS: Record<Tab, string> = {
@@ -74,7 +74,7 @@ function Recovery({ error }: { error: string }) {
   );
 }
 
-export function App() { return <ErrorBoundary><AppInner /><HintLayer /><SnackbarHost /><ConfirmHost /></ErrorBoundary>; }
+export function App() { return <ErrorBoundary><AppInner /><HintLayer /><SnackbarHost /><ConfirmHost /><FieldLabels /></ErrorBoundary>; }
 
 function AppInner() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
@@ -99,13 +99,13 @@ function AppInner() {
   useEffect(() => { startGamepad(); }, []);
   useEffect(() => {
     const tabs: Tab[] = ["today", "library", "progress", "settings"];
-    const onTab = (e: Event) => { if (study) return; const d = (e as CustomEvent).detail as number; setInbox(false); setTab((t) => tabs[(tabs.indexOf(t) + d + tabs.length) % tabs.length]); };
-    const onStudy = () => { if (!study && store.loaded) startStudy(""); };
+    const onTab = (e: Event) => { if (study || document.querySelector(".sheet-backdrop, [role=dialog]")) return; /* not behind a sheet */ const d = (e as CustomEvent).detail as number; setInbox(false); setTab((t) => tabs[(tabs.indexOf(t) + d + tabs.length) % tabs.length]); };
+    const onStudy = () => { if (!study && store.loaded && !document.querySelector(".sheet-backdrop, [role=dialog]")) startStudy(""); };
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null; if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
       if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
-      if (e.key === "?") { e.preventDefault(); setKeysOpen(true); return; }
-      if (study || document.querySelector(".sheet-backdrop")) return;
+      if (e.key === "?") { e.preventDefault(); if (!document.querySelector('[role=dialog][aria-label="Controls"]')) setKeysOpen(true); return; } // on top of any sheet; Esc unwinds one at a time
+      if (study || document.querySelector(".sheet-backdrop, [role=dialog]")) return;
       const k = e.key.toLowerCase(); const go = (x: Tab) => { e.preventDefault(); setInbox(false); setTab(x); };
       if (k === "t") go("today"); else if (k === "l") go("library"); else if (k === "p") go("progress"); else if (k === "s") go("settings");
       else if (k === "/") { e.preventDefault(); const q = document.querySelector<HTMLInputElement>('input[type=search], input[placeholder^="Search"]'); if (q) q.focus(); else { setTab("library"); setTimeout(() => document.querySelector<HTMLInputElement>('input[type=search], input[placeholder^="Search"]')?.focus(), 80); } }
@@ -168,7 +168,7 @@ function AppInner() {
       {update && <div className="toast row">New version ready <button className="btn primary" style={{ minHeight: 32, padding: "4px 12px" }} onClick={update}>Update</button></div>}
       <nav className="tabs">
         {([["today", "Today", <IconToday />], ["library", "Library", <IconLibrary />], ["progress", "Progress", <IconProgress />], ["settings", "Settings", <IconSettings />]] as const).map(([k, label, icon]) => (
-          <button key={k} className={"tab" + (tab === k ? " active" : "")} data-hint={TAB_HINTS[k]} onClick={() => { if (tab !== k) window.scrollTo(0, 0); setTab(k); setInbox(false); }}>{icon}{label}</button>
+          <button key={k} className={"tab" + (tab === k ? " active" : "")} aria-current={tab === k ? "page" : undefined} data-hint={TAB_HINTS[k]} onClick={() => { if (tab !== k) window.scrollTo(0, 0); setTab(k); setInbox(false); }}>{icon}{label}</button>
         ))}
       <button className="tab rail-only" aria-label="Keyboard and gamepad" data-hint="Controls|Keyboard, mouse and gamepad all work at once. Press ? (or View on a pad) any time." onClick={() => setKeysOpen(true)}><b style={{ fontSize: 20, lineHeight: "20px" }}>?</b><span>Keys</span></button></nav>
     </div>

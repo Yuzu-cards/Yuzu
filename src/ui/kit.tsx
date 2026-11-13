@@ -5,31 +5,105 @@ import { latinDigits } from "../lib/num";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useBack } from "./useBack";
+import { IconClose } from "./icons";
 
 const buzz = (ms: number | number[]) => { try { if (localStorage.getItem("yuzu-haptics") !== "off") navigator.vibrate?.(ms); } catch { /* no haptics */ } };
 export { buzz };
 
 // ---------------------------------------------------------------- dialogs
-/** Escape closes, Tab stays inside, focus starts on the sheet, the page behind doesn't scroll. */
-export function useDialog(onClose: () => void) {
+const dialogs: HTMLElement[] = []; // open dialogs, topmost last
+const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+/** Tab stays inside, focus starts on the sheet and goes back where it was, the page behind is inert and doesn't scroll.
+ *  Escape and Android back are useBack's (topmost overlay only). */
+export function useDialog(_onClose?: () => void) {
   const ref = useRef<HTMLDivElement>(null);
-  const closeRef = useRef(onClose); closeRef.current = onClose;
   useEffect(() => {
-    const el = ref.current; const prevFocus = document.activeElement as HTMLElement | null; const prevOverflow = document.body.style.overflow;
+    const el = ref.current; const a0 = document.activeElement as HTMLElement | null; const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden"; el?.focus({ preventScroll: true });
+    // Everything behind (the app, sheets further down) is inert: no Tab, no screen reader, no stray clicks. Toasts and the snackbar stay live.
+    const behind = [document.getElementById("root"), ...document.querySelectorAll<HTMLElement>("body > .sheet-backdrop, body > [role=dialog]")]
+      .filter((x): x is HTMLElement => !!x && !!el && !x.contains(el) && !x.hasAttribute("inert"));
+    for (const x of behind) x.setAttribute("inert", "");
+    // Focus goes back where it was; if it had fallen to the page (a tap on the scrim), back into the sheet below.
+    const prevFocus = a0 && a0 !== document.body ? a0 : dialogs[dialogs.length - 1] ?? null;
+    if (el) dialogs.push(el);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); closeRef.current?.(); }
-      else if (e.key === "Tab" && el) {
-        const items = [...el.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')];
-        if (!items.length) return; const first = items[0], last = items[items.length - 1];
-        if (e.shiftKey && (document.activeElement === first || document.activeElement === el)) { e.preventDefault(); last.focus(); }
-        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-      }
+      if (e.key !== "Tab" || !el || dialogs[dialogs.length - 1] !== el) return;
+      const items = [...el.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((x) => x.offsetParent !== null || x === document.activeElement);
+      if (!items.length) { e.preventDefault(); return; }
+      const first = items[0], last = items[items.length - 1]; const a = document.activeElement as HTMLElement | null;
+      if (!a || !el.contains(a)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+      else if (e.shiftKey && (a === first || a === el)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && a === last) { e.preventDefault(); first.focus(); }
     };
     document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; prevFocus?.focus?.({ preventScroll: true }); };
+    return () => {
+      document.removeEventListener("keydown", onKey); const i = el ? dialogs.indexOf(el) : -1; if (i >= 0) dialogs.splice(i, 1);
+      for (const x of behind) x.removeAttribute("inert");
+      if (!dialogs.length) document.body.style.overflow = prevOverflow;
+      if (prevFocus?.isConnected) prevFocus.focus?.({ preventScroll: true });
+    };
   }, []);
   return ref;
+}
+
+let sheetSeq = 0;
+/**
+ * Every sheet: a dialog with its title as a heading, a close button, Escape / Android back / pad B, focus kept inside and
+ * given back on close. A tap on the dimmed area closes it, unless something has been typed (`dirty`): then it asks first,
+ * and so do Escape and back.
+ */
+export function Sheet({ title, label, onClose, dirty = false, discard = "Discard what you typed?", wide, className = "", style, closeLabel = "Close", head, bare, children, testId }: {
+  title: string; /** a shorter accessible name than the title */ label?: string; onClose: () => void; dirty?: boolean; discard?: string; wide?: boolean; className?: string; style?: React.CSSProperties;
+  closeLabel?: string; /** extra things in the title row (chips) */ head?: ReactNode; /** no title row: the sheet draws its own (title still names the dialog) */ bare?: boolean; children: ReactNode; testId?: string;
+}) {
+  const [id] = useState(() => "sheet-t" + ++sheetSeq);
+  const closeRef = useRef(onClose); closeRef.current = onClose; const dirtyRef = useRef(dirty); dirtyRef.current = dirty;
+  const asking = useRef(false);
+  const close = () => {
+    if (!dirtyRef.current) { closeRef.current(); return; }
+    if (asking.current) return; asking.current = true;
+    confirmSheet({ title: discard, sub: "Cancel to keep editing.", yes: "Discard" }).then((ok) => { asking.current = false; if (ok) closeRef.current(); });
+  };
+  const ref = useDialog(); useBack(true, close);
+  const down = useRef(false); // a press that starts inside the sheet and ends on the scrim (selecting text) is not a tap outside
+  return createPortal(
+    <div className="sheet-backdrop" onPointerDown={(e) => { down.current = e.target === e.currentTarget; }} onMouseDown={(e) => { if (e.target === e.currentTarget) e.preventDefault(); /* focus stays in the sheet */ }} onClick={(e) => { if (e.target === e.currentTarget && down.current) close(); down.current = false; }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={bare || label ? undefined : id} aria-label={label ?? (bare ? title : undefined)} tabIndex={-1} data-testid={testId}
+        className={"sheet" + (wide ? " sheet-wide" : "") + (className ? " " + className : "")} style={style}>
+        {!bare && <div className="row sheet-head"><h2 id={id} className="grow sheet-title">{title}</h2>{head}<button className="icon-btn" aria-label={closeLabel} onClick={close}><IconClose /></button></div>}
+        {children}
+      </div>
+    </div>, document.body);
+}
+
+/** A real button that opens the file picker (reachable by Tab and the pad); the input itself stays out of the way (a script click still opens it). */
+export function FileButton({ label, accept, capture, onFile, className = "btn", disabled, inputLabel }: { label: ReactNode; inputLabel?: string; accept?: string; capture?: boolean | "environment" | "user"; onFile: (f: File) => void; className?: string; disabled?: boolean }) {
+  const input = useRef<HTMLInputElement>(null);
+  return <>
+    <button type="button" className={className} disabled={disabled} onClick={() => input.current?.click()}>{label}</button>
+    <input ref={input} type="file" style={{ display: "none" }} tabIndex={-1} aria-hidden="true" aria-label={inputLabel} accept={accept} capture={capture}
+      onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onFile(f); }} />
+  </>;
+}
+
+/** Ties every `.field > label` to the field next to it (htmlFor / id), so screen readers name it and a tap on the label focuses it. Mount once. */
+export function FieldLabels() {
+  useEffect(() => {
+    let n = 0; let queued = false;
+    const link = () => {
+      queued = false;
+      for (const lab of document.querySelectorAll<HTMLLabelElement>(".field > label:not([for])")) {
+        if (lab.querySelector("input,select,textarea")) continue; // wraps its own control
+        const f = lab.parentElement?.querySelector<HTMLElement>("input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]):not([aria-hidden=true]),select,textarea"); if (!f) continue;
+        if (!f.id) f.id = "yuzu-f" + ++n; lab.htmlFor = f.id;
+      }
+    };
+    const mo = new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(link); } });
+    link(); mo.observe(document.body, { childList: true, subtree: true });
+    return () => mo.disconnect();
+  }, []);
+  return null;
 }
 
 export interface SheetItem { label: string; onClick: () => void; danger?: boolean; disabled?: boolean; hint?: string; icon?: ReactNode }
@@ -253,8 +327,8 @@ export function DateField({ value, onChange, min, label, placeholder = "dd/mm/yy
   const native = useRef<HTMLInputElement>(null);
   const commit = () => { if (!text.trim()) { setBad(false); onChange(""); return; } const iso = isoOf(text); if (iso) { setBad(false); onChange(iso); } else setBad(true); };
   return (
-    <span className="kit-date" aria-label={label}>
-      <input type="text" inputMode="numeric" placeholder={placeholder} maxLength={10} value={text} aria-invalid={bad || undefined} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
+    <span className="kit-date">
+      <input type="text" aria-label={label ?? "Date (dd/mm/yyyy)"} inputMode="numeric" placeholder={placeholder} maxLength={10} value={text} aria-invalid={bad || undefined} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
       <button type="button" className="chip" aria-label="Choose from a calendar" onClick={() => { const n = native.current; if (!n) return; if ((n as any).showPicker) try { (n as any).showPicker(); return; } catch { /* falls through */ } n.click(); }}>📅</button>
       <input ref={native} type="date" tabIndex={-1} aria-hidden="true" value={value} min={min} onChange={(e) => onChange(e.target.value)} style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
       {bad && <span className="small" style={{ color: "var(--again)" }}>Use dd/mm/yyyy</span>}

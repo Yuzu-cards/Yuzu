@@ -6,7 +6,7 @@ import { store } from "../lib/store";
 import { parsePack } from "../import/pack";
 import { renderCard } from "../lib/render";
 import { IconClose } from "./icons";
-import { snackbar } from "./kit";
+import { FileButton, Sheet, snackbar } from "./kit";
 import { shrinkImage } from "./Occlusion";
 import { CardView } from "./Study";
 
@@ -64,8 +64,8 @@ export function CardEditor({ full = false, onClose }: { full?: boolean; onClose:
     <div className="field"><label>{label}</label>{opts2.area ? <textarea className="typeans" rows={3} aria-label={opts2.aria ?? label} placeholder={opts2.ph} value={value} onChange={(e) => set(e.target.value)} /> : <input aria-label={opts2.aria ?? label} placeholder={opts2.ph} value={value} onChange={(e) => set(e.target.value)} />}</div>
   );
   return (
-    <div className="sheet-backdrop" onClick={onClose}><div className={"sheet" + (full ? " sheet-wide" : "")} role="dialog" aria-label={full ? "Card editor" : "Quick add"} onClick={(e) => e.stopPropagation()} style={{ maxHeight: "94vh", overflow: "auto" }}>
-      <div className="row"><b className="grow">{full ? "New card" : "Quick add"}</b><button className="icon-btn" aria-label="Close editor" onClick={onClose}><IconClose /></button></div>
+    <Sheet title={full ? "New card" : "Quick add"} label={full ? "Card editor" : "Quick add"} closeLabel="Close editor" wide={full} onClose={onClose} discard="Discard this card?" style={{ maxHeight: "94vh", overflow: "auto" }}
+      dirty={!!(text.trim() || extra.trim() || front.trim() || back.trim() || question.trim() || expl.trim() || opts.some((o) => o.text.trim() || o.why.trim()) || word.trim() || meaning.trim() || plural.trim() || example.trim() || audio || image)}>
       <div className="seg" role="radiogroup" aria-label="Card type" style={{ marginTop: 8 }}>{([["cloze", "Cloze"], ["basic", "Basic"], ["mcq", "MCQ"], ["vocab", "Vocab"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={kind === k} className={kind === k ? "on" : ""} onClick={() => { setKind(k); setOrd(0); if (k === "vocab" && /^Medicine::Inbox$/.test(deck)) setDeck("German::Vocab"); else if (k !== "vocab" && deck === "German::Vocab") setDeck("Medicine::Inbox"); }}>{l}</button>)}</div>
       <div className={full ? "editor-cols" : ""}><div>
         {kind === "cloze" && <>
@@ -92,12 +92,12 @@ export function CardEditor({ full = false, onClose }: { full?: boolean; onClose:
           {field("Word", word, setWord, { ph: "Schmerz" })}{field("Meaning", meaning, setMeaning, { ph: "pain" })}
           {field("Plural", plural, setPlural, { ph: "die Schmerzen" })}{field("Example", example, setExample, { area: true, ph: "Wo haben Sie Schmerzen?" })}
           <div className="row small" style={{ gap: 8, alignItems: "center", margin: "4px 0 8px" }}>
-            <label className="btn" style={{ cursor: "pointer" }}>{audio ? "Change recording" : "Add a recording"}<input type="file" accept="audio/*" capture aria-label="Recording" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (f) setAudio(await readFile(f)); }} /></label>
+            <FileButton label={audio ? "Change recording" : "Add a recording"} inputLabel="Recording" accept="audio/*" capture onFile={async (f) => setAudio(await readFile(f))} />
             <span className="muted">{audio ? "Recording attached" : "Without one, the device says the word in German"}</span>
           </div>
         </>}
         {full && kind !== "vocab" && <div className="row small" style={{ gap: 8, alignItems: "center", margin: "4px 0 8px" }}>
-          <label className="btn" style={{ cursor: "pointer" }}>{image ? "Change picture" : "Add a picture"}<input type="file" accept="image/*" aria-label="Picture" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (f) setImage(await shrinkImage(f, 1200)); }} /></label>
+          <FileButton label={image ? "Change picture" : "Add a picture"} inputLabel="Picture" accept="image/*" onFile={async (f) => setImage(await shrinkImage(f, 1200))} />
           {image && <><img src={image} alt="" style={{ height: 40, borderRadius: 4 }} /><button className="btn" onClick={() => setImage("")}>Remove</button></>}
         </div>}
         <div className="field"><label>Deck</label><input list="yuzu-decks" aria-label="Deck" autoCapitalize="none" value={deck} onChange={(e) => setDeck(e.target.value)} /><datalist id="yuzu-decks">{decks.map((d) => <option key={d} value={d} />)}</datalist></div>
@@ -106,7 +106,7 @@ export function CardEditor({ full = false, onClose }: { full?: boolean; onClose:
       {full && <div className="editor-preview">
         <div className="row" style={{ gap: 6, alignItems: "center" }}><b className="small grow">Preview</b>
           {preview && preview.ords.length > 1 && preview.ords.map((o, i) => <button key={o} className={"chip" + (o === preview.ord ? " orange" : "")} onClick={() => setOrd(o)}>Card {i + 1}</button>)}
-          <div className="seg" style={{ margin: 0 }}><button className={side === "front" ? "on" : ""} onClick={() => setSide("front")}>Front</button><button className={side === "back" ? "on" : ""} onClick={() => setSide("back")}>Back</button></div></div>
+          <div className="seg" style={{ margin: 0 }}><button className={side === "front" ? "on" : ""} aria-pressed={side === "front"} onClick={() => setSide("front")}>Front</button><button className={side === "back" ? "on" : ""} aria-pressed={side === "back"} onClick={() => setSide("back")}>Back</button></div></div>
         {preview ? <div className={"paper" + (store.settings.nightCards ? " slate" : "")} style={{ marginTop: 8 }}><CardView html={side === "front" ? preview.front : preview.back} css={preview.css} dark={store.settings.nightCards} side={side} /></div> : <p className="small muted">The card shows here once it has what it needs{kind === "cloze" ? " (at least one gap)" : ""}.</p>}
       </div>}
       </div>
@@ -114,6 +114,6 @@ export function CardEditor({ full = false, onClose }: { full?: boolean; onClose:
         <button className="btn" onClick={clear}>Clear</button>
         <button className="btn primary grow" disabled={!ready || busy} onClick={save}>{busy ? "Saving…" : "Save card"}</button>
       </div>
-    </div></div>
+    </Sheet>
   );
 }

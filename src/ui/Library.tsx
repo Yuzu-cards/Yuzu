@@ -13,7 +13,7 @@ import { CardEditor } from "./CardEditor";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
-import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, type SheetItem } from "./kit";
+import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, Sheet, type SheetItem } from "./kit";
 import { systemColor } from "./theme";
 
 let overMemo: { ids: string[]; set: Set<string> } | null = null;
@@ -51,8 +51,7 @@ function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () =>
   if (sub === "edit") return <CardInfo card={card} onClose={() => setSub(null)} onSaved={() => setSub(null)} />;
   if (sub === "improve") return <ImproveSheet nids={[note.id]} onClose={() => setSub(null)} />;
   return (
-    <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-      <div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b>{card.flag ? <span className="chip orange">flagged</span> : null}{mark ? <span className="chip orange">to improve</span> : null}<span className="chip">{card.suspended ? "paused" : card.state}</span><button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>
+    <Sheet title="Preview" closeLabel="Close preview" onClose={onClose} head={<>{card.flag ? <span className="chip orange">flagged</span> : null}{mark ? <span className="chip orange">to improve</span> : null}<span className="chip">{card.suspended ? "paused" : card.state}</span></>}>
       <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any}><CardView html={r.back} css={r.css} dark side="back" /></div>
       <p className="small muted">{card.source}{note.tags.length ? " · " + note.tags.filter((t) => !t.startsWith("auto::")).join(", ") : ""}{mark ? ` · to improve: ${mark.r.join(", ")}${mark.t ? ` — “${mark.t}”` : ""}` : ""}</p>
       <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
@@ -65,7 +64,7 @@ function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () =>
         <button className="btn grow" onClick={() => store.setSuspended(card.id, !card.suspended)}>{card.suspended ? "Unpause" : "Pause"}</button>
         <button className="btn danger grow" onClick={async () => { const n = store.cardsOfNote(note.id).length; if (!(await confirmSheet({ title: n > 1 ? `Delete this note and its ${n} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([note.id]); onClose(); snackbar("Deleted", () => { store.undoDelete(); }); }}>Delete</button>
       </div>
-    </div></div>
+    </Sheet>
   );
 }
 
@@ -79,8 +78,7 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
   );
   const n = store.cardsMatching(sd).length;
   return (
-    <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-      <div className="row"><b className="grow">{initial ? "Edit smart deck" : "New smart deck"}</b><button className="icon-btn" aria-label="Close editor" onClick={onClose}><IconClose /></button></div>
+    <Sheet title={initial ? "Edit smart deck" : "New smart deck"} closeLabel="Close editor" onClose={onClose}>
       <p className="small muted" style={{ marginTop: 4 }}>Pick anything from each group; a card matches if it fits every group you picked. {n.toLocaleString()} cards match now.</p>
       <div className="field"><label>Name</label><input value={sd.name} onChange={(e) => setSd({ ...sd, name: e.target.value })} placeholder="Step 1 · Cardio" /></div>
       <Group title="Systems" items={SYSTEM_NAMES} k="systems" />
@@ -91,7 +89,7 @@ function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () =>
         {initial && <button className="btn danger" onClick={async () => { await store.saveSettings({ smart: store.settings.smart.filter((x) => x.id !== sd.id) }); onClose(); }}>Delete</button>}
         <button className="btn primary grow" disabled={!sd.name.trim()} onClick={async () => { const list = store.settings.smart; const at = list.findIndex((x) => x.id === sd.id); await store.saveSettings({ smart: at >= 0 ? list.map((x) => (x.id === sd.id ? sd : x)) : [...list, sd] }); onClose(); /* editing keeps its place */ }}>Save</button>
       </div>
-    </div></div>
+    </Sheet>
   );
 }
 
@@ -193,7 +191,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
       {tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}
       {tool === "card" && <CardEditor full onClose={() => setTool(null)} />}
       <div className="seg">
-        {[...VIEWS, { id: "smart" as View, label: "Smart" }].map((x) => <button key={x.id} className={view === x.id ? "on" : ""} onClick={() => { setView(x.id); go(""); }}>{x.label}</button>)}
+        {[...VIEWS, { id: "smart" as View, label: "Smart" }].map((x) => <button key={x.id} className={view === x.id ? "on" : ""} aria-pressed={view === x.id} onClick={() => { setView(x.id); go(""); }}>{x.label}</button>)}
       </div>
       {view !== "smart" && (
         <div className="crumbs">
@@ -235,7 +233,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
                 <span className="muted">{b ? `best ${Math.round(b.best * 100)}%${b.passed ? " · defeated" : ""}` : `${pool} well-learned cards, 20 random, no hints, ${Math.round(BOSS_PASS * 100)}% to pass`}</span>
               </div>) : null; })()}
           </div>
-          <div className="field"><input placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
+          <div className="field"><input type="search" aria-label="Search cards and tags" placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
           <div className="row" style={{ flexWrap: "wrap", gap: 6, margin: "-4px 0 10px" }}>
             {([["flagged", "Flagged"], ["improve", "To improve"], ["overfilled", "Overfilled"], ["leech", "Leeches"], ["suspended", "Paused"]] as const).map(([k, label]) => (
               <button key={k} data-hint={FILTER_HINT[k]} className={"chip" + (only === k ? " orange" : "")} disabled={!filterCounts[k] && only !== k} onClick={() => setOnly(only === k ? null : k)}>{label} · {filterCounts[k].toLocaleString()}</button>))}
@@ -299,32 +297,28 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
         <div className="bulk-bar"><span className="small grow">Deleted {deleted.n.toLocaleString()} note{deleted.n === 1 ? "" : "s"}</span><button className="btn" onClick={async () => { await store.undoDelete(); setDeleted(null); }}>Undo</button><button className="btn" onClick={() => setDeleted(null)}>OK</button></div>
       )}
       {tagTo !== null && (
-        <div className="sheet-backdrop" onClick={() => setTagTo(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-          <b>Tag {selected.size} cards</b>
+        <Sheet title={`Tag ${selected.size} cards`} onClose={() => setTagTo(null)}>
           <div className="field"><label>Tag (use :: for levels)</label><input value={tagTo} onChange={(e) => setTagTo(e.target.value)} placeholder="step1::high-yield" autoCapitalize="none" /></div>
           <button className="btn primary block" disabled={!tagTo.trim()} onClick={async () => { await doBulk({ addTag: tagTo.trim().replace(/\s+/g, "_") }); setTagTo(null); }}>Add tag</button>
-        </div></div>
+        </Sheet>
       )}
       {moveTo !== null && (
-        <div className="sheet-backdrop" onClick={() => setMoveTo(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-          <b>Move {selected.size} cards to</b>
+        <Sheet title={`Move ${selected.size} cards to`} onClose={() => setMoveTo(null)}>
           <div className="field"><label>Category path (use :: for levels)</label><input value={moveTo} list="deckpaths" onChange={(e) => setMoveTo(e.target.value)} placeholder="Medicine::Cardiology::ECG" /></div>
           <datalist id="deckpaths">{[...new Set([...store.cards.values()].map((c) => c.source))].sort().map((p) => <option key={p} value={p} />)}</datalist>
           <button className="btn primary block" disabled={!moveTo.trim()} onClick={async () => { await doBulk({ source: moveTo.trim() }); setMoveTo(null); }}>Move</button>
-        </div></div>
+        </Sheet>
       )}
       {rename !== null && (
-        <div className="sheet-backdrop" onClick={() => setRename(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-          <b>Rename or move “{path.split("::").pop()}”</b>
+        <Sheet title={`Rename or move “${path.split("::").pop()}”`} onClose={() => setRename(null)}>
           <p className="small muted" style={{ marginTop: 4 }}>Edit the full path. Change the last part to rename; change the part before it to move the category (and everything inside it) somewhere else.</p>
           <div className="field"><label>Full path</label><input value={rename} list="deckpaths" onChange={(e) => setRename(e.target.value)} /></div>
           <datalist id="deckpaths">{[...new Set([...store.cards.values()].map((c) => c.source))].sort().map((p) => <option key={p} value={p} />)}</datalist>
           <button className="btn primary block" disabled={!rename.trim() || rename.trim() === path} onClick={async () => { const to = rename.trim(); await store.renamePath(path, to); setRename(null); go(to.replace(/\s*::\s*/g, "::")); }}>Apply</button>
-        </div></div>
+        </Sheet>
       )}
       {classify && (
-        <div className="sheet-backdrop" onClick={() => setClassify(null)}><div className="sheet" onClick={(e) => e.stopPropagation()}>
-          <b>{classify} for {selected.size} cards</b>
+        <Sheet title={`${classify} for ${selected.size} cards`} onClose={() => setClassify(null)}>
           <p className="small muted" style={{ marginTop: 4 }}>Tap to add; tap again (when all selected cards have it) to remove. A card can belong to several.</p>
           <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
             {(classify === "System" ? SYSTEM_NAMES : store.tree("specialties").children.map((c) => c.name).filter((n) => n !== "Other")).map((name) => {
@@ -334,7 +328,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           </div>
           {classify === "Specialty" && <div className="field" style={{ marginTop: 10 }}><label>New specialty</label><div className="row"><input className="grow" id="newspec" placeholder="e.g. Toxicology" /><button className="btn" onClick={() => { const v = (document.getElementById("newspec") as HTMLInputElement).value.trim(); if (v) store.classify([...selected], "Specialty", v, true); }}>Add</button></div></div>}
           <button className="btn block" style={{ marginTop: 10 }} onClick={() => setClassify(null)}>Done</button>
-        </div></div>
+        </Sheet>
       )}
       {preview && <Preview card={preview} onClose={() => setPreview(null)} onStudy={(cards, t) => { setPreview(null); onStudy(path, view, { preset: cards, title: t }); }} />}
       {sheet && <ActionSheet title={sheet.title} sub={sheet.sub} items={sheet.items} onClose={() => setSheet(null)} />}
