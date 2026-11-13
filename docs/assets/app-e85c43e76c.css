@@ -475,3 +475,6 @@ kbd { font-family: var(--sans); font-size: 12.5px; padding: 2px 6px; border: 1px
 :root:is([data-ui="clean"], [data-ui="paper"]) kbd { border-radius: 5px !important; }
 .tab.rail-only { display: none; }
 @media (min-width: 1100px) { .tab.rail-only { display: flex; margin-top: auto; } }
+
+/* ---- README.css */
+/* Styles added per piece of work; concatenated after styles.css by scripts/build.mjs in name order. */

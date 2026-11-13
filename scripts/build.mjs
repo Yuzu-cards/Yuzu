@@ -31,7 +31,9 @@ const result = await esbuild.build({
   logLevel: "info",
 });
 const js = result.outputFiles.find((f) => f.path.endsWith(".js")).contents;
-const css = fs.readFileSync(path.join(root, "src/styles.css"));
+// styles.css first, then every src/css/*.css in name order (so separate pieces of work can add styles without editing the same file)
+const cssDir = path.join(root, "src/css");
+const css = Buffer.concat([fs.readFileSync(path.join(root, "src/styles.css")), ...(fs.existsSync(cssDir) ? fs.readdirSync(cssDir).filter((f) => f.endsWith(".css")).sort().map((f) => Buffer.concat([Buffer.from(`\n/* ---- ${f} */\n`), fs.readFileSync(path.join(cssDir, f))])) : [])]);
 const jsName = `app-${hash(js)}.js`, cssName = `app-${hash(css)}.css`;
 fs.writeFileSync(path.join(dist, "assets", jsName), js);
 fs.writeFileSync(path.join(dist, "assets", cssName), css);
