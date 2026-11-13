@@ -1,5 +1,5 @@
 // Library search (WP16): every field of a note, stripped of HTML and cloze markup, digits made Latin, ranked.
-// A note's text is kept as one lowercased string: front ␁ other fields ␁ tags ␁ housekeeping tags. Plain
+// A note's text is kept as one lowercased string: front ␁ other fields ␁ topic tags. Plain
 // String.indexOf over that is fast enough for 100k notes when the scan is cut into slices (see Store.searchNotes).
 import { latinDigits } from "./num";
 import type { Note } from "./model";
@@ -31,16 +31,17 @@ export function stripForSearch(html: string): string {
 }
 const norm = (s: string) => latinDigits(s).toLowerCase();
 
-/** The note as one searchable string (see the header). The front is the first non-empty field, as in the list's titles. */
+/** The note as one searchable string: front ␁ other fields ␁ topic tags. The front is the first non-empty field, as in the list's
+ *  titles. Housekeeping tags are left out (AnKing's long #AK_… paths would double the index); see housekeepingText. */
 export function buildSearchDoc(n: Note): string {
   const parts = n.fields.map((f, i) => (n.ntid === IO_ID && i === 1 ? "" : stripForSearch(f))); // an occlusion's mask list is coordinates, not text
   const fi = parts.findIndex((p) => p.length > 0);
   const front = fi >= 0 ? parts[fi] : "";
   const rest = parts.filter((p, i) => i !== fi && p).join("\n");
-  const tags: string[] = [], hk: string[] = [];
-  for (const t of n.tags) (isHousekeepingTag(t) ? hk : tags).push(t);
-  return norm(front) + SEP + norm(rest) + SEP + norm(tags.join(" ")) + SEP + norm(hk.join(" "));
+  return norm(front) + SEP + norm(rest) + SEP + norm(n.tags.filter((t) => !isHousekeepingTag(t)).join(" "));
 }
+/** The note's housekeeping tags, searched only when the query asks for them (built on demand, not kept). */
+export function housekeepingText(n: Note): string { return norm(n.tags.filter(isHousekeepingTag).join(" ")); }
 
 export interface SearchQuery { phrase: string; tokens: string[]; tagsOnly: boolean; housekeeping: boolean; key: string }
 /** "tag:x" searches tags only; housekeeping tags are searched only when the query looks like one (#…, auto::…, a :: path). */
@@ -62,20 +63,24 @@ function wordStartIn(doc: string, needle: string, from: number, to: number): boo
 
 /** 0 when the note doesn't match (every word must appear); otherwise a rank, higher is better:
  *  the phrase starting the front > as a word in the front > anywhere in the front > in the other fields > words spread out > tags only.
- *  A shorter front wins a tie (a card titled exactly "Pneumothorax" beats a long sentence that mentions it). */
-export function scoreDoc(doc: string, q: SearchQuery): number {
-  const a = doc.indexOf(SEP), b = doc.indexOf(SEP, a + 1), c = doc.indexOf(SEP, b + 1);
-  const from = q.tagsOnly ? b + 1 : 0, to = q.housekeeping ? doc.length : c;
-  for (const t of q.tokens) { const i = doc.indexOf(t, from); if (i < 0 || i >= to) return 0; }
+ *  A shorter front wins a tie (a card titled exactly "Pneumothorax" beats a long sentence that mentions it).
+ *  `hk` is the note's housekeeping-tag text, passed only for queries that ask for it. */
+export function scoreDoc(doc: string, q: SearchQuery, hk?: string): number {
+  // Fast rejection first: most notes miss a word, and indexOf over the whole string is the cheapest test there is.
+  for (const t of q.tokens) if (doc.indexOf(t) < 0 && !(hk && hk.indexOf(t) >= 0)) return 0;
+  const full = hk ? doc + " " + hk : doc; // housekeeping tags extend the tags part
+  const a = full.indexOf(SEP), b = full.indexOf(SEP, a + 1);
+  const from = q.tagsOnly ? b + 1 : 0;
+  if (from) for (const t of q.tokens) if (full.indexOf(t, from) < 0) return 0;
   const tie = 1 - Math.min(a, 999) / 1000;
-  const p = doc.indexOf(q.phrase, from);
-  if (p >= 0 && p < to) {
-    if (p < a) return (p === 0 ? 1000 : wordStartIn(doc, q.phrase, 0, a) ? 800 : 600) + tie;
-    if (p < b) return (wordStartIn(doc, q.phrase, a + 1, b) ? 400 : 300) + tie;
+  const p = full.indexOf(q.phrase, from);
+  if (p >= 0) {
+    if (p < a) return (p === 0 ? 1000 : wordStartIn(full, q.phrase, 0, a) ? 800 : 600) + tie;
+    if (p < b) return (wordStartIn(full, q.phrase, a + 1, b) ? 400 : 300) + tie;
     return 100 + tie;
   }
   let front = 0, body = 0;
-  for (const t of q.tokens) { const i = doc.indexOf(t, from); if (i < a) front++; else if (i < b) body++; }
+  for (const t of q.tokens) { const i = full.indexOf(t, from); if (i < a) front++; else if (i < b) body++; }
   if (front === q.tokens.length) return 500 + tie;
   if (front + body === q.tokens.length) return 200 + (front / q.tokens.length) * 50 + tie;
   return 50 + tie;

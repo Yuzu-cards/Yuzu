@@ -16,7 +16,7 @@ import { writeZip, streamZip, ZipParts } from "./zipwrite";
 import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError } from "./google";
 import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
-import { buildSearchDoc, parseQuery, scoreDoc } from "./search";
+import { buildSearchDoc, housekeepingText, parseQuery, scoreDoc } from "./search";
 declare const __VERSION__: string;
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, type ShardCache, type SyncConfig } from "./sync";
 
@@ -2391,7 +2391,7 @@ export class Store {
     const prev = this.lastSearch; const narrow = prev && prev.sv === ix.sv && prev.key === q.key && q.phrase.startsWith(prev.phrase) ? prev.hits : null;
     const n = narrow ? narrow.length : ix.docs.length; const hits: number[] = []; let t = performance.now();
     for (let k = 0; k < n; k++) {
-      const i = narrow ? narrow[k] : k; const sc = scoreDoc(ix.docs[i], q);
+      const i = narrow ? narrow[k] : k; const hn = q.housekeeping ? this.notes.get(ix.ids[i]) : undefined; const sc = scoreDoc(ix.docs[i], q, hn ? housekeepingText(hn) : undefined);
       if (sc > 0) { hits.push(i); out.set(ix.ids[i], sc); }
       if ((k & 511) === 511 && performance.now() - t > 8) { await slice(); if (cancel?.cancelled) return null; t = performance.now(); }
     }

@@ -33,6 +33,13 @@ function passes(c: Card, only: "flagged" | "improve" | "suspended" | "leech" | "
   return !!store.noteFor(c)?.tags.includes("leech");
 }
 
+// Scope cards and their counts, kept across views and visits for the same store version: switching Decks → Systems at the
+// root, or coming back to All, reuses them instead of walking 146k cards again (09-3).
+const scopeMemo = new Map<string, Card[]>();
+const scopeFor = (key: string, make: () => Card[]) => { let c = scopeMemo.get(key); if (!c) { c = make(); scopeMemo.set(key, c); if (scopeMemo.size > 4) scopeMemo.delete(scopeMemo.keys().next().value!); } return c; };
+const derived = new WeakMap<Card[], Record<string, unknown>>();
+function memoOn<T>(cards: Card[], k: string, make: () => T): T { let d = derived.get(cards); if (!d) derived.set(cards, (d = {})); if (!(k in d)) d[k] = make(); return d[k] as T; }
+
 function findNode(root: TreeNode, path: string): TreeNode | null {
   if (!path) return root;
   const parts = path.split("::");
@@ -130,39 +137,39 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const smart = view === "smart" && path ? store.settings.smart.find((s) => s.id === path) : null;
   const pinned = store.settings.pins.some((p) => p.view === view && p.path === path);
 
-  const scopeCards = useMemo(() => (view === "smart" ? (smart ? store.cardsMatching(smart) : []) : store.cardsIn(path, view)), [path, view, v]);
-  const counts = useMemo(() => {
+  const scopeCards = useMemo(() => scopeFor(`${v}|${view === "smart" ? "smart" : path ? view : ""}|${path}`, () => (view === "smart" ? (smart ? store.cardsMatching(smart) : []) : store.cardsIn(path, view))), [path, view, v]);
+  const counts = useMemo(() => memoOn(scopeCards, "counts", () => {
     const now = Date.now(); let due = 0, learning = 0, fresh = 0, susp = 0, studied = 0;
     for (const c of scopeCards) { if (c.suspended) { susp++; continue; } if (c.state === "new") fresh++; else if (c.due <= now) due++; if (c.state === "learning" || c.state === "relearning") learning++; if (c.reps) studied++; }
     return { due, learning, fresh, susp, studied, total: scopeCards.length };
-  }, [scopeCards]);
+  }), [scopeCards]);
 
-  // One row per note; `byNote` keeps every matching card of it, so counts, "All", bulk actions and Study act on all of them.
+  // One row per note; `all` keeps every matching card, so counts, "All", bulk actions and Study act on all of them (03-3).
   const scores = q ? (hits && (hits.q === q || searching) ? hits.scores : null) : null;
   const sortBy = sort === "best" && !scores ? "due" : sort;
   const matches = useMemo(() => {
-    const byNote = new Map<string, Card[]>(); const out: Card[] = []; let cards = 0;
-    if (!showCards && !q && !only) return { rows: out, byNote, cards };
-    if (q && !scores) return { rows: out, byNote, cards };
+    const first = new Map<string, Card>(); const all: Card[] = []; let out: Card[] = [];
+    if (!showCards && !q && !only) return { rows: out, all, cards: 0 };
+    if (q && !scores) return { rows: out, all, cards: 0 };
     const over = only === "overfilled" ? overSet() : undefined;
     for (const c of scopeCards) {
       if (only && !passes(c, only, over)) continue; // checked per card, before siblings are folded together (a flag sits on one card)
       if (scores && !scores.has(c.nid)) continue;
-      const g = byNote.get(c.nid); if (g) g.push(c); else { byNote.set(c.nid, [c]); out.push(c); }
-      cards++;
+      all.push(c); if (!first.has(c.nid)) { first.set(c.nid, c); out.push(c); }
     }
+    // Sort on precomputed numeric keys (a query like "p" matches most of the collection; comparator lookups would freeze it).
     const order = { learning: 0, relearning: 0, review: 1, new: 2 } as Record<string, number>;
-    const byDue = (a: Card, b: Card) => (a.state === "new" ? 1 : 0) - (b.state === "new" ? 1 : 0) || a.due - b.due;
-    if (sortBy === "best" && scores) out.sort((a, b) => scores.get(b.nid)! - scores.get(a.nid)! || byDue(a, b));
-    else if (sortBy === "due") out.sort(byDue);
-    else if (sortBy === "new") out.sort((a, b) => b.created - a.created);
-    else if (sortBy === "state") out.sort((a, b) => (a.suspended ? 3 : order[a.state]) - (b.suspended ? 3 : order[b.state]));
+    const keyed = (k: (c: Card) => number) => { const ks = out.map((c, i) => ({ c, k: k(c), d: (c.state === "new" ? 1e15 : 0) + c.due, i })); ks.sort((a, b) => a.k - b.k || a.d - b.d || a.i - b.i); return ks.map((x) => x.c); };
+    if (sortBy === "best" && scores) out = keyed((c) => -scores.get(c.nid)!);
+    else if (sortBy === "due") out = keyed(() => 0);
+    else if (sortBy === "new") out = keyed((c) => -c.created);
+    else if (sortBy === "state") out = keyed((c) => (c.suspended ? 3 : order[c.state]));
     else out.sort((a, b) => a.source.localeCompare(b.source));
-    return { rows: out, byNote, cards };
+    return { rows: out, all, cards: all.length };
   }, [scopeCards, showCards, q, scores, sortBy, only, v]);
-  const groupOf = (c: Card) => matches.byNote.get(c.nid) ?? [c];
-  const matchedCards = () => { const out: Card[] = []; for (const r of matches.rows) out.push(...groupOf(r)); return out; };
-  const filterCounts = useMemo(() => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0, overfilled: 0 }; const over = overSet(); const overN = new Set<string>(); const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); if (over.has(c.nid)) overN.add(c.nid); } k.overfilled = overN.size; k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }, [scopeCards]);
+  const groupOf = (c: Card) => { const g = matches.all.filter((x) => x.nid === c.nid); return g.length ? g : [c]; };
+  const matchedCards = () => scores ? matches.all.map((c) => ({ c, k: -scores.get(c.nid)! })).sort((a, b) => a.k - b.k).map((x) => x.c) : matches.all;
+  const filterCounts = useMemo(() => memoOn(scopeCards, "filters", () => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0, overfilled: 0 }; const over = overSet(); const overN = new Set<string>(); const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); if (over.has(c.nid)) overN.add(c.nid); } k.overfilled = overN.size; k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }), [scopeCards]);
   const list = useMemo(() => matches.rows.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "suspended" : c.state }; }), [matches]);
 
   // Hooks first, always in the same order (the empty-library screen below returns early).
