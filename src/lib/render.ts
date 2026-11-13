@@ -1,6 +1,7 @@
 // Anki template renderer: fields, conditionals, cloze, FrontSide, media rewriting.
 import type { Note, Notetype } from "./model";
 import { IO_ID, parseMasks } from "./occlusion";
+import { MCQ_ID } from "./mcq";
 
 export interface RenderCtx {
   note: Note;
@@ -131,12 +132,17 @@ function renderOcclusion(ctx: RenderCtx): { front: string; back: string } {
   return { front: title + draw("q") + `<div class="small">What is hidden here?</div>`, back: title + draw("a") + (label ? `<div class="io-ans">${escapeHtml(label)}</div>` : "") + extra + src };
 }
 
-export function renderCard(ctx: RenderCtx): { front: string; back: string; css: string } {
+export function renderCard(ctx: RenderCtx): { front: string; back: string; css: string; /** multiple choice: the back without the explanation (it goes after the options in Study) */ mcqBack?: string; mcqTail?: string } {
   if (ctx.notetype.id === IO_ID) { const o = renderOcclusion(ctx); return { front: rewriteMedia(o.front, ctx.resolveMedia), back: rewriteMedia(o.back, ctx.resolveMedia), css: ctx.notetype.css }; }
   const tmpl = ctx.notetype.templates[Math.min(ctx.ord, ctx.notetype.templates.length - 1)] ?? ctx.notetype.templates[0];
   const front = renderTemplate(tmpl?.qfmt ?? "{{Front}}", ctx, "q");
   const back = renderTemplate(tmpl?.afmt ?? "{{FrontSide}}<hr id=answer>{{Back}}", ctx, "a", front);
-  return { front: rewriteMedia(front, ctx.resolveMedia), back: rewriteMedia(back, ctx.resolveMedia), css: rewriteCssUrls(ctx.notetype.css, ctx.resolveMedia) };
+  const out: ReturnType<typeof renderCard> = { front: rewriteMedia(front, ctx.resolveMedia), back: rewriteMedia(back, ctx.resolveMedia), css: rewriteCssUrls(ctx.notetype.css, ctx.resolveMedia) };
+  if (ctx.notetype.id === MCQ_ID && ctx.notetype.fields.includes("Explanation")) {
+    out.mcqBack = rewriteMedia(front + "<hr id=answer>", ctx.resolveMedia);
+    out.mcqTail = rewriteMedia(renderTemplate("{{#Explanation}}<div class=extra>{{Explanation}}</div>{{/Explanation}}{{#Source}}<div class=src>{{Source}}</div>{{/Source}}", ctx, "a"), ctx.resolveMedia);
+  }
+  return out;
 }
 
 /** Plain-text preview of a note (first non-empty field), for lists and duplicate detection. */

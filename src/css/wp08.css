@@ -1,0 +1,49 @@
+/* WP08 — how cards look and behave in study */
+
+/* The state stamp ("new", "learning", "405d late") gets its own strip above the text instead of covering the first line */
+.paper:has(> .stamp) { padding-top: 34px; }
+.stamp { top: 7px; }
+
+/* Multiple choice: the options and the explanation after them line up with the question's column (the card's 62ch) */
+.paper > .mcq, .paper > .card-tail { max-width: 62ch; font-family: var(--sans); font-size: 19px; }
+.paper > .card-tail { min-height: 0; margin-top: 6px; }
+.paper > .mcq .mcq-opt { font-size: 17px; }
+:root[data-ui="paper"] .slate .mcq-opt.right { border-color: #7fa34a; background: rgba(127,163,74,.22); color: #ECEEF7; }
+:root[data-ui="paper"] .slate .mcq-opt.wrong { border-color: #e0694a; background: rgba(214,90,60,.22); color: #ECEEF7; }
+/* no empty band between the question and the options (the card's usual minimum height is for cards without options) */
+.paper > .card-host:has(+ .mcq) { min-height: 0; }
+
+/* The suggested grade after a multiple-choice answer: a filled ring that survives Arcade's clipped corners */
+.answer-bar button.suggest { box-shadow: inset 0 0 0 3px var(--orange, #f08a24); background: color-mix(in srgb, var(--orange, #f08a24) 16%, var(--ink-2)); }
+.answer-bar button.suggest::after { content: "suggested"; font-family: var(--sans); font-size: 10px; line-height: 10px; color: var(--orange, #f08a24); letter-spacing: .02em; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .answer-bar button.suggest { box-shadow: inset 0 0 0 2px var(--orange, #f08a24); }
+
+/* Key / pad hints: a small number (or d-pad arrow) on each rating button when a keyboard or pad is in use */
+.key-badge { display: none; font-family: var(--sans); font-size: 11px; line-height: 11px; font-weight: 700; padding: 2px 5px; border: 1px solid currentColor; opacity: .75; }
+.study[data-input="keys"] .key-badge, .study[data-input="pad"] .key-badge { display: inline-block; }
+.key-badge .kb-pad, .study[data-input="pad"] .key-badge .kb-key { display: none; }
+.study[data-input="pad"] .key-badge .kb-pad { display: inline; }
+.answer-bar button:has(.key-badge) { gap: 4px; }
+.key-tip { font-family: var(--sans); }
+
+/* "+1 missed card back": the counter went up because a missed card came back */
+.left-grew { color: var(--orange); white-space: nowrap; animation: wp08-fade 2.6s steps(6) forwards; }
+@keyframes wp08-fade { 0%, 70% { opacity: 1 } 100% { opacity: 0 } }
+@media (max-width: 420px) { .left-grew { position: absolute; top: calc(100% - 4px); right: 12px; font-size: 11px; } .study-top { position: relative; } }
+
+/* First-letter hint: the sans font, so its middle dots read on cream */
+.hint-line { font-family: var(--sans); font-size: 18px; line-height: 1.4; letter-spacing: .06em; font-weight: 600; }
+
+/* Card info: "learning" / "relearning" fit their tile */
+.stat.stat-state { grid-column: span 2; min-width: 0; }
+.stat.stat-state b { overflow-wrap: anywhere; text-transform: capitalize; }
+
+/* Typed answers: right / near miss / wrong, readable on cream and on dark cards */
+.typed-res { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.typed-res .chip.ok { background: rgba(127,163,74,.2); color: #4e6e2a; }
+.typed-res .chip.near { background: rgba(232,160,40,.2); color: #8a5a0c; }
+.typed-res .chip.no { background: rgba(214,90,60,.18); color: #a33a22; }
+.slate .typed-res .chip.ok { color: #b6d68a; } .slate .typed-res .chip.near { color: #f2c46b; } .slate .typed-res .chip.no { color: #f29a82; }
+
+/* The session summary: what the toasts said (goal, matured, leeches) */
+.session-events { margin: 14px auto 0; max-width: 420px; text-align: left; padding: 8px 12px; border: 2px solid var(--line-soft); display: grid; gap: 4px; }
