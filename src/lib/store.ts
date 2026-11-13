@@ -114,6 +114,8 @@ export const VIEWS: { id: View; label: string }[] = [
 export interface TreeNode {
   name: string; path: string; children: TreeNode[];
   total: number; due: number; newCount: number; learning: number; suspended: number; reviewed: number;
+  /** Today's words: "due" = review cards due now; "learning" = learning steps due now (`due` above counts both, `learning` every card in its steps). */
+  reviewDue?: number; learningDue?: number;
 }
 
 export interface Stats { today: number; goal: number; streak: number }
@@ -2012,7 +2014,7 @@ export class Store {
       node.total++;
       if (c.suspended) { node.suspended++; return; }
       if (c.state === "new") node.newCount++;
-      else if (c.due <= now) node.due++;
+      else if (c.due <= now) { node.due++; if (c.state === "review") node.reviewDue = (node.reviewDue ?? 0) + 1; else node.learningDue = (node.learningDue ?? 0) + 1; }
       if (c.state === "learning" || c.state === "relearning") node.learning++;
       if (c.reps > 0) node.reviewed++;
     };

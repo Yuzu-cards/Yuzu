@@ -139,10 +139,14 @@ function AppInner() {
 
   // Deep links from Citrus (HUB.md): ?from=citrus&do=<id> jumps straight there, then the address is cleaned up.
   useEffect(() => {
-    if (!store.loaded) return;
     const q = new URLSearchParams(location.search); const act = q.get("do"); const from = q.get("from");
+    // ← Citrus only while this visit came from Citrus: a plain open of Yuzu clears it. Back goes to the page that opened Yuzu.
+    try {
+      if (from === "citrus") { sessionStorage.setItem("yuzu-from", "citrus"); const ref = document.referrer ? new URL(document.referrer) : null; if (ref && /^https?:$/.test(ref.protocol) && ref.origin + ref.pathname !== location.origin + location.pathname) sessionStorage.setItem("yuzu-from-url", ref.origin + ref.pathname); }
+      else { sessionStorage.removeItem("yuzu-from"); sessionStorage.removeItem("yuzu-from-url"); }
+    } catch { /* fine */ }
+    if (!store.loaded) return; // (the lines above run at mount, before Today first shows the chip)
     if (!act && !from) return;
-    if (from === "citrus") { try { sessionStorage.setItem("yuzu-from", "citrus"); } catch { /* fine */ } }
     try { history.replaceState(history.state, "", location.pathname + location.hash); } catch { /* fine */ }
     const exam = (store.settings.deadlines ?? []).filter((d) => d.date >= store.isoToday()).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
     if (act === "review" || act === "study") startStudy("");
@@ -151,6 +155,8 @@ function AppInner() {
     else if (act === "leeches") browse("decks", "", undefined, "leech");
     else if (act === "capture" || act === "practice" || act === "workload" || act === "add") { setStudy(null); setInbox(false); setTab("today"); store.openOnToday(act); }
     else if (act === "settings") { setStudy(null); setTab("settings"); }
+    else if (act === "exam") snackbar("No exam date set yet (Settings → Exam countdown)");
+    else if (act) snackbar(`This link asks for “${act.slice(0, 40)}”, which Yuzu doesn't know — opened Today`);
   }, [store.loaded]);
 
   useEffect(() => {
