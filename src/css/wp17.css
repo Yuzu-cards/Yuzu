@@ -1,0 +1,37 @@
+/* WP17: image occlusion editor (boxes drawn over the picture, fixed picture), card editor notes, smart-deck tags. */
+
+/* The editor sheet has a fixed height: the picture stays put at the top and the box names scroll below it,
+   so adding a box never moves the picture under the finger. */
+.sheet.io-sheet-on { height: 92vh; height: 92dvh; max-height: 92dvh; display: flex; flex-direction: column; overflow: hidden; }
+.io-sheet-on .io-top { flex: none; }
+.io-sheet-on .io-rest { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding-bottom: 4px; }
+.io-tip { margin: 4px 0 8px; min-height: 2.6em; }
+.io-warn { color: var(--clay); }
+.io-stage { display: flex; justify-content: center; }
+
+/* The canvas wraps the picture exactly, so percent coordinates match what the finger covers. */
+.io.io-ed { position: relative; display: inline-block; max-width: 100%; line-height: 0; touch-action: none; user-select: none; -webkit-user-select: none; cursor: crosshair; }
+.io.io-ed img { display: block; max-width: 100%; max-height: 52vh; max-height: 52dvh; width: auto; height: auto; border-radius: 8px; -webkit-user-drag: none; pointer-events: none; }
+.io-ed .io-box { position: absolute; box-sizing: border-box; border-radius: 3px; }
+.io-ed .io-hide { background: color-mix(in srgb, var(--orange) 72%, transparent); border: 2px solid var(--orange-dark); color: #fff; cursor: move; touch-action: none; }
+.io-ed .io-hide:focus-visible { outline: 3px solid var(--yuzu); outline-offset: 1px; }
+.io-ed .io-sel { border: 2px dashed #fff; box-shadow: 0 0 0 2px var(--orange-dark); background: color-mix(in srgb, var(--orange) 55%, transparent); }
+.io-ed .io-open { border: 3px solid var(--leaf); background: color-mix(in srgb, var(--leaf) 18%, transparent); pointer-events: none; }
+.io-num { position: absolute; left: 2px; top: 2px; font: 700 12px/16px var(--sans); color: #fff; text-shadow: 0 1px 2px #0008; pointer-events: none; }
+/* Touch-sized controls on the selected box: ✕ top-right, resize grip bottom-right (44 px hit area around a small visible mark). */
+.io-del { position: absolute; right: -14px; top: -14px; width: 28px; height: 28px; border-radius: 50%; border: 2px solid #fff; background: var(--clay); color: #fff; font: 700 13px/1 var(--sans); padding: 0; cursor: pointer; z-index: 2; }
+.io-del::after { content: ""; position: absolute; inset: -8px; }
+.io-handle { position: absolute; right: -10px; bottom: -10px; width: 20px; height: 20px; background: #fff; border: 2px solid var(--orange-dark); border-radius: 3px; cursor: nwse-resize; z-index: 2; touch-action: none; }
+.io-handle::after { content: ""; position: absolute; inset: -12px; }
+.io-pick { position: relative; margin-top: 10px; cursor: pointer; }
+.io-file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.io-row { flex-direction: row; align-items: center; margin: 6px 0; }
+.io-row.on .io-n { color: var(--orange); }
+.io-n { min-width: 22px; cursor: pointer; }
+
+/* Card editor: what carries over to the next card, and inline hints */
+.ed-kept { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -4px 0 8px; }
+.ed-hint { color: var(--clay); }
+.ed-similar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; margin: 8px 0; border: 2px solid var(--orange); background: color-mix(in srgb, var(--orange) 12%, transparent); }
+.chip.mcq-pick { min-width: 44px; min-height: 44px; justify-content: center; font-weight: 700; }
+.io-foot { flex: none; margin-top: 10px; }

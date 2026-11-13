@@ -32,6 +32,8 @@ export interface Note {
   /** Part stamps for sync (lib/sync.ts mergeNotes): per field [time, hash of the text it stamps], and per user tag
    *  +time (added) / −time (removed). A stamp whose hash no longer matches was overtaken by a change made elsewhere. */
   pm?: { f?: PartStamp[]; t?: Record<string, number> };
+  /** Set on a note tagged needs-review::similar when it was added: the existing note it resembles. */
+  similarTo?: string;
 }
 
 /** [time of the change (ms), short hash of the value it set]. */

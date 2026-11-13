@@ -216,13 +216,13 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
     // near-duplicate check against existing notes
     const sh = shingles(norm); const cand = new Map<string, number>();
     for (const x of sh) { const ids = index.get(x); if (ids && ids.size < 2000) for (const id of ids) cand.set(id, (cand.get(id) ?? 0) + 1); }
-    let isSimilar = false;
+    let isSimilar = false; let similarTo: string | undefined; // the note it resembles, so the pair can be shown side by side
     for (const [id, k] of cand) {
       const other = texts.get(id)!; const j = k / (sh.size + other.size - k); const containment = k / Math.max(1, Math.min(sh.size, other.size));
-      if (j >= 0.6 || (containment >= 0.8 && Math.min(sh.size, other.size) >= 4)) { isSimilar = true; break; }
+      if (j >= 0.6 || (containment >= 0.8 && Math.min(sh.size, other.size) >= 4)) { isSimilar = true; similarTo = id; break; }
     }
     const tags = [...new Set([...packTags, ...strTags(c.tags), ...(isSimilar ? ["needs-review::similar"] : [])])];
-    const note: Note = { id, ntid: nt.id, guid: id, fields, tags, created: now + i, modified: now + i };
+    const note: Note = { id, ntid: nt.id, guid: id, fields, tags, created: now + i, modified: now + i, ...(similarTo && similarTo !== id ? { similarTo } : {}) };
     notes.push(note); exact.set(norm, id); madeHere.add(id); warn();
     texts.set(id, sh); for (const x of sh) (index.get(x) ?? index.set(x, new Set()).get(x)!).add(id);
     if (isSimilar) similar++;

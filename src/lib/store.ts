@@ -107,6 +107,7 @@ export interface ExamStatus { daysLeft: number; total: number; seen: number; uns
   /** scope cards tomorrow's queue would bring in at the current limit; days until the last one comes in (null: not within a year);
    *  the smallest daily limit (for every deck) that gets them all in before the review-only days (only with opts.setTo); exam today/tomorrow with cards still new */
   share: number; lastNewIn: number | null; setTo: number | null; tooLate: boolean }
+const normPath = (p: string) => p.trim().replace(/\s*::\s*/g, "::").replace(/^::|::$/g, "");
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface Capture { id: string; at: number; text: string; image?: string; source: string; sent: boolean }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -1102,7 +1103,9 @@ export class Store {
 
   /** Image occlusion from the editor: one picture, its boxes; each box is a card. */
   async addOcclusion(o: { title: string; image: string; masks: import("./occlusion").Mask[]; category: string }): Promise<string> {
-    return this.importPack({ yuzu_pack: 1, id: "occlusion", category: o.category || "Medicine::Inbox", cards: [{ type: "occlusion", front: o.title || "Image occlusion", image: o.image, masks: o.masks }] });
+    const msg = await this.importPack({ yuzu_pack: 1, id: "occlusion", category: o.category || "Medicine::Inbox", cards: [{ type: "occlusion", front: o.title || "Image occlusion", image: o.image, masks: o.masks }] });
+    // the pack message counts notes; one picture is one note but a card per box
+    return msg.replace(/^1 cards added/, `${o.masks.length} card${o.masks.length === 1 ? "" : "s"} added`);
   }
   async importPack(json: unknown, opts: { restoreDeleted?: boolean } = {}): Promise<string> { return (await this.importPackDetailed(json, opts)).message; }
   /**
@@ -1146,9 +1149,13 @@ export class Store {
     for (const n of r.notes) this.notes.set(n.id, n);
     for (const c of cardsOut) this.cards.set(c.id, c);
     for (const b of blobs) this.media.set(b.name, b.blob);
+    this.lastSimilar = r.notes.filter((n) => n.similarTo && n.tags.includes(SIMILAR_TAG) && !updated.has(n.id)).map((n) => n.id);
     this.bump(); this.touch();
     return summary;
   }
+  /** Notes the last pack import tagged as looking like an existing card (read once, by the card editor). */
+  lastSimilar: string[] = [];
+  takeSimilar(): string[] { const s = this.lastSimilar; this.lastSimilar = []; return s; }
 
   /** Apply a curation file made by Claude: deck moves, note merges (keep one note, drop the copies, union tags) and tag additions. */
   async importCuration(json: unknown, onProgress?: (msg: string, frac: number) => void): Promise<string> {
@@ -2024,7 +2031,7 @@ export class Store {
   dismissedPairs = new Set<string>();
   mergeLog: { at: number; keep: string; dropped: Note[]; cards: Card[]; keepBefore: Note; keepCardsBefore: Card[] }[] = [];
   cardsOfNote(nid: string): Card[] { const out: Card[] = []; for (const c of this.cards.values()) if (c.nid === nid) out.push(c); return out; }
-  similarPairs() { return similarPairs(this.notes.values(), this.dismissedPairs); }
+  similarPairs() { return similarPairs(this.notes.values(), this.dismissedPairs, (id) => this.notes.get(id)); }
   /** Merge note `drop` into `keep` (tags united, stronger scheduling kept); the dropped note can be restored from the merge log. */
   async mergeNotes(keepId: string, dropId: string) {
     const keep = this.notes.get(keepId), drop = this.notes.get(dropId); if (!keep || !drop || keepId === dropId) return;
@@ -2394,14 +2401,46 @@ export class Store {
     this.bump(); this.touch();
     return out.length;
   }
-  /** Rename or move a deck node: every card under `from` gets the same path with `to` in its place. */
+  /** Rename or move a deck node: every card under `from` gets the same path with `to` in its place. Pins, smart decks,
+   *  exam deadlines, boss records and the editor's remembered deck follow. `undoRename()` puts it all back. */
   async renamePath(from: string, to: string): Promise<number> {
-    to = to.trim().replace(/\s*::\s*/g, "::").replace(/^::|::$/g, ""); if (!from || !to || from === to) return 0;
-    const now = stamp(); const out: Card[] = [];
-    for (const c of this.cards.values()) if (c.source === from || c.source.startsWith(from + "::")) out.push({ ...c, source: to + c.source.slice(from.length), mod: now });
+    to = normPath(to); if (!from || !to || from === to) return 0;
+    const re = (p: string) => (p === from || p.startsWith(from + "::") ? to + p.slice(from.length) : p);
+    const now = stamp(); const out: Card[] = []; const was: [string, string][] = [];
+    for (const c of this.cards.values()) if (c.source === from || c.source.startsWith(from + "::")) { out.push({ ...c, source: re(c.source), mod: now }); was.push([c.id, c.source]); }
     for (const c of out) this.cards.set(c.id, c);
-    const pins = this.settings.pins.map((p) => (p.view === "decks" && (p.path === from || p.path.startsWith(from + "::")) ? { ...p, path: to + p.path.slice(from.length) } : p));
-    await this.persist("renaming the category", db.putMany("cards", out)); if (pins.some((p, i) => p !== this.settings.pins[i])) await this.saveSettings({ pins });
+    const s = this.settings; const before = { pins: s.pins, smart: s.smart, deadlines: s.deadlines, bosses: s.bosses };
+    const pins = s.pins.map((p) => (p.view === "decks" && re(p.path) !== p.path ? { ...p, path: re(p.path) } : p));
+    const smart = s.smart.map((sd) => (sd.decks.some((d) => re(d) !== d) ? { ...sd, decks: [...new Set(sd.decks.map(re))] } : sd));
+    const deadlines = (s.deadlines ?? []).map((d) => (d.view === "decks" && re(d.path) !== d.path ? { ...d, path: re(d.path) } : d));
+    let bosses = s.bosses;
+    for (const k of Object.keys(s.bosses)) { if (!k.startsWith("decks:")) continue; const nk = "decks:" + re(k.slice(6)); if (nk === k) continue;
+      const a = s.bosses[k], b = bosses[nk]; bosses = { ...bosses }; delete bosses[k];
+      bosses[nk] = b ? { at: Math.max(a.at, b.at), score: a.at > b.at ? a.score : b.score, best: Math.max(a.best, b.best), passed: a.passed || b.passed } : a; }
+    let editDeck: string | null = null; try { editDeck = localStorage.getItem("yuzu-edit-deck"); if (editDeck && re(editDeck) !== editDeck) localStorage.setItem("yuzu-edit-deck", re(editDeck)); } catch { /* storage unavailable */ }
+    this.lastRename = { from, to, was, settings: before, editDeck };
+    await this.persist("renaming the category", db.putMany("cards", out));
+    const changed = pins.some((p, i) => p !== s.pins[i]) || smart.some((x, i) => x !== s.smart[i]) || deadlines.some((d, i) => d !== (s.deadlines ?? [])[i]) || bosses !== s.bosses;
+    if (changed) await this.saveSettings({ pins, smart, deadlines, bosses });
+    this.bump(); this.touch();
+    return out.length;
+  }
+  /** Cards that already sit at `to` (or under it) and would not move: a rename onto them merges the two categories. */
+  renameClash(from: string, to: string): { existing: number; moving: number } {
+    to = normPath(to); let existing = 0, moving = 0;
+    for (const c of this.cards.values()) { const mine = c.source === from || c.source.startsWith(from + "::"); if (mine) moving++; else if (c.source === to || c.source.startsWith(to + "::")) existing++; }
+    return { existing, moving };
+  }
+  lastRename: { from: string; to: string; was: [string, string][]; settings: Pick<Settings, "pins" | "smart" | "deadlines" | "bosses">; editDeck: string | null } | null = null;
+  /** Undo the last rename or move: every moved card goes back to its own old path (so a merge comes apart again). */
+  async undoRename(): Promise<number> {
+    const r = this.lastRename; if (!r) return 0; this.lastRename = null;
+    const now = stamp(); const out: Card[] = [];
+    for (const [id, src] of r.was) { const c = this.cards.get(id); if (c) out.push({ ...c, source: src, mod: now }); }
+    for (const c of out) this.cards.set(c.id, c);
+    await this.persist("undoing the rename", db.putMany("cards", out));
+    await this.saveSettings(r.settings);
+    try { if (r.editDeck !== null) localStorage.setItem("yuzu-edit-deck", r.editDeck); } catch { /* storage unavailable */ }
     this.bump(); this.touch();
     return out.length;
   }
@@ -2591,6 +2630,19 @@ export class Store {
     const t = stamp(); const fieldsChanged = fields.join("\x1f") !== n.fields.join("\x1f");
     const next = stampNote(n, { ...n, fields, tags: [...new Set([...userTags, ...auto])], modified: t, ...(fieldsChanged ? { edited: t } : {}) }, t);
     this.notes.set(noteId, next); await this.persist("editing the card", db.putOne("notes", next)); this.bump(); this.touch();
+  }
+  /** After editing a cloze note: a new gap number gets its own new card (a removed one keeps its card and history). */
+  async addClozeCards(noteId: string): Promise<number> {
+    const n = this.notes.get(noteId); const nt = n && this.notetypeFor(n); if (!n || nt?.kind !== "cloze") return 0;
+    const have = this.cardsOfNote(noteId); if (!have.length) return 0; const ords = new Set(have.map((c) => c.ord));
+    const want = [...new Set([...n.fields.join(" ").matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]) - 1))];
+    const now = stamp(); const out: Card[] = [];
+    for (const ord of want) { if (ords.has(ord)) continue; let id = `${noteId}-${ord}`; while (this.cards.has(id)) id += "x";
+      out.push({ ...have[0], id, nid: noteId, ord, state: "new", suspended: false, flag: 0, due: now, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: now, mod: now }); }
+    if (!out.length) return 0;
+    for (const c of out) this.cards.set(c.id, c);
+    await this.persist("adding the new gaps", db.putMany("cards", out)); this.bump(); this.touch();
+    return out.length;
   }
 
   async setSuspended(cardId: string, suspended: boolean) {
