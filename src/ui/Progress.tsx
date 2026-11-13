@@ -77,6 +77,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
   return (
     <div className="screen">
       <h1>Progress</h1>
+      <div className="progress-cols"><div className="pcol">
       <Areas />
       <RecapButton />
       <Mastered />
@@ -105,6 +106,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
           {store.mastery.log.length > 0 && <span style={{ color: "var(--yuzu)" }}>{store.mastery.log.length.toLocaleString()} mastered &amp; retired</span>}
         </div>
       </div>
+      </div><div className="pcol">
       <h2>Is the scheduler calibrated?</h2>
       <Calibration />
       {systems.length > 0 && (<><h2>Systems</h2>
@@ -122,6 +124,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
           <div className="bar" style={{ margin: 0, height: 6 }}><i style={{ width: `${c.pct}%`, background: "var(--orange)" }} /></div>
         </div>
       ))}
+      </div></div>
     </div>
   );
 }

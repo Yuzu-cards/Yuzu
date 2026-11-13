@@ -6,14 +6,14 @@ import { CardView, CardInfo, type StudyScope } from "./Study";
 import { SYSTEM_NAMES } from "../lib/classify";
 import type { Card, CardState } from "../lib/model";
 import { IconChevron, IconPlay, IconClose, IconPin, IconEdit } from "./icons";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Duplicates } from "./Duplicates";
 import { OcclusionEditor } from "./Occlusion";
 import { CardEditor } from "./CardEditor";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
-import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, type SheetItem } from "./kit";
+import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, useMedia, type SheetItem } from "./kit";
 import { systemColor } from "./theme";
 
 let overMemo: { ids: string[]; set: Set<string> } | null = null;
@@ -40,7 +40,7 @@ function findNode(root: TreeNode, path: string): TreeNode | null {
   return n;
 }
 
-function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () => void; onStudy: (cards: Card[], title: string) => void }) {
+function Preview({ card: card0, onClose, onStudy, docked }: { card: Card; onClose: () => void; onStudy: (cards: Card[], title: string) => void; docked?: boolean }) {
   const [sub, setSub] = useState<null | "edit" | "improve">(null);
   useBack(true, onClose); // the editor and the improve sheet stack their own back step on top of this one
   store.getVersion(); const card = store.cards.get(card0.id) ?? card0; // live: edits, flags and pauses show at once
@@ -50,8 +50,10 @@ function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () =>
   const mark = store.improveFor(note.id);
   if (sub === "edit") return <CardInfo card={card} onClose={() => setSub(null)} onSaved={() => setSub(null)} />;
   if (sub === "improve") return <ImproveSheet nids={[note.id]} onClose={() => setSub(null)} />;
-  return (
-    <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>
+  const wrap = (children: ReactNode) => docked // a wide screen: beside the list instead of over it
+    ? <aside className="lib-dock" aria-label="Preview">{children}</aside>
+    : <div className="sheet-backdrop" onClick={onClose}><div className="sheet" onClick={(e) => e.stopPropagation()}>{children}</div></div>;
+  return wrap(<>
       <div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b>{card.flag ? <span className="chip orange">flagged</span> : null}{mark ? <span className="chip orange">to improve</span> : null}<span className="chip">{card.suspended ? "paused" : card.state}</span><button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>
       <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any}><CardView html={r.back} css={r.css} dark side="back" /></div>
       <p className="small muted">{card.source}{note.tags.length ? " · " + note.tags.filter((t) => !t.startsWith("auto::")).join(", ") : ""}{mark ? ` · to improve: ${mark.r.join(", ")}${mark.t ? ` — “${mark.t}”` : ""}` : ""}</p>
@@ -65,8 +67,7 @@ function Preview({ card: card0, onClose, onStudy }: { card: Card; onClose: () =>
         <button className="btn grow" onClick={() => store.setSuspended(card.id, !card.suspended)}>{card.suspended ? "Unpause" : "Pause"}</button>
         <button className="btn danger grow" onClick={async () => { const n = store.cardsOfNote(note.id).length; if (!(await confirmSheet({ title: n > 1 ? `Delete this note and its ${n} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([note.id]); onClose(); snackbar("Deleted", () => { store.undoDelete(); }); }}>Delete</button>
       </div>
-    </div></div>
-  );
+  </>);
 }
 
 function SmartEditor({ initial, onClose }: { initial?: SmartDeck; onClose: () => void }) {
@@ -106,7 +107,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   useEffect(() => { const t = setTimeout(() => setQ(latinDigits(query).trim().toLowerCase()), 160); return () => clearTimeout(t); }, [query]);
   const [sort, setSort] = useState<"due" | "new" | "state" | "deck">("due");
   const [allTags, setAllTags] = useState(false);
-  const [preview, setPreview] = useState<Card | null>(null);
+  const [preview, setPreview] = useState<Card | null>(null); const wide = useMedia("(min-width: 1500px)");
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editSmart, setEditSmart] = useState<SmartDeck | null | "new">(null);
@@ -188,7 +189,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   if (tool === "dupes") return <Duplicates onClose={() => setTool(null)} />;
 
   return (
-    <div className="screen">
+    <div className={"screen" + (wide && preview ? " lib-docked" : "")}>
       <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pairs</button>}<button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("card")}>＋ Card</button><button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("occlusion")}>＋ Image</button></div>
       {tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}
       {tool === "card" && <CardEditor full onClose={() => setTool(null)} />}
@@ -336,7 +337,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn block" style={{ marginTop: 10 }} onClick={() => setClassify(null)}>Done</button>
         </div></div>
       )}
-      {preview && <Preview card={preview} onClose={() => setPreview(null)} onStudy={(cards, t) => { setPreview(null); onStudy(path, view, { preset: cards, title: t }); }} />}
+      {preview && <Preview docked={wide} card={preview} onClose={() => setPreview(null)} onStudy={(cards, t) => { setPreview(null); onStudy(path, view, { preset: cards, title: t }); }} />}
       {sheet && <ActionSheet title={sheet.title} sub={sheet.sub} items={sheet.items} onClose={() => setSheet(null)} />}
       {editCard && <CardInfo card={editCard} onClose={() => setEditCard(null)} onSaved={() => setEditCard(null)} />}
       {improveFor && <ImproveSheet nids={improveFor} onClose={() => { setImproveFor(null); setSelected(new Set()); setSelecting(false); }} />}

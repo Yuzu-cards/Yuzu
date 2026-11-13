@@ -149,6 +149,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <h1>Settings</h1>
       <JumpRow />
       <div className="settings-cols">
+      <div className="settings-col">
       <details className="section" id="s-look" open><summary>Look and sound <span className="small muted">interface, colours, sound</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
         <div className="card-box">
           <div className="row" style={{ gap: 8, margin: "0 0 4px" }}><span className="small grow">Interface</span></div>
@@ -221,6 +222,49 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
         </div>
       </details>}
+      </div><div className="settings-col">
+      <GoogleSection />
+      <details className="section" id="s-sync" open><summary>Sync between devices<span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
+      <div className="card-box">
+        {store.syncBackend() === "drive"
+          ? <p className="small muted" style={{ marginTop: 0 }}>Cards sync through <b>Google Drive</b> (My Apps › Yuzu › collection), with your Google sign-in — no tokens to manage. Change it under Google above.</p>
+          : null}
+        {store.syncBackend() === "drive" ? <details className="how" style={{ margin: "0 0 8px" }}><summary className="small">GitHub (fallback)</summary>
+        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
+        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
+        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
+        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
+        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
+        </details> : <>
+        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
+        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
+        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
+        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
+        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
+        </>}
+        <div className="field"><label>This device's name</label><input defaultValue={s.deviceName} onBlur={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={sy.auto} onChange={(e) => setSync({ auto: e.target.checked })} /> Sync automatically after changes</label>
+        <div className="row" style={{ marginTop: 8 }}>
+          {store.syncBackend() !== "drive" && <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>}
+          <button className="btn primary grow" disabled={!store.syncConfigured() || store.syncStatus.state === "syncing"} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "Syncing…" : "Sync now"}</button>
+        </div>
+        <p className="small" style={{ marginBottom: 0, color: store.syncStatus.state === "error" ? "var(--again)" : undefined }}>{syncMsg || store.syncStatus.message}{store.syncStatus.at && store.syncStatus.state !== "syncing" ? ` · ${fmtTime(store.syncStatus.at)}` : ""}</p>
+        {store.syncLog.length > 0 && (
+          <details style={{ marginTop: 8 }}>
+            <summary className="small muted">Sync history</summary>
+            <ul className="small" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {store.syncLog.map((l) => <li key={l.at} className={l.ok ? "" : "muted"}>{fmtDateTime(l.at)} · {l.ok ? "✓" : "✗"} {l.message} ({(l.ms / 1000).toFixed(1)} s)</li>)}
+            </ul>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="btn" onClick={async () => { if (await confirmSheet({ title: "Re-check everything?", sub: "Nothing is deleted. The next sync compares every file with the repository and re-sends what differs.", yes: "Re-check on next sync", danger: false })) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
+              {store.syncBackend() !== "drive" && <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>}
+            </div>
+            {store.syncBackend() !== "drive" && <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>}
+          </details>
+        )}
+      </div>
+
+      </details>
       <details className="section" id="s-improve"><summary>Cards to improve <span className="small muted">send to Claude</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
       <ImproveSection />
       </details>
@@ -309,48 +353,6 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
-      <GoogleSection />
-      <details className="section" id="s-sync" open><summary>Sync between devices<span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
-      <div className="card-box">
-        {store.syncBackend() === "drive"
-          ? <p className="small muted" style={{ marginTop: 0 }}>Cards sync through <b>Google Drive</b> (My Apps › Yuzu › collection), with your Google sign-in — no tokens to manage. Change it under Google above.</p>
-          : null}
-        {store.syncBackend() === "drive" ? <details className="how" style={{ margin: "0 0 8px" }}><summary className="small">GitHub (fallback)</summary>
-        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
-        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
-        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
-        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
-        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
-        </details> : <>
-        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
-        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
-        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
-        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
-        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
-        </>}
-        <div className="field"><label>This device's name</label><input defaultValue={s.deviceName} onBlur={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={sy.auto} onChange={(e) => setSync({ auto: e.target.checked })} /> Sync automatically after changes</label>
-        <div className="row" style={{ marginTop: 8 }}>
-          {store.syncBackend() !== "drive" && <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>}
-          <button className="btn primary grow" disabled={!store.syncConfigured() || store.syncStatus.state === "syncing"} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "Syncing…" : "Sync now"}</button>
-        </div>
-        <p className="small" style={{ marginBottom: 0, color: store.syncStatus.state === "error" ? "var(--again)" : undefined }}>{syncMsg || store.syncStatus.message}{store.syncStatus.at && store.syncStatus.state !== "syncing" ? ` · ${fmtTime(store.syncStatus.at)}` : ""}</p>
-        {store.syncLog.length > 0 && (
-          <details style={{ marginTop: 8 }}>
-            <summary className="small muted">Sync history</summary>
-            <ul className="small" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-              {store.syncLog.map((l) => <li key={l.at} className={l.ok ? "" : "muted"}>{fmtDateTime(l.at)} · {l.ok ? "✓" : "✗"} {l.message} ({(l.ms / 1000).toFixed(1)} s)</li>)}
-            </ul>
-            <div className="row" style={{ marginTop: 8 }}>
-              <button className="btn" onClick={async () => { if (await confirmSheet({ title: "Re-check everything?", sub: "Nothing is deleted. The next sync compares every file with the repository and re-sends what differs.", yes: "Re-check on next sync", danger: false })) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
-              {store.syncBackend() !== "drive" && <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>}
-            </div>
-            {store.syncBackend() !== "drive" && <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>}
-          </details>
-        )}
-      </div>
-
-      </details>
       <details className="section" id="s-data"><summary>Data <span className="small muted">back up, restore, wipe</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <SketchyRow />
@@ -367,6 +369,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <details className="section" id="s-diag"><summary>Diagnostics <span className="small muted">storage, errors, repair</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <Diagnostics />
       </details>
+      </div>
       <p className="small muted" style={{ textAlign: "center", marginTop: 24 }}>Yuzu {__VERSION__}</p>
       </div>
     </div>
@@ -598,10 +601,11 @@ function ReminderSettings() {
 }
 
 /** Jump row (Orange 8.11.0): one tap to a group; it opens the group and scrolls to it. */
-const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"], ["s-exam", "Exams"], ["s-remind", "Reminders"], ["s-google", "Google"], ["s-sync", "Sync"], ["s-media", "Media"], ["s-import", "Import"], ["s-inbox", "Inbox"], ["s-improve", "Improve"], ["s-lang", "Languages"], ["s-data", "Data"], ["s-diag", "Diagnostics"]];
+// In page order: on a desktop the first five are the left column and the rest the right one (two fixed columns).
+const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"], ["s-exam", "Exams"], ["s-remind", "Reminders"], ["s-lang", "Languages"], ["s-google", "Google"], ["s-sync", "Sync"], ["s-improve", "Improve"], ["s-import", "Import"], ["s-media", "Media"], ["s-inbox", "Inbox"], ["s-data", "Data"], ["s-diag", "Diagnostics"]];
 function JumpRow() {
   const go = (id: string) => { const d = document.getElementById(id) as HTMLDetailsElement | null; if (!d) return; d.open = true; d.scrollIntoView({ block: "start", behavior: "smooth" }); };
-  return <nav className="jump-row" aria-label="Settings groups">{GROUPS.map(([id, l]) => <button key={id} className="chip" onClick={() => go(id)}>{l}</button>)}</nav>;
+  return <nav className="jump-row" aria-label="Settings groups">{GROUPS.map(([id, l]) => <button key={id} className="chip" onClick={() => go(id)}>{l}</button>)}<button className="chip" data-hint="Controls|Every keyboard key, mouse action and gamepad button (also ? or View on a pad)." onClick={() => window.dispatchEvent(new CustomEvent("yuzu-keys"))}>Controls ⌨</button></nav>;
 }
 
 /** Sketchy fields and tags: removed on the user's call (12/11/2026); a copy stays on this device to put them back. */
