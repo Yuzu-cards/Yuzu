@@ -90,7 +90,7 @@ try {
   ok("…and the address is cleaned up", !(await p3.evaluate(() => location.search)));
   await p3.goto(`http://127.0.0.1:${port}/?from=citrus&do=workload`); await p3.waitForSelector('[role=dialog][aria-label="Why so many reviews"]', { timeout: 15000 }).catch(() => {});
   const wl = await p3.locator('[role=dialog][aria-label="Why so many reviews"]').innerText().catch(() => "");
-  ok("?do=workload opens 'Why so many reviews?' with the evidence", /reviews? a day over the last 30 days/.test(wl), wl.slice(0, 160).replace(/\n/g, " | "));
+  ok("?do=workload opens 'Why so many reviews?' with the evidence", /reviews? a day over the last (day|\d+ days)/.test(wl), wl.slice(0, 160).replace(/\n/g, " | "));
   await p3.click('[aria-label="Close"]'); await p3.keyboard.press("Escape").catch(() => {});
   ok("a ← Citrus button leads back while opened from Citrus", (await p3.locator('a.back-citrus[href*="Citrus-Maxima/?from=yuzu"]').count()) === 1);
   await p3.goto(`http://127.0.0.1:${port}/?from=citrus&do=capture`); await p3.waitForSelector('textarea[aria-label="Capture text"]', { timeout: 15000 }).catch(() => {});

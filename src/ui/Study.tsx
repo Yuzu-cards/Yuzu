@@ -17,6 +17,7 @@ import { WordSheet, wordAt, type WordHit } from "./Word";
 import { sfx } from "./sfx";
 import { SKIN_CSS, isShortCard } from "./cardskin";
 import { wireSounds, playSounds, stopSounds, cardSounds, whenSoundsDone } from "./sound";
+import { insertApart } from "../lib/drill";
 
 export const BASE_CSS = `
 :host { display:block; contain: layout paint; }
@@ -299,7 +300,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     const now = Date.now(); const remaining = new Set(queue.slice(idx).map((c) => c.id));
     const back = queue.slice(0, idx).map((c) => store.cards.get(c.id)!).filter((c) => c && !c.suspended && (c.state === "learning" || c.state === "relearning") && c.due <= now && !remaining.has(c.id));
     if (!back.length) return;
-    setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); setGrew({ n: add.length, at: now }); return [...q.slice(0, at), ...add, ...q.slice(at)]; });
+    setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); setGrew({ n: add.length, at: now }); if (preset) return insertApart(q, at, add, (c) => store.drillSystem(c)); return [...q.slice(0, at), ...add, ...q.slice(at)]; }); // a drill keeps systems apart
   }, [idx]);
 
   useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setPicked(null); setInfo(false); setTyped(""); setHint(false); setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); }, [card?.id]);
