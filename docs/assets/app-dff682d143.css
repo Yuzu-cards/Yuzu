@@ -367,7 +367,7 @@ details.how code { font-size: 12px; background: var(--ink-2); padding: 0 4px; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .bar i { background: var(--yuzu); }
 :root:is([data-ui="clean"], [data-ui="paper"]) .forecast i { background: var(--ink-3); border-radius: 4px 4px 0 0 !important; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .forecast .today i { background: var(--accent); }
-:root:is([data-ui="clean"], [data-ui="paper"]) :is(.stack::before, .paper::before) { background: var(--spine, var(--orange)); border-radius: var(--r) 0 0 var(--r); width: 5px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .stack::before, :root:is([data-ui="clean"], [data-ui="paper"]) .paper::before { background: var(--spine, var(--orange)); border-radius: var(--r) 0 0 var(--r); width: 5px; border-right: 0; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .paper { padding-left: 22px; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .paper-under { display: none; }
 :root:is([data-ui="clean"], [data-ui="paper"]) .tabs { border-top-width: 1px; box-shadow: none; }
@@ -405,7 +405,7 @@ details.how code { font-size: 12px; background: var(--ink-2); padding: 0 4px; }
 :root[data-size="large"] .answer-bar button small { font-size: 13px; }
 /* "Dark cards" stays a dark card in the light interface (the card's own text colours are for a dark card) */
 :root[data-ui="paper"] .paper.slate { background: #1B1E2D; color: #ECEEF7; border-color: #383E57; }
-:root[data-ui="paper"] .slate :is(.mcq-opt, .typeans) { background: #262A3D; border-color: #383E57; color: #ECEEF7; }
+:root[data-ui="paper"] .slate :is(.mcq-opt:not(.right):not(.wrong), .typeans) { background: #262A3D; border-color: #383E57; color: #ECEEF7; }
 
 /* ---- Today: "More for today" fold; Settings: jump row and where-it-lives tags */
 .more-today { margin-top: 10px; }
@@ -478,3 +478,429 @@ kbd { font-family: var(--sans); font-size: 12.5px; padding: 2px 6px; border: 1px
 
 /* ---- README.css */
 /* Styles added per piece of work; concatenated after styles.css by scripts/build.mjs in name order. */
+
+/* ---- wp02.css */
+/* WP02: a very long deck or pack name wraps instead of widening the page (10-14). */
+.tree-row .name, .list-row .t, .crumbs, .kit-snack .grow { overflow-wrap: anywhere; }
+
+/* ---- wp04.css */
+/* WP04: an unreadable inbox file's text, shown on request */
+.wp04-bad-text { white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; margin: 4px 0 8px; padding: 8px; border: 1px solid var(--line, currentColor); border-radius: 6px; font-family: ui-monospace, monospace; }
+.wp04-bad .list-row { flex-wrap: wrap; gap: 6px; }
+.wp04-bad .list-row .t { white-space: normal; overflow-wrap: anywhere; min-width: 0; flex: 1 1 160px; }
+
+/* ---- wp05.css */
+/* WP05: a group whose settings are partly synced, partly this device's: dashed edge, the main colour of the group's tag */
+details.section > summary .where.mix { border-style: dashed; }
+
+/* ---- wp08.css */
+/* WP08 — how cards look and behave in study */
+
+/* The state stamp ("new", "learning", "405d late") gets its own strip above the text instead of covering the first line */
+.paper:has(> .stamp) { padding-top: 34px; }
+.stamp { top: 7px; }
+
+/* Multiple choice: the options and the explanation after them line up with the question's column (the card's 62ch) */
+.paper > .mcq, .paper > .card-tail { max-width: 62ch; font-family: var(--sans); font-size: 19px; }
+.paper > .card-tail { min-height: 0; margin-top: 6px; }
+.paper > .mcq .mcq-opt { font-size: 17px; }
+:root[data-ui="paper"] .slate .mcq-opt.right { border-color: #7fa34a; background: rgba(127,163,74,.22); color: #ECEEF7; }
+:root[data-ui="paper"] .slate .mcq-opt.wrong { border-color: #e0694a; background: rgba(214,90,60,.22); color: #ECEEF7; }
+/* no empty band between the question and the options (the card's usual minimum height is for cards without options) */
+.paper > .card-host:has(+ .mcq) { min-height: 0; }
+
+/* The suggested grade after a multiple-choice answer: a filled ring that survives Arcade's clipped corners */
+.answer-bar button.suggest { box-shadow: inset 0 0 0 3px var(--orange, #f08a24); background: color-mix(in srgb, var(--orange, #f08a24) 16%, var(--ink-2)); }
+.answer-bar button.suggest::after { content: "suggested"; font-family: var(--sans); font-size: 10px; line-height: 10px; color: var(--orange, #f08a24); letter-spacing: .02em; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .answer-bar button.suggest { box-shadow: inset 0 0 0 2px var(--orange, #f08a24); background: var(--ink-2); } /* no tint here: the grade colours need their full contrast (WCAG AA) */
+
+/* Key / pad hints: a small number (or d-pad arrow) on each rating button when a keyboard or pad is in use */
+.key-badge { display: none; font-family: var(--sans); font-size: 11px; line-height: 11px; font-weight: 700; padding: 2px 5px; border: 1px solid currentColor; opacity: .75; }
+.study[data-input="keys"] .key-badge, .study[data-input="pad"] .key-badge { display: inline-block; }
+.key-badge .kb-pad, .study[data-input="pad"] .key-badge .kb-key { display: none; }
+.study[data-input="pad"] .key-badge .kb-pad { display: inline; }
+.answer-bar button:has(.key-badge) { gap: 4px; }
+.key-tip { font-family: var(--sans); }
+
+/* "+1 missed card back": the counter went up because a missed card came back */
+.left-grew { color: var(--orange); white-space: nowrap; animation: wp08-fade 2.6s steps(6) forwards; }
+@keyframes wp08-fade { 0%, 70% { opacity: 1 } 100% { opacity: 0 } }
+@media (max-width: 420px) { .left-grew { position: absolute; top: calc(100% - 4px); right: 12px; font-size: 11px; } .study-top { position: relative; } }
+
+/* First-letter hint: the sans font, so its middle dots read on cream */
+.hint-line { font-family: var(--sans); font-size: 18px; line-height: 1.4; letter-spacing: .06em; font-weight: 600; }
+
+/* Card info: "learning" / "relearning" fit their tile */
+.stat.stat-state { grid-column: span 2; min-width: 0; }
+.stat.stat-state b { overflow-wrap: anywhere; text-transform: capitalize; }
+
+/* Typed answers: right / near miss / wrong, readable on cream and on dark cards */
+.typed-res { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.typed-res .chip.ok { background: rgba(127,163,74,.2); color: #4e6e2a; }
+.typed-res .chip.near { background: rgba(232,160,40,.2); color: #8a5a0c; }
+.typed-res .chip.no { background: rgba(214,90,60,.18); color: #a33a22; }
+.slate .typed-res .chip.ok { color: #b6d68a; } .slate .typed-res .chip.near { color: #f2c46b; } .slate .typed-res .chip.no { color: #f29a82; }
+
+/* The session summary: what the toasts said (goal, matured, leeches) */
+.session-events { margin: 14px auto 0; max-width: 420px; text-align: left; padding: 8px 12px; border: 2px solid var(--line-soft); display: grid; gap: 4px; }
+
+/* ---- wp09.css */
+/* WP09: every sheet is a dialog (kit.tsx Sheet). */
+/* The sheet title is a real heading now, but looks like the bold title it was. */
+:root .sheet h2.sheet-title { font: inherit; font-weight: 700; color: inherit; margin: 0; letter-spacing: inherit; -webkit-font-smoothing: auto; min-width: 0; }
+.sheet-head { margin-bottom: 4px; }
+/* Visually hidden, still read by screen readers (and still clickable by script: file inputs behind a button). */
+.sr-only { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+/* The controls list is a real table. */
+table.keys { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table.keys .keys-row { display: table-row; }
+table.keys th, table.keys td { padding: 8px 10px; border-top: 1px solid var(--line-soft); text-align: left; vertical-align: middle; font-size: 14px; font-weight: 400; }
+table.keys thead th { border-top: 0; font-size: 12px; color: var(--muted); }
+table.keys th:first-child { width: 46%; }
+table.keys th:nth-child(2) { width: 30%; }
+table.keys td kbd { white-space: normal; }
+/* Keyboard focus is visible inside sheets (the sheet itself takes focus first, without a ring). */
+[role=dialog][tabindex="-1"]:focus, [role=dialog][tabindex="-1"]:focus-visible { outline: none !important; }
+
+/* ---- wp10.css */
+/* WP10 — visual design system: focus that survives the notches, contrast, small pixel labels, tap targets. */
+
+/* ---- Focus colour, one token per interface (08-1, 07-13, 08-8): yellow on dark, ink on Paper; never orange on orange */
+:root { --focus: var(--yuzu); }
+:root[data-ui="paper"] { --focus: #15182A; }
+.pad-focus, :focus-visible { outline-color: var(--focus) !important; }
+/* Arcade clips every notched control with clip-path, which also cuts away an outline drawn outside it, and controls
+   inside a scrolling strip (.seg, sheets) lose it to overflow. Draw the ring inside instead: the border turns yellow and
+   an inner yellow band with a dark line inside it keeps it visible on an orange (primary/selected) fill too. */
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.btn, .chip, .stack, .card-box, .hero, .answer-bar button, .field input, .field select, .typeans, .sheet textarea, .seg button, .kit-item, .mcq-opt, .themes button, .kit-date input[type=text], .notch, .more-today > summary):is(:focus-visible, .pad-focus) {
+  outline: none !important; border-color: var(--focus) !important;
+  box-shadow: inset 0 0 0 3px var(--focus), inset 0 0 0 5px var(--ink) !important;
+}
+/* the suggested rating on a multiple-choice card: a ring inside the button (an outline is clipped in Arcade) */
+:root:not([data-ui="clean"]):not([data-ui="paper"]) .answer-bar button.suggest { outline: none; box-shadow: inset 0 0 0 3px var(--text), inset 0 -4px 0 color-mix(in srgb, currentColor 35%, #000); background: color-mix(in srgb, currentColor 16%, var(--ink-2)); }
+
+/* ---- Small running labels: the 5×7 pixel face at 10 px is the smallest text on screen; use the sans at 12–13 px
+   (Arcade keeps pixel type for headings, numbers and the 20 px answer labels) (08-15) */
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.seg button, .tab, .study-top .num, .stamp, .forecast > div > span:first-child, .recap-card .px, .recap-row b, .kit-cost b, .themes button, .hook-text .small, .kit-hint b, .kit-pull, .stat b small) {
+  font-family: var(--sans); -webkit-font-smoothing: auto; letter-spacing: 0;
+}
+:root:not([data-ui="clean"]):not([data-ui="paper"]) .seg button { font-size: 13px; line-height: 14px; font-weight: 600; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) .tab { font-size: 12px; line-height: 12px; font-weight: 600; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.study-top .num, .kit-cost b) { font-size: 13px; line-height: 14px; font-weight: 700; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.stamp, .recap-card .px, .recap-row b, .kit-hint b, .kit-pull, .hook-text .small) { font-size: 12px; line-height: 12px; font-weight: 700; letter-spacing: .02em; }
+:root:not([data-ui="clean"]):not([data-ui="paper"]) :is(.forecast > div > span:first-child, .themes button, .stat b small) { font-size: 12px; line-height: 12px; font-weight: 600; }
+
+/* ---- The card's state stamp: dark ink on the card (light ink on a dark card), the system colour stays in the frame
+   and tint, so it reads at ≥4.5:1 on every spine colour and theme (08-14, 08-15) */
+.stamp { color: var(--paper-ink); border-color: var(--spine, var(--orange)); background: color-mix(in srgb, var(--spine, var(--orange)) 12%, transparent); }
+.paper.slate .stamp { color: var(--text); }
+/* the card waiting underneath a dark card is dark too (Night kept a cream strip under the blue card) (08-14) */
+.paper-stage:has(> .paper.slate) > .paper-under { background: var(--ink-3); border-color: var(--line); }
+
+/* ---- Secondary (muted) text on the light card uses the card's ink, not the dark interface's grey (2.2:1 before) (08-8) */
+.paper:not(.slate) .muted { color: color-mix(in srgb, var(--paper-ink) 78%, var(--paper)); }
+
+/* ---- Game Boy: secondary text and chips at ≥4.5:1 (08-14) */
+:root[data-theme="gameboy"] { --muted: #bad27a; --clay: #ff9a5a; }
+:root[data-theme="gameboy"] .themes button.on { color: var(--text); }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .kit-hint b { color: var(--paper-ink); }
+/* Game Boy right/wrong options: shape and a light fill, not a green tint on green */
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .mcq-opt.right { border: 3px solid var(--paper-ink); background: #e0f0a0; color: #0f380f; }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .mcq-opt.wrong { border: 3px dashed var(--paper-ink); background: color-mix(in srgb, var(--paper-ink) 18%, var(--paper-2)); }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .slate .mcq-opt.right { border-color: #e0f0a0; background: color-mix(in srgb, #e0f0a0 22%, var(--ink-3)); color: var(--text); }
+:root[data-theme="gameboy"]:not([data-ui="paper"]) .slate .mcq-opt.wrong { border-color: var(--clay); background: color-mix(in srgb, var(--clay) 18%, var(--ink-3)); }
+
+/* ---- Paper contrast (08-8, 08-19) */
+:root[data-ui="paper"] :is(.tab.active, .recap-top .px, .themes button.on) { color: var(--orange-2); }
+:root[data-ui="paper"] :is(details.section > summary) { color: var(--orange-2); }
+:root[data-ui="paper"] .paper.slate { --text: #ECEEF7; --muted: #A7AEC6; --line: #383E57; --ink-3: #262A3D; --orange-2: #FFB566; }
+:root[data-ui="paper"] :is(.field input, .field select, .sheet textarea, .kit-date input[type=text]) { border-color: #828BA2; background: #FFFFFF; box-shadow: none; }
+:root[data-ui="paper"] .typeans { border-color: #828BA2; }
+:root[data-ui="paper"] .slate .typeans { border-color: #6B7290; }
+:root[data-ui="paper"][data-theme="gameboy"] { --accent: #3E7510; --accent-hi: #5A9426; --accent-lo: #2B5A06; --orange: #3E7510; --orange-2: #2B5A06; }
+:root[data-ui="paper"][data-theme="night"] { --accent: #2368BF; --accent-hi: #4A8DDB; --accent-lo: #1A4F91; --orange: #2368BF; --orange-2: #1D5AA3; }
+:root[data-ui="paper"]:is([data-theme="gameboy"], [data-theme="night"]) .btn.primary .muted { color: rgba(255,255,255,.85); }
+
+/* ---- Link-buttons look like buttons (08-17) */
+a.btn { color: inherit; text-decoration: none; }
+a.btn.primary { color: var(--on-accent); }
+
+/* ---- Flat interfaces: soft lift instead of hard black 8-bit offsets (08-18) */
+:root[data-ui="clean"] :is(.recap-card, .menu, .toast, .bulk-bar, .kit-snack, .kit-pull, .kit-hint) { box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+:root[data-ui="paper"] :is(.recap-card, .menu, .toast, .bulk-bar, .kit-snack, .kit-pull, .kit-hint) { box-shadow: 0 1px 2px rgba(21,24,42,.08), 0 4px 12px rgba(21,24,42,.08); }
+:root:is([data-ui="clean"], [data-ui="paper"]) :is(.recap-card, .toast, .kit-snack, .kit-pull) { border-radius: var(--r) !important; }
+
+/* ---- Keyboard chips keep one box when a combo wraps (08-16) */
+kbd { display: inline-block; line-height: 1.35; max-width: 100%; }
+
+/* ---- Tap targets ≥44 px on touch screens; a mouse keeps the tighter 36 px (08-9, 01-17, 05-13, 03-17).
+   Arcade clips controls with clip-path, which also clips hit-testing, so the control itself grows (no ::after trick). */
+.seg { padding: 2px; }
+.seg button { min-height: 44px; }
+:is(button, a, label, select).chip { min-height: 44px; }
+button.chip { min-width: 44px; justify-content: center; }
+.crumbs button { min-height: 44px !important; } /* Library sets 32 inline */
+.coach-x { width: 44px; }
+.drag-handle { width: 44px; }
+label.row:has(> input[type=checkbox]), label.row:has(> input[type=radio]) { min-height: 44px; }
+label.row > input:is([type=checkbox], [type=radio]) { width: 20px; height: 20px; flex: none; margin: 0 2px; }
+details.section > summary { min-height: 44px; align-items: center; padding-top: 12px; padding-bottom: 12px; margin-top: 10px; margin-bottom: 0; }
+details.section > summary::after { top: 12px; }
+@media (hover: hover) and (pointer: fine) {
+  .seg button, :is(button, a, label, select).chip { min-height: 36px; }
+  .crumbs button { min-height: 36px !important; }
+  button.chip { min-width: 36px; }
+  label.row:has(> input[type=checkbox]), label.row:has(> input[type=radio]) { min-height: 32px; }
+  details.section > summary { min-height: 36px; padding-top: 8px; padding-bottom: 8px; }
+  details.section > summary::after { top: 8px; }
+}
+
+
+/* ---- wp11.css */
+/* WP11 — layout on small phones (360 px), Large text and tablets. */
+
+/* Guard (05-4): on a phone, anything wider than the screen made the browser widen the whole page, which pushed the fixed tab bar
+   below the bottom edge. The page itself never scrolls sideways (scrollers like .seg keep their own scroll), so the bar stays put
+   even if a future row overflows. body uses clip, not hidden, so position: sticky keeps working. */
+html { overflow-x: hidden; }
+body { overflow-x: clip; }
+
+/* 01-2: the Today header (← Citrus · logo · Yuzu · ＋ Card · ＋ Capture · sync). The logo never shrinks to nothing; on a phone with
+   the Citrus chip or the sync chip the actions move to their own line, right-aligned, instead of running off the edge. */
+.brand { flex-wrap: wrap; row-gap: 8px; }
+.brand > .yuzu-mark, .brand > .chip { flex-shrink: 0; }
+.brand > .grow { min-width: 0; }
+@media (max-width: 440px) {
+  .brand:has(> .back-citrus, > span.chip) > .grow { flex-basis: 100%; height: 0; }
+  .brand:has(> .back-citrus, > span.chip) { row-gap: 6px; }
+  .brand:has(> .back-citrus, > span.chip) > .grow + .chip { margin-left: auto; }
+}
+
+/* 08-6: the Today hero reflows instead of pushing the Study button off the edge. On a narrow phone the ring is 120 px
+   (4 screen pixels per ring cell, so the pixel art stays crisp); with Large text there, the ring sits above the text. */
+.hero { grid-template-columns: auto minmax(0, 1fr); }
+@media (max-width: 400px) {
+  .hero .ring { width: 120px; height: 120px; }
+  :root[data-size="large"] .hero { grid-template-columns: minmax(0, 1fr); justify-items: center; text-align: center; }
+}
+
+/* 08-6 / 03-15: a header row (a title that grows plus chips: Library · similar pairs · ＋ Card · ＋ Image) wraps its chips. */
+.row:has(> h1.grow), .row:has(> h2.grow) { flex-wrap: wrap; row-gap: 8px; }
+
+/* 05-4: a text field next to a button (Settings → Sync → Token + Show) shrinks instead of widening the page;
+   a row of buttons that grow (Back up · Full backup · Restore backup) wraps. */
+.field .row > input { min-width: 0; flex: 1 1 0; }
+.row:has(> .btn.grow) { flex-wrap: wrap; } /* growing buttons still share a line; they wrap only when their text no longer fits */
+
+/* 05-19: Break dates as two labelled rows (Break from / Break to), so nothing dangles at the end of a wrapped line. */
+.break-dates { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 10px; align-items: center; }
+.break-dates > .chip { grid-column: 2; justify-self: start; }
+/* 05-19: a select never runs past its field (Clean and Paper cut the long option text). */
+.field select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+
+/* 04-11: Progress → Systems on a phone: the name keeps line 1 (with ⚔ and Boss), the stats go to line 2; Boss is a full tap target. */
+.sys-head .boss-chip { min-height: 44px; padding: 0 14px; }
+.sys-head > .t { min-width: 0; }
+@media (max-width: 560px) {
+  .sys-head { flex-wrap: wrap; row-gap: 2px; }
+  .sys-head > .t { flex: 1 1 0; white-space: normal; overflow-wrap: break-word; line-height: 1.25; } /* a long name ("Toxicology & Environmental") takes two lines rather than "Toxic…" */
+  .sys-head::after { content: ""; flex-basis: 100%; height: 0; order: 2; }
+  .sys-head > .small.muted { order: 3; }
+}
+
+/* 03-15: Library — the card-list header in the body font (the pixel font wrapped "1,448 cards · 300 shown" onto 4 lines);
+   on a phone the node's stats line gets its own row under the title instead of squeezing beside ✎, pin and Study. */
+.list-head { font-family: var(--sans); font-size: 16px; line-height: 1.3; font-weight: 700; }
+@media (max-width: 560px) {
+  .lib-node-head { flex-wrap: wrap; row-gap: 4px; }
+  .lib-node-head > .grow { display: contents; }
+  .lib-node-head > .grow > :first-child { flex: 1 1 0; min-width: 0; }
+  .lib-node-head > .grow > .small { order: 9; flex-basis: 100%; }
+}
+#lib-cards { scroll-margin-top: 12px; }
+
+/* 01-19: with a sheet open, the snackbar moves to the top so it doesn't cover the sheet's fields (Quick add's Deck, Capture's list).
+   (The "1 37" gap in pixel numbers is fixed in the font itself: in public/fonts/yuzu-pixel.woff the "1" now advances 4 pixels, not 6.) */
+body:has(.sheet-backdrop) .kit-snack { bottom: auto; top: calc(12px + var(--safe-t)); }
+
+/* 03-12: the bulk bar — one row of the main actions (Study · Pause · Flag · Tag · More…), the count above them on a phone,
+   every button a full 44 px target. The rest are in the More… sheet. */
+.bulk-bar .btn { min-height: 44px; }
+@media (max-width: 560px) {
+  .bulk-bar:has(> .btn.primary) > .small:first-child { flex-basis: 100%; text-align: center; }
+  .bulk-bar:has(> .btn.primary) > .btn { flex: 1 1 0; min-width: 0; padding-left: 4px; padding-right: 4px; }
+}
+.list-head { white-space: nowrap; } /* "190 cards · 300 shown" stays one line; the chips beside it wrap instead */
+
+/* 08-6: a segmented control that scrolls sideways (Library views at 360 px with Large text) fades at the edge that has more,
+   so "Tags / Smart" don't look cut off. Driven by its own scroll position: no fade when everything fits or at the end. */
+@property --seg-fade-r { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --seg-fade-l { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@keyframes wp11-seg-fade { from { --seg-fade-l: 0px; --seg-fade-r: 32px; } 10% { --seg-fade-l: 24px; } 90% { --seg-fade-r: 24px; } to { --seg-fade-l: 24px; --seg-fade-r: 0px; } }
+@supports (animation-timeline: scroll()) {
+  .seg { mask-image: linear-gradient(90deg, transparent 0, #000 var(--seg-fade-l), #000 calc(100% - var(--seg-fade-r)), transparent 100%); animation: wp11-seg-fade linear both; animation-timeline: scroll(self inline); scrollbar-width: none; }
+}
+
+/* ---- wp12.css */
+/* WP12 — desktop (Steam Deck at a 27" monitor): wide-screen layout, hints on the rail, the card menu where it was opened. */
+
+/* Settings: two fixed, independent columns (left = Look … Languages, right = Google … Diagnostics), so opening a group
+   never moves the other column. The jump row lists the groups in the same order. */
+@media (min-width: 1100px) {
+  .settings-cols { columns: auto; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 28px; align-items: start; }
+  .settings-cols > p { grid-column: 1 / -1; }
+  .settings-col > details.section:first-child { margin-top: 0; }
+  /* Rail labels are read from a desk: a size up from 10 px */
+  .tab { font-size: 11px; line-height: 11px; }
+}
+.settings-col { min-width: 0; }
+
+/* Wide screens: use the room (the content stays centred next to the rail) */
+@media (min-width: 1700px) { .screen { max-width: 1480px; } }
+@media (min-width: 2300px) { .screen { max-width: 1680px; } }
+
+
+/* Library: on a wide screen the preview sits beside the list instead of covering it */
+@media (min-width: 1500px) {
+  .screen.lib-docked { max-width: none; padding-right: calc(min(560px, 34vw) + 52px); }
+  .lib-dock { position: fixed; top: calc(14px + var(--safe-t)); bottom: 14px; right: 24px; width: min(560px, 34vw); overflow: auto; z-index: 15;
+    background: var(--ink-2); border: 2px solid var(--line); padding: 14px; box-shadow: 4px 4px 0 rgba(0,0,0,.35); }
+  .lib-dock .paper { min-height: 200px; }
+}
+:root:is([data-ui="clean"], [data-ui="paper"]) .lib-dock { border-radius: var(--r) !important; border-width: 1px; box-shadow: none; }
+
+/* Hints beside the rail get a pointer to the tab */
+.kit-hint[data-side] { max-width: 280px; }
+
+/* The card menu: under the ⋯ of the study column (not at the window edge), and never taller than the window */
+.menu { max-height: calc(100dvh - 16px); overflow: auto; }
+@media (min-width: 900px) { .menu { right: max(10px, calc((100vw - 900px) / 2 + 10px)); } }
+
+/* Tall desktop screens: the answer buttons sit right under the card instead of at the far bottom edge */
+@media (min-width: 900px) and (min-height: 1100px) {
+  .study > .study-body { flex: 0 1 auto; }
+  .study > .answer-bar, .study > .show-bar { margin-bottom: auto; }
+}
+
+/* Wide desktop screens: the card text grows with the screen (and still follows the Text size setting, which zooms the
+   study body around it), so it reads from a desk at a 27" monitor. */
+@media (min-width: 1700px) and (min-height: 900px) { .study .study-body .card-host { zoom: 1.15; } }
+@media (min-width: 2300px) and (min-height: 1200px) { .study .study-body .card-host { zoom: 1.3; } }
+
+/* ---- wp13.css */
+/* WP13 — Today: "all done" and "goal reached" get a small moment. Arcade: a gold rind, a popping ★ and two pixel sparkles
+   that burst once; Clean/Paper: the ★ and the words only. Reduced motion (styles.css) stops every animation, the gold stays. */
+.hero .goal-star { display: inline-block; color: var(--yuzu); margin-right: 6px; }
+.hero .goal-reached { color: var(--yuzu) !important; }
+.hero .all-done { color: var(--text); }
+.today-empty .btn { min-height: 44px; white-space: nowrap; }
+.today-empty .btn.primary { flex-basis: 100%; }
+
+:root[data-ui="arcade"] .hero.goal-done { border-color: #f2d34b; }
+:root[data-ui="arcade"] .hero.goal-done .ring { filter: drop-shadow(2px 0 0 #c9971c) drop-shadow(-2px 0 0 #c9971c) drop-shadow(0 2px 0 #f2d34b) drop-shadow(0 -2px 0 #f2d34b); }
+:root[data-ui="arcade"] .hero .goal-star { font-family: var(--px); font-size: 12px; line-height: 1; vertical-align: 1px; animation: wp13-pop .45s steps(3, jump-end) 1, wp13-twinkle .8s steps(2, jump-none) .45s 4; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child { position: relative; display: inline-block; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::before,
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::after { content: "✦"; position: absolute; font-family: var(--px); font-size: 14px; color: #f2d34b; pointer-events: none; opacity: 0; animation: wp13-spark 1.2s steps(4, jump-end) .2s 2; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::before { top: -4px; right: -2px; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::after { bottom: 2px; left: -4px; animation-delay: .5s; }
+
+@keyframes wp13-pop { 0% { transform: scale(0); } 66% { transform: scale(1.6); } 100% { transform: scale(1); } }
+@keyframes wp13-twinkle { 50% { opacity: .3; } }
+@keyframes wp13-spark { 0% { opacity: 0; transform: scale(.5); } 25% { opacity: 1; transform: scale(1.4); } 75% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(.5); } }
+
+/* ---- wp15.css */
+/* WP15: Progress presentation (two columns on a desktop, readable heatmap and calibration chart), recap. */
+
+/* ---- Heatmap: weekday rows, month labels over the week columns, a legend in review counts */
+.heat-wrap { display: grid; grid-template-columns: auto repeat(12, minmax(0, 1fr)); gap: 3px; align-items: center; }
+.heat-wrap > i { display: block; aspect-ratio: 1; min-width: 0; }
+.heat-month { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: visible; line-height: 1.2; padding-bottom: 2px; }
+.heat-day { font-size: 11px; color: var(--muted); padding-right: 4px; line-height: 1; }
+.heat-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 10px; }
+.heat-legend i { display: inline-block; width: 12px; height: 12px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .heat-wrap > i, :root:is([data-ui="clean"], [data-ui="paper"]) .heat-legend i { border-radius: 3px; }
+
+/* ---- Calibration chart: fills its column, labels never clipped */
+.calib { display: block; width: 100%; max-width: 560px; height: auto; }
+
+/* ---- Desktop: Areas, Recap, Systems and Mastered on the left; the numbers, heatmap and calibration on the right */
+@media (min-width: 1300px) {
+  .progress-cols { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+  .progress-side > .stat-grid:first-child { margin-top: 0; }
+}
+
+/* ---- Recap: the nemesis button sits under its text */
+.recap-card .btn { font-size: 14px; }
+
+/* ---- wp17.css */
+/* WP17: image occlusion editor (boxes drawn over the picture, fixed picture), card editor notes, smart-deck tags. */
+
+/* The editor sheet has a fixed height: the picture stays put at the top and the box names scroll below it,
+   so adding a box never moves the picture under the finger. */
+.sheet.io-sheet-on { height: 92vh; height: 92dvh; max-height: 92dvh; display: flex; flex-direction: column; overflow: hidden; }
+.io-sheet-on .io-top { flex: none; }
+.io-sheet-on .io-rest { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding-bottom: 4px; }
+.io-tip { margin: 4px 0 8px; min-height: 2.6em; }
+.io-warn { color: var(--clay); }
+.io-stage { display: flex; justify-content: center; }
+
+/* The canvas wraps the picture exactly, so percent coordinates match what the finger covers. */
+.io.io-ed { position: relative; display: inline-block; max-width: 100%; line-height: 0; touch-action: none; user-select: none; -webkit-user-select: none; cursor: crosshair; }
+.io.io-ed img { display: block; max-width: 100%; max-height: 52vh; max-height: 52dvh; width: auto; height: auto; border-radius: 8px; -webkit-user-drag: none; pointer-events: none; }
+.io-ed .io-box { position: absolute; box-sizing: border-box; border-radius: 3px; }
+.io-ed .io-hide { background: color-mix(in srgb, var(--orange) 72%, transparent); border: 2px solid var(--orange-dark); color: #fff; cursor: move; touch-action: none; }
+.io-ed .io-hide:focus-visible { outline: 3px solid var(--yuzu); outline-offset: 1px; }
+.io-ed .io-sel { border: 2px dashed #fff; box-shadow: 0 0 0 2px var(--orange-dark); background: color-mix(in srgb, var(--orange) 55%, transparent); }
+.io-ed .io-open { border: 3px solid var(--leaf); background: color-mix(in srgb, var(--leaf) 18%, transparent); pointer-events: none; }
+.io-num { position: absolute; left: 2px; top: 2px; font: 700 12px/16px var(--sans); color: #fff; text-shadow: 0 1px 2px #0008; pointer-events: none; }
+/* Touch-sized controls on the selected box: ✕ top-right, resize grip bottom-right (44 px hit area around a small visible mark). */
+.io-del { position: absolute; right: -14px; top: -14px; width: 28px; height: 28px; border-radius: 50%; border: 2px solid #fff; background: var(--clay); color: #fff; font: 700 13px/1 var(--sans); padding: 0; cursor: pointer; z-index: 2; }
+.io-del::after { content: ""; position: absolute; inset: -8px; }
+.io-handle { position: absolute; right: -10px; bottom: -10px; width: 20px; height: 20px; background: #fff; border: 2px solid var(--orange-dark); border-radius: 3px; cursor: nwse-resize; z-index: 2; touch-action: none; }
+.io-handle::after { content: ""; position: absolute; inset: -12px; }
+.io-pick { position: relative; margin-top: 10px; cursor: pointer; }
+.io-file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.io-row { flex-direction: row; align-items: center; margin: 6px 0; }
+.io-row.on .io-n { color: var(--orange); }
+.io-n { min-width: 22px; cursor: pointer; }
+
+/* Card editor: what carries over to the next card, and inline hints */
+.ed-kept { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -4px 0 8px; }
+.ed-hint { color: var(--clay); }
+.ed-similar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; margin: 8px 0; border: 2px solid var(--orange); background: color-mix(in srgb, var(--orange) 12%, transparent); }
+.chip.mcq-pick { min-width: 44px; min-height: 44px; justify-content: center; font-weight: 700; }
+.io-foot { flex: none; margin-top: 10px; }
+
+/* ---- wp19.css */
+/* WP19: start-up progress on the loading screen */
+.load-bar { width: min(220px, 60vw); height: 6px; background: var(--line, rgba(127,127,127,.25)); border-radius: 3px; overflow: hidden; }
+.load-bar > i { display: block; height: 100%; background: var(--accent, #F28A1B); transition: width .15s linear; }
+
+/* ---- wp20.css */
+/* WP20: Settings usability and safety */
+
+/* Sliders: the page scrolls through them; only a sideways drag on the thumb (or − / +) changes them (kit.tsx Slider). */
+.kit-range { touch-action: pan-y; padding: 6px 0; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.kit-range .px-range { pointer-events: none; display: block; }
+.kit-step { flex: none; width: 44px; height: 44px; display: inline-grid; place-items: center; padding: 0; background: var(--ink-3); border: 2px solid var(--line-soft); color: var(--orange-2); font-family: var(--px); font-size: 20px; line-height: 1; cursor: pointer; }
+.kit-step:disabled { opacity: 0.35; cursor: default; }
+.kit-step:active:not(:disabled) { background: color-mix(in srgb, var(--orange) 18%, var(--ink-3)); }
+.kit-slider .kit-num { min-width: 3.2em; text-align: center; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .kit-step { border-radius: 10px; font-family: var(--sans); font-weight: 700; }
+
+/* Jump row: a fade on the right says there is more; 44 px chips. */
+.jump-row { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); padding-right: 24px; }
+.jump-row .chip { min-height: 44px; }
+
+/* Settings-specific tap targets (global sizes are WP10's). */
+.chip.hidden-field { min-height: 44px; }
+
+/* Backups list rows */
+.backup-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; padding: 6px 0; border-top: 1px solid var(--line-soft); }
+.backup-row .when { flex: 1 1 160px; }
+
+/* Wipe sheet: what goes, and the typed confirmation */
+.wipe-list { margin: 4px 0 8px; padding-left: 18px; }
+.wipe-type { width: 100%; }
+.exam-past { opacity: 0.55; }

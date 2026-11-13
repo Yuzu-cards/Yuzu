@@ -2,10 +2,10 @@
 // App shell is precached and served cache-first so Yuzu opens offline. Updates wait until the
 // user taps "Update" so a session is never interrupted. Third-party modules fetched at runtime
 // (the zstd decoder) are cached on first use.
-const VERSION = "1.7.0-7cd9a3a132";
+const VERSION = "1.8.0-eef5ca4510";
 const CACHE = `yuzu-${VERSION}`;
 const RUNTIME = "yuzu-runtime";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./assets/app-b573cac0af.js","./assets/app-e85c43e76c.css","./icons/apple-touch-icon.png","./icons/favicon-32.png","./icons/icon-192.png","./icons/icon-512.png","./icons/maskable-512.png","./fonts/yuzu-pixel.woff"];
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./assets/app-28e6474d88.js","./assets/app-dff682d143.css","./icons/apple-touch-icon.png","./icons/favicon-32.png","./icons/icon-192.png","./icons/icon-512.png","./icons/maskable-512.png","./fonts/yuzu-pixel.woff"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE.map((p) => new Request(p, { cache: "reload" })))));
@@ -60,7 +60,7 @@ function shouldNudge(n, now) {
   if (n.skipLight && n.light && n.light[today]) return false; // a night shift or the day after: Yuzu stays quiet
   return true;
 }
-const metaDb = () => new Promise((res, rej) => { const r = indexedDB.open("yuzu"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const metaDb = () => new Promise((res, rej) => { const r = indexedDB.open("yuzu"); r.onsuccess = () => { r.result.onversionchange = () => r.result.close(); res(r.result); }; r.onerror = () => rej(r.error); }); // let a newer app version upgrade the database
 async function metaGet(key) { const db = await metaDb(); return new Promise((res) => { const q = db.transaction("meta").objectStore("meta").get(key); q.onsuccess = () => res(q.result ? q.result.value : undefined); q.onerror = () => res(undefined); }); }
 async function metaPut(key, value) { const db = await metaDb(); return new Promise((res) => { const tx = db.transaction("meta", "readwrite"); tx.objectStore("meta").put({ key, value }); tx.oncomplete = () => res(); tx.onerror = () => res(); }); }
 async function nudge() {
