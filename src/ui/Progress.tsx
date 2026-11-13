@@ -63,9 +63,9 @@ function derive() {
   let ok = 0, all = 0;
   for (const r of store.reviews) if (r.ts > now - 30 * DAY && r.state === "review") { all++; if (r.rating > 1) ok++; }
   const retention = all ? Math.round((ok / all) * 100) : null;
-  // This week vs last week: reviews, minutes, recall.
+  // The last 7 days (today and the 6 before, whole days) vs the 7 days before them: reviews, minutes, recall.
   const wk = (from: number, to: number) => { let n = 0, ms = 0, okk = 0, rv = 0; for (const r of store.reviews) if (r.ts >= from && r.ts < to) { n++; ms += Math.min(r.durationMs || 0, 120000); if (r.state === "review") { rv++; if (r.rating > 1) okk++; } } return { n, mins: Math.round(ms / 60000), recall: rv ? Math.round((okk / rv) * 100) : null }; };
-  const week = wk(now - 7 * DAY, now + 1), lastWeek = wk(now - 14 * DAY, now - 7 * DAY);
+  const week = wk(start - 6 * DAY, now + 1), lastWeek = wk(start - 13 * DAY, start - 6 * DAY);
   const mastery = store.masteryBySystem(now);
   const systems = [...mastery].map(([name, m]) => ({ name, total: m.total, learned: m.total - m.unseen })).sort((a, b) => b.learned - a.learned || b.total - a.total);
   const tree = store.tree();
@@ -86,8 +86,8 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
         <div className="stat"><b>{store.reviews.length.toLocaleString()}</b><span>reviews all time</span></div>
       </div>
       <div className="card-box" style={{ marginTop: 12 }}>
-        <b>This week</b>
-        <div className="small muted" style={{ marginTop: 4 }}>{week.n.toLocaleString()} reviews in {week.mins < 1 && week.n ? "under a minute" : `${week.mins} min`}{week.recall !== null ? `, ${week.recall}% recalled` : ""}. {lastWeek.n ? `Last week: ${lastWeek.n.toLocaleString()} in ${lastWeek.mins} min${lastWeek.recall !== null ? `, ${lastWeek.recall}%` : ""}.` : "No reviews the week before."}</div>
+        <b>Last 7 days</b>
+        <div className="small muted" style={{ marginTop: 4 }}>{week.n.toLocaleString()} reviews in {week.mins < 1 && week.n ? "under a minute" : `${week.mins} min`}{week.recall !== null ? `, ${week.recall}% recalled` : ""}. {lastWeek.n ? `The 7 days before: ${lastWeek.n.toLocaleString()} in ${lastWeek.mins} min${lastWeek.recall !== null ? `, ${lastWeek.recall}%` : ""}.` : "No reviews in the 7 days before."}</div>
       </div>
       <h2>Last 12 weeks</h2>
       <div className="card-box heat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 1fr)", gap: 3 }}>
@@ -127,7 +127,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
 }
 
 const yrs = (d: number) => `${(d / 365.25).toFixed(d < 3650 ? 1 : 0)} y`;
-/** Retiring cards: >5 years to the next review → offered here; >20 years → retired on their own. Both go to the log. */
+/** Retiring cards: reviewed only every 5+ years (interval at the last review) → offered here; >20 years → retired on their own. Both go to the log. */
 function Mastered() {
   const v = store.getVersion();
   const cands = useMemo(() => store.masteryCandidates(), [v]);
@@ -139,7 +139,7 @@ function Mastered() {
   const monthAgo = Date.now() - 30 * 86400000;
   const byYou = log.filter((e) => e.by === "you").length, auto = log.length - byYou, recent = log.filter((e) => e.at > monthAgo).length;
   const ask = (store.settings.retireAskYears ?? 5) * 365.25;
-  const nearing = useMemo(() => { let n = 0; for (const c of store.cards.values()) { const d = store.intervalDays(c); if (d > ask / 2 && d <= ask) n++; } return n; }, [v, ask]);
+  const nearing = useMemo(() => { const now = Date.now(); let n = 0; for (const c of store.cards.values()) { const d = store.intervalDays(c); if (d > ask / 2 && d <= ask && c.due > now && !c.suspended) n++; } return n; }, [v, ask]); // due cards are being reviewed again: not close
   if (!cands.length && !log.length && !nearing) return null;
   const toggle = (id: string) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const shownLog = [...log].reverse().filter((e) => !q || (e.front + " " + e.back + " " + e.deck).toLowerCase().includes(q.toLowerCase()));
@@ -149,16 +149,16 @@ function Mastered() {
       <div className="stat-grid" style={{ marginTop: 8 }}>
         <div className="stat"><b>{log.length.toLocaleString()}</b><span>retired ({byYou.toLocaleString()} by you, {auto.toLocaleString()} auto)</span></div>
         <div className="stat"><b>{recent.toLocaleString()}</b><span>in the last 30 days</span></div>
-        <div className="stat"><b>{nearing.toLocaleString()}</b><span>getting close (next review {Math.round(ask / 365.25 / 2 * 10) / 10}–{Math.round(ask / 365.25)} y away)</span></div>
+        <div className="stat"><b>{nearing.toLocaleString()}</b><span>getting close (reviewed every {Math.round(ask / 365.25 / 2 * 10) / 10}–{Math.round(ask / 365.25)} y)</span></div>
       </div>
       <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 8 }}>
         {cands.length > 0 && <button className="btn primary" onClick={() => { setSel(new Set(cands.map((c) => c.id))); setOpen("list"); }}>{cands.length.toLocaleString()} ready to retire</button>}
         {log.length > 0 && <button className="btn" onClick={() => setOpen("log")}>Log · {log.length.toLocaleString()}</button>}
       </div>
-      <p className="small muted" style={{ margin: "8px 0 0" }}>Next review more than {store.settings.retireAskYears ?? 5} year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"} away: you decide here. {store.settings.retireAutoYears ? `More than ${store.settings.retireAutoYears} years: retired automatically.` : "Nothing is retired automatically."} Change both in Settings → Studying. “I've mastered this” in a card's ⋯ menu retires it right away. Retired cards are deleted (their pictures too) and kept in the log.</p>
+      <p className="small muted" style={{ margin: "8px 0 0" }}>Reviewed only every {store.settings.retireAskYears ?? 5}+ year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"} (the gap the scheduler set at the last review): you decide here. {store.settings.retireAutoYears ? `More than ${store.settings.retireAutoYears} years: retired automatically.` : "Nothing is retired automatically."} Change both in Settings → Studying. “I've mastered this” in a card's ⋯ menu retires it right away. Retired cards are deleted (their pictures too) and kept in the log.</p>
       {open === "list" && createPortal(
         <div className="sheet-backdrop" onClick={() => setOpen(null)}><div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "85vh", overflow: "auto" }}>
-          <b>{cands.length.toLocaleString()} cards next due in more than {store.settings.retireAskYears ?? 5} year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"}</b>
+          <b>{cands.length.toLocaleString()} cards reviewed only every {store.settings.retireAskYears ?? 5}+ year{(store.settings.retireAskYears ?? 5) === 1 ? "" : "s"}</b>
           <p className="small muted">Ticked cards are retired: deleted, with their question and answer kept in the Mastered log. “Keep studying” takes them off this list for good.</p>
           <div className="row" style={{ gap: 8, margin: "6px 0" }}>
             <button className="btn" onClick={() => setSel(new Set(cands.map((c) => c.id)))}>All</button>
@@ -169,7 +169,7 @@ function Mastered() {
               <li key={c.id} style={{ padding: "8px 0", borderBottom: "1px dashed var(--line)" }}>
                 <label className="row" style={{ alignItems: "flex-start", gap: 10 }}>
                   <input type="checkbox" checked={sel.has(c.id)} onChange={() => toggle(c.id)} style={{ marginTop: 4 }} />
-                  <span className="grow"><span className="small muted">{c.source.split("::").slice(-2).join(" › ")} · next in {yrs(store.intervalDays(c))} · {c.reps} reviews{c.lapses ? `, ${c.lapses} lapses` : ""}</span><br />{t.front || "(no text)"}{t.back ? <><br /><span className="muted">→ {t.back}</span></> : null}</span>
+                  <span className="grow"><span className="small muted">{c.source.split("::").slice(-2).join(" › ")} · every {yrs(store.intervalDays(c))}{c.due > Date.now() ? `, next in ${yrs((c.due - Date.now()) / DAY)}` : ", due now"} · {c.reps} reviews{c.lapses ? `, ${c.lapses} lapses` : ""}</span><br />{t.front || "(no text)"}{t.back ? <><br /><span className="muted">→ {t.back}</span></> : null}</span>
                 </label>
               </li>); })}
             {cands.length > 500 && <li className="small muted">… and {(cands.length - 500).toLocaleString()} more (“All” includes them)</li>}
@@ -187,7 +187,7 @@ function Mastered() {
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {shownLog.slice(0, 300).map((e) => (
               <li key={e.id + e.at} style={{ padding: "8px 0", borderBottom: "1px dashed var(--line)" }}>
-                <span className="small muted">{fmtDate(e.at)} · {e.by === "auto" ? "retired automatically" : "marked by you"} · {e.deck.split("::").slice(-2).join(" › ")} · was next in {yrs(e.intervalDays)} · {e.reps} reviews{e.lapses ? `, ${e.lapses} lapses` : ""}{e.firstReview ? ` · learning since ${fmtDate(e.firstReview)}` : ""}</span><br />
+                <span className="small muted">{fmtDate(e.at)} · {e.by === "auto" ? "retired automatically" : "marked by you"} · {e.deck.split("::").slice(-2).join(" › ")} · was reviewed every {yrs(e.intervalDays)} · {e.reps} reviews{e.lapses ? `, ${e.lapses} lapses` : ""}{e.firstReview ? ` · learning since ${fmtDate(e.firstReview)}` : ""}</span><br />
                 {e.front}{e.back ? <><br /><span className="muted">→ {e.back}</span></> : null}
               </li>))}
             {shownLog.length > 300 && <li className="small muted">… {(shownLog.length - 300).toLocaleString()} more — search to narrow</li>}
@@ -205,7 +205,7 @@ function RecapButton() {
   return (<>
     {why && <DiagnoseSheet onClose={() => setWhy(false)} />}
     <div className="card-box row" style={{ gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-      <span className="grow" data-hint="Known right now|The sum of every learned card's predicted recall today, from your own forgetting curves — the expected number of cards you'd get right if all were asked now."><b className="kit-num" style={{ fontSize: 20 }}>{k.known.toLocaleString()}</b><span className="small muted" style={{ display: "block", marginTop: 4 }}>cards you'd likely recall right now, of {k.of.toLocaleString()} learned</span></span>
+      <span className="grow" data-hint="Known right now|The sum of every seen card's predicted recall today (learned and still in learning steps), from your own forgetting curves — the expected number of cards you'd get right if all were asked now."><b className="kit-num" style={{ fontSize: 20 }}>{k.known.toLocaleString()}</b><span className="small muted" style={{ display: "block", marginTop: 4 }}>cards you'd likely recall right now, of {k.of.toLocaleString()} seen</span></span>
       <button className="btn" onClick={() => setWhy(true)} data-hint="Why so many reviews?|What drives your daily load, biggest first, worked out from your own reviews — with a fix for each.">Workload</button>
       <button className="btn primary" onClick={() => setOpen(true)}>Recap</button>
     </div>
@@ -220,7 +220,7 @@ function Areas() {
   return (<>
     <h2 style={{ marginTop: 0 }}>Areas</h2>
     <div className="areas" role="table" aria-label="Areas side by side">
-      <div className="area-row head" role="row"><span role="columnheader">Area</span><span role="columnheader" data-hint="Due|Learned cards due by the end of today.">Due</span><span role="columnheader" data-hint="New|Cards not started yet.">New left</span><span role="columnheader" data-hint="Recall|Share of reviews (not first sight) answered Hard, Good or Easy in the last 30 days.">Recall</span><span role="columnheader" data-hint="Mastered|Learned cards with a memory of at least the 'mastered' days in Settings.">Mastered</span></div>
+      <div className="area-row head" role="row"><span role="columnheader">Area</span><span role="columnheader" data-hint="Due|Cards due by the end of today, including ones still in learning steps.">Due</span><span role="columnheader" data-hint="New|Cards not started yet.">New left</span><span role="columnheader" data-hint="Recall|Share of reviews (not first sight) answered Hard, Good or Easy in the last 30 days.">Recall</span><span role="columnheader" data-hint="Mastered|Learned cards with a memory of at least the 'mastered' days in Settings.">Mastered</span></div>
       {rows.map((a) => { const pm = a.learned ? Math.round((a.mastered / a.total) * 100) : 0; const pl = Math.round((a.learned / a.total) * 100); return (
         <div className="area-row" role="row" key={a.name}>
           <span role="cell"><b>{a.name}</b><br /><span className="small muted">{a.total.toLocaleString()} cards · {a.minutes30} min in 30 days</span>

@@ -9,6 +9,8 @@ import { noteTitle, renderCard } from "./render";
 import { stamp, observe } from "./clock";
 import { MCQ_ID, parseOptions } from "./mcq";
 import { diagnoseWorkload, type Cause } from "./diagnose";
+import { simulateNewShare, examWhen, type ShareCat } from "./examshare";
+import { fmtDate } from "./dates";
 import { spokenText, backOnly } from "./voice";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
@@ -88,7 +90,10 @@ export const DEFAULT_SETTINGS: Settings = {
   fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", planScreen: false, showStreak: false, leechAction: "claude", citrusPlans: false, applied: [], retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
 };
 export interface Deadline { id: string; name: string; /** yyyy-mm-dd */ date: string; view: View; /** deck path ("" = everything) */ path: string }
-export interface ExamStatus { daysLeft: number; total: number; seen: number; unseen: number; coverage: number; predicted: number | null; weak: number; needPerDay: number; finishOn: string | null; onTrack: boolean; reviewDays: number }
+export interface ExamStatus { daysLeft: number; total: number; seen: number; unseen: number; coverage: number; predicted: number | null; weak: number; needPerDay: number; finishOn: string | null; onTrack: boolean; reviewDays: number;
+  /** scope cards tomorrow's queue would bring in at the current limit; days until the last one comes in (null: not within a year);
+   *  the smallest daily limit (for every deck) that gets them all in before the review-only days (only with opts.setTo); exam today/tomorrow with cards still new */
+  share: number; lastNewIn: number | null; setTo: number | null; tooLate: boolean }
 export interface SmartDeck { id: string; name: string; systems: string[]; specialties: string[]; decks: string[]; tags: string[]; states: CardState[] }
 export interface Capture { id: string; at: number; text: string; image?: string; source: string; sent: boolean }
 export interface SyncStatus { state: "idle" | "syncing" | "ok" | "error" | "off"; message: string; at: number; pending?: boolean }
@@ -353,7 +358,7 @@ export class Store {
     for (let i = 0; i < 7; i++) { const iso = this.isoToday(d0); const s = this.shiftOn(iso); (days as any[]).push({ date: iso, shift: s?.code ?? "", studied: (byDay.get(iso) ?? 0) >= 10, planned: iso >= today && (this.shiftWeights[iso] ?? 1) > 0.3, slot: this.slotOn(iso) }); d0.setDate(d0.getDate() + 1); }
     const done = (days as any[]).filter((x) => x.studied).length; const target = 7 - (this.settings.restDays ?? 1);
     const asks = (days as any[]).filter((x) => x.date >= today && !x.studied && x.planned).map((x) => ({ date: x.date, title: `Yuzu: ${x.date === today ? `${due.toLocaleString()} cards` : "cards"}`, minutes: x.date === today ? needMin : Math.max(10, Math.min(60, planMin)), slot: x.slot }));
-    const pending: string[] = []; for (const d of this.settings.deadlines ?? []) { if (d.date < today) continue; const e = this.examStatus(d, now); if (!e.onTrack) pending.push(`${d.name} in ${e.daysLeft} days: needs ${e.needPerDay} new cards a day (limit ${this.settings.newPerDay})`); } const imp = this.improveList().length; if (imp) pending.push(`${imp} cards marked for Claude to improve`); const offer = this.countBeyond(this.settings.retireAskYears ?? 5); if (offer) pending.push(`${offer} cards ready to retire as mastered`); if (this.hasUnsynced()) pending.push("Unsynced changes");
+    const pending: string[] = []; for (const d of this.settings.deadlines ?? []) { if (d.date < today) continue; const e = this.examStatus(d, now); if (!e.onTrack) pending.push(`${d.name} ${examWhen(e.daysLeft)}: ${e.tooLate ? `too late for the ${e.unseen} new cards, review the weakest 30` : `needs ${e.needPerDay} new cards a day, gets about ${e.share} of the ${this.settings.newPerDay} a day`}`); } const imp = this.improveList().length; if (imp) pending.push(`${imp} cards marked for Claude to improve`); const offer = this.countBeyond(this.settings.retireAskYears ?? 5); if (offer) pending.push(`${offer} cards ready to retire as mastered`); if (this.hasUnsynced()) pending.push("Unsynced changes");
     const streak = st.streak ?? 0; let ok = 0, all = 0; for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts > now - 30 * DAY; i--) { const r = this.reviews[i]; if (r.state === "review") { all++; if (r.rating > 1) ok++; } }
     const summary = due === 0 ? `All caught up: nothing due${todayRevs.length ? `, ${todayRevs.length} reviews done today` : ""}.` : `${due.toLocaleString()} cards due (about ${needMin} min); ${todayRevs.length} done today${streak ? `; ${streak}-day streak` : ""}.`;
     // ---- contract v2 (Citrus HUB.md): numbers Citrus keeps as history, live progress, proposals that wait for a tap, deep links
@@ -370,7 +375,7 @@ export class Store {
     const inbox: HubProposal[] = [];
     const leeches = [...this.cards.values()].filter((c) => !c.suspended && c.lapses >= this.settings.leechThreshold).length;
     if (leeches >= 5) inbox.push({ id: `leeches-${week}`, type: "task", title: `Yuzu: sort out ${leeches} leech cards`, text: "Cards you keep forgetting: send them to Claude to rewrite, or suspend them.", minutes: 10, pri: 2, url: base + "?do=leeches", expires: this.isoToday(new Date(now + 7 * DAY)) });
-    for (const d of this.settings.deadlines ?? []) { if (d.date < today) continue; const e = this.examStatus(d, now); if (!e.onTrack) inbox.push({ id: `exam-${d.id}-${week}`, type: "task", title: `Yuzu: ${d.name} needs ${e.needPerDay} new cards a day`, text: `Your limit is ${this.settings.newPerDay}; at that pace the last new cards come in on ${e.finishOn}.`, minutes: 5, pri: 1, url: base + "?do=exam", expires: this.isoToday(new Date(now + 7 * DAY)) }); }
+    for (const d of this.settings.deadlines ?? []) { if (d.date < today) continue; const e = this.examStatus(d, now); if (!e.onTrack) inbox.push({ id: `exam-${d.id}-${week}`, type: "task", title: e.tooLate ? `Yuzu: ${d.name} is ${examWhen(e.daysLeft)}: review the weakest 30` : `Yuzu: ${d.name} needs ${e.needPerDay} new cards a day`, text: e.tooLate ? `${e.unseen} cards are still new: too late to start them, so go over what you'd forget.` : `It gets about ${e.share} of your ${this.settings.newPerDay} new cards a day (they are shared across your decks); at that pace the last come in ${e.finishOn ? `on ${fmtDate(new Date(e.finishOn + "T12:00:00"))}` : "more than a year from now"}.`, minutes: 5, pri: 1, url: base + "?do=exam", expires: this.isoToday(new Date(now + 7 * DAY)) }); }
     const actions: HubAction[] = [
       { id: "review", label: due ? `Review ${due.toLocaleString()} cards` : "Study", url: base, icon: "🍋", minutes: needMin },
       { id: "drill", label: "Mixed drill (30 cards)", url: base, icon: "🔀", minutes: 10 },
@@ -1350,17 +1355,44 @@ export class Store {
   }
 
   // ---- Exam countdown and mixed drills ---------------------------------------------------------------------------------------
+  private examMemo = new Map<string, { key: string; e: ExamStatus; full: boolean }>();
   /** Where a deadline stands: how much of its scope is introduced, how many new cards a day it needs, and what you'd remember on the day if you stopped reviewing today. */
-  examStatus(d: Deadline, now = Date.now()): ExamStatus {
+  examStatus(d: Deadline, now = Date.now(), opts: { setTo?: boolean } = {}): ExamStatus {
+    // hubStatus asks up to four times per deadline and the replay below walks the whole collection: same data, same answer
+    const key = `${d.path}|${d.view}|${d.date}|${this.version}|${this.cards.size}|${this.reviews.length}|${this.settings.newPerDay}|${this.settings.burySiblings}|${this.dayStart(now)}`;
+    const hit = this.examMemo.get(d.id); if (hit && hit.key === key && (hit.full || !opts.setTo)) return hit.e;
+    const e = this.examStatusNow(d, now, opts); this.examMemo.set(d.id, { key, e, full: !!opts.setTo }); return e;
+  }
+  private examStatusNow(d: Deadline, now: number, opts: { setTo?: boolean }): ExamStatus {
     const examT = new Date(d.date + "T00:00:00").getTime(); const daysLeft = Math.max(0, Math.ceil((examT - this.dayStart(now)) / DAY));
     const cards = this.cardsIn(d.path, d.view).filter((c) => !c.suspended); const unseen = cards.filter((c) => c.state === "new").length; const seen = cards.length - unseen;
     // the last days before the exam are for review only (up to 5, fewer when the exam is close)
     const reviewDays = Math.min(5, Math.floor(daysLeft / 3)); const newDays = Math.max(1, daysLeft - reviewDays);
-    const needPerDay = unseen ? Math.ceil(unseen / newDays) : 0; const cap = Math.max(1, this.settings.newPerDay);
+    const needPerDay = unseen ? Math.ceil(unseen / newDays) : 0; const limit = Math.max(0, this.settings.newPerDay);
     let sum = 0, n = 0, weak = 0;
     for (const c of cards) if (c.state !== "new" && c.lastReview) { const r = retrievability(Math.max(0, (examT - c.lastReview) / DAY), c.stability); sum += r; n++; if (r < 0.8) weak++; }
-    const finishDays = unseen ? Math.ceil(unseen / cap) : 0; const fin = new Date(this.dayStart(now) + finishDays * DAY);
-    return { daysLeft, total: cards.length, seen, unseen, coverage: cards.length ? seen / cards.length : 0, predicted: n ? sum / n : null, weak, needPerDay, finishOn: unseen ? `${fin.getFullYear()}-${String(fin.getMonth() + 1).padStart(2, "0")}-${String(fin.getDate()).padStart(2, "0")}` : null, onTrack: needPerDay <= cap, reviewDays };
+    const tooLate = unseen > 0 && daysLeft <= 1; // the exam is today or tomorrow: no point starting new cards
+    // The exam's real share: today's queue shares the new-card budget in turns across categories, so replay that (lib/examshare.ts).
+    let share = 0, lastNewIn: number | null = unseen ? null : 0, setTo: number | null = null;
+    if (unseen) {
+      const cats = this.newShareCats(cards); const usedToday = this.reviewedToday(now).newCards; const bury = this.settings.burySiblings;
+      const budget = (L: number) => (day: number) => (day === 0 ? Math.max(0, L - usedToday) : L);
+      const run = simulateNewShare(cats, budget(limit), 366, bury); lastNewIn = run.finishDay;
+      share = run.perDay.length > 1 ? run.perDay[1] : run.perDay[0] ?? 0;
+      const fits = (L: number) => { const r = simulateNewShare(cats, budget(L), newDays, bury).finishDay; return r !== null && r < newDays; };
+      if (opts.setTo && !tooLate && !(lastNewIn !== null && lastNewIn < newDays) && fits(999)) { let lo = limit + 1, hi = 999; while (lo < hi) { const mid = (lo + hi) >> 1; if (fits(mid)) hi = mid; else lo = mid + 1; } setTo = lo; }
+    }
+    const onTrack = !unseen || (!tooLate && lastNewIn !== null && lastNewIn < newDays);
+    const fin = new Date(this.dayStart(now)); if (lastNewIn !== null) fin.setDate(fin.getDate() + lastNewIn);
+    return { daysLeft, total: cards.length, seen, unseen, coverage: cards.length ? seen / cards.length : 0, predicted: n ? sum / n : null, weak, needPerDay, finishOn: unseen && lastNewIn !== null ? this.isoToday(fin) : null, onTrack, reviewDays, share, lastNewIn, setTo, tooLate };
+  }
+  /** Every category holding new cards, in the order queue("") takes them in turns; the ones with cards of `scope` list their new cards oldest first. */
+  private newShareCats(scope: Card[]): ShareCat[] {
+    const inScope = new Set<Card>(); for (const c of scope) if (c.state === "new") inScope.add(c);
+    const catOf = (src: string) => { let i = src.indexOf("::"); if (i >= 0) i = src.indexOf("::", i + 2); if (i >= 0) i = src.indexOf("::", i + 2); return i < 0 ? src : src.slice(0, i); }; // = split("::").slice(0, 3)
+    const cats = new Map<string, { list: Card[]; exam: boolean }>();
+    for (const c of this.cards.values()) if (c.state === "new" && !c.suspended) { const k = catOf(c.source); let e = cats.get(k); if (!e) cats.set(k, (e = { list: [], exam: false })); e.list.push(c); if (!e.exam && inScope.has(c)) e.exam = true; }
+    return [...cats.values()].map(({ list, exam }) => { if (!exam) return { count: list.length }; list.sort((a, b) => a.due - b.due || a.created - b.created); return { count: list.length, cards: list.map((c) => ({ nid: c.nid, scope: inScope.has(c) })) }; });
   }
   /** The cards of a deadline's scope you'd most likely have forgotten by exam day, weakest first (a drill). */
   examWeakest(d: Deadline, n = 30, now = Date.now()): Card[] {
@@ -1379,6 +1411,8 @@ export class Store {
     for (let i = 0; out.length < n && lists.some((l) => i < l.length); i++) for (const l of lists) if (i < l.length && out.length < n) out.push(l[i]);
     return out;
   }
+  /** The system a mixed drill takes turns over (the auto::System:: tag, else the first three deck levels). */
+  drillSystem(c: Card): string { return this.notes.get(c.nid)?.tags.find((t) => t.startsWith("auto::System::")) ?? c.source.split("::").slice(0, 3).join("::"); }
   drillSystems(cards: Card[]): number { return new Set(cards.map((c) => this.notes.get(c.nid)?.tags.find((t) => t.startsWith("auto::System::")) ?? c.source.split("::").slice(0, 3).join("::"))).size; }
 
   // ---- Mastery: retire cards whose next review is years away ----------------------------------------

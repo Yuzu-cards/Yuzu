@@ -1,4 +1,4 @@
-import { store, type View } from "../lib/store";
+import { store, type View, type ExamStatus } from "../lib/store";
 import type { Card } from "../lib/model";
 import { YuzuMark, IconPlay } from "./icons";
 import { DAY } from "../scheduler/fsrs";
@@ -131,7 +131,7 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
           <div className="stat-grid">
 {store.settings.showStreak &&             <div className="stat" data-hint={`Streak|Days in a row with at least one review. ${store.settings.restDays === 1 ? "1 rest day a week doesn't" : `${store.settings.restDays} rest days a week don't`} break it.`}><b>{stats.streak}</b><span>day streak</span></div>}
             <div className="stat" data-hint="Reviews today|Every answer counts, including Again and repeats."><b>{stats.today}</b><span>reviews today</span></div>
-            {store.mastery.log.length > 0 && <div className="stat" data-hint="Mastered|Cards retired because their next review was years away. Their details are in Progress → Mastered → Log."><b>{store.mastery.log.length.toLocaleString()}</b><span>mastered</span></div>}
+            {store.mastery.log.length > 0 && <div className="stat" data-hint="Mastered|Cards retired because the scheduler spaced their reviews years apart. Their details are in Progress → Mastered → Log."><b>{store.mastery.log.length.toLocaleString()}</b><span>mastered</span></div>}
             <div className="stat" data-hint="Learned|Cards in review: past their learning steps, with a real interval."><b>{counts.review.toLocaleString()}</b><span>cards learned</span></div>
           </div>
           {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
@@ -225,21 +225,33 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
 }
 
 const dmy = (iso: string) => iso.split("-").reverse().join("/");
+/** The new-card line of an exam countdown, from the exam's real share of the daily limit (store.examStatus). */
+function examLine(e: ExamStatus): string {
+  const limit = store.settings.newPerDay; const plural = (n: number, w: string) => `${n.toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
+  if (e.unseen === 0) return "All new cards are in; the rest is review.";
+  if (e.tooLate) return `Too late for the ${plural(e.unseen, "new card")}: review the weakest 30 instead.`;
+  const gets = `It gets about ${e.share} of your ${limit} new cards a day (they are shared across your decks in turn)`;
+  if (e.lastNewIn === null) return `Needs ${e.needPerDay} new cards a day. ${gets}, so the last would come in more than a year from now.`;
+  const before = e.daysLeft - e.lastNewIn;
+  if (e.onTrack) return `${gets}: the last come in on ${dmy(e.finishOn!)}, ${plural(before, "day")} before the exam.`;
+  return `Needs ${e.needPerDay} new cards a day. ${gets}: the last come in on ${dmy(e.finishOn!)}${before > 0 ? `, only ${plural(before, "day")} before the exam` : ", after the exam"}.${e.needPerDay <= limit ? " Starting each day with “Study this” gives it the whole limit." : ""}`;
+}
 /** Exam countdowns: days left, what's introduced, the new cards a day it needs, and drills on what you'd forget. Plus the mixed-system drill. */
 function Countdowns({ onStudy }: { onStudy: OnStudy }) {
-  const today = store.isoToday(); const list = (store.settings.deadlines ?? []).filter((d) => d.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const today = store.isoToday(); const v = store.getVersion();
+  const list = useMemo(() => (store.settings.deadlines ?? []).filter((d) => d.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1)).map((d) => ({ d, e: store.examStatus(d, Date.now(), { setTo: true }) })), [v, today]); // replays the new-card turns: once per change, not per render
   return (<>
-    {list.map((d) => { const e = store.examStatus(d); const pct = Math.round(e.coverage * 100); return (
+    {list.map(({ d, e }) => { const pct = Math.round(e.coverage * 100); return (
       <div key={d.id} className="card-box" style={{ marginTop: 10 }}>
         <div className="row"><b className="grow">{d.name}</b><span className={"chip" + (e.onTrack ? " yuzu" : " orange")}>{e.daysLeft === 0 ? "today" : e.daysLeft === 1 ? "tomorrow" : `${e.daysLeft} days`}</span></div>
         <div className="small muted" style={{ margin: "4px 0 6px" }}>{dmy(d.date)} · {e.total.toLocaleString()} cards in scope</div>
         <div className="bar" style={{ height: 8, background: "var(--line, #8883)", borderRadius: 4 }}><div style={{ width: pct + "%", height: "100%", background: "var(--yuzu, #f08a24)", borderRadius: 4 }} /></div>
         <p className="small" style={{ margin: "8px 0 4px" }}>{pct}% introduced{e.unseen ? ` · ${e.unseen.toLocaleString()} still new` : " · everything seen"}{e.predicted !== null ? ` · you'd recall about ${Math.round(e.predicted * 100)}% on the day if you stopped reviewing now` : ""}.</p>
-        <p className="small" style={{ margin: "0 0 8px", color: e.onTrack ? undefined : "var(--again)" }}>{e.unseen === 0 ? "All new cards are in; the rest is review." : e.onTrack ? `${e.needPerDay} new a day finishes them with ${e.reviewDays} review-only days before the exam (your limit is ${store.settings.newPerDay}).` : `Needs ${e.needPerDay} new cards a day; your limit is ${store.settings.newPerDay}. At that pace the last new cards come in on ${dmy(e.finishOn!)}.`}</p>
+        <p className="small" style={{ margin: "0 0 8px", color: e.onTrack ? undefined : "var(--again)" }}>{examLine(e)}</p>
         <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
           <button className="btn grow" onClick={() => onStudy(d.path, d.view)}>Study this</button>
           <button className="btn grow" disabled={!e.seen} onClick={() => onStudy(d.path, d.view, { preset: store.examWeakest(d), title: d.name + " · weakest" })}>Weakest 30</button>
-          {!e.onTrack && store.settings.newPerDay < e.needPerDay && <button className="btn grow" onClick={async () => { await store.saveSettings({ newPerDay: e.needPerDay }); snackbar(`New cards a day: ${e.needPerDay}`); }}>Set {e.needPerDay} a day</button>}
+          {!e.onTrack && e.setTo !== null && <button className="btn grow" data-hint={`New cards a day: ${e.setTo}|The limit is for all your decks: at ${e.setTo} a day this exam gets enough of them in turn.`} onClick={async () => { await store.saveSettings({ newPerDay: e.setTo! }); snackbar(`New cards a day: ${e.setTo} (all decks)`); }}>Set {e.setTo} a day</button>}
         </div>
       </div>); })}
   </>);
