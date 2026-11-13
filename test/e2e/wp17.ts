@@ -31,7 +31,7 @@ try {
     const tap = async (x: number, y: number) => { if (cdp) await P.touchscreen.tap(x, y); else await P.mouse.click(x, y); await P.waitForTimeout(60); };
     await P.evaluate(() => (window as any).yuzu.importPack({ yuzu_pack: 1, id: "seed", category: "Medicine::Seed", cards: [{ id: "s", front: "Seed", back: "card" }] })); // (an empty Library is a different screen)
     await P.click("nav.tabs >> text=Library"); await P.click("text=＋ Image");
-    ok(`${mode}: the empty editor offers a real button, not a bare file input`, await P.locator("label.btn:has-text('Choose a picture')").isVisible());
+    ok(`${mode}: the empty editor offers a real button, not a bare file input`, await P.locator("button.btn:has-text('Choose a picture')").isVisible());
     await P.setInputFiles('input[aria-label="Picture"]', { name: "heart_anterior.png", mimeType: "image/png", buffer: Buffer.from(await pngOf(P), "base64") });
     await P.waitForSelector('[data-testid="io-canvas"]'); await P.waitForTimeout(150);
     const bb0 = (await P.locator('[data-testid="io-canvas"]').boundingBox())!;
@@ -73,9 +73,9 @@ try {
     }
     await P.fill('input[aria-label="Name of box 1"]', "Red room"); await P.fill('input[aria-label="Name of box 2"]', "Blue room");
     await shot(P, `${mode}-io-named`);
-    await P.click("button:has-text('Make 2 cards')"); await P.waitForSelector("text=/cards? added/", { timeout: 10000 });
+    await P.click("button:has-text('Make 2 cards')"); await P.waitForSelector("text=/cards?\\)? added/", { timeout: 10000 });
     const msg = await P.evaluate(() => [...document.querySelectorAll(".io-sheet > p.small")].map((e) => e.textContent).join(" || "));
-    ok(`${mode}: the message counts cards, not notes`, /(^| )2 cards added — heart anterior/.test(msg), msg);
+    ok(`${mode}: the message counts cards, not notes`, /\(2 cards\) added — heart anterior/.test(msg), msg);
     const saved = await P.evaluate(() => { const y = (window as any).yuzu; const n = [...y.notes.values()].find((n: any) => n.ntid === "yuzu-io"); return n ? { masks: n.fields[1], cards: y.cardsOfNote(n.id).length } : null; });
     ok(`${mode}: the saved boxes are the edited ones`, !!saved && saved.cards === 2 && /^20,25,3[67](\.\d)?,(29|30|31)(\.\d)?,Red room/.test(saved.masks), JSON.stringify(saved));
     if (!cdp) { await P.keyboard.press("Escape"); await P.waitForTimeout(150); ok("Esc closes the occlusion editor", (await P.locator(".io-sheet").count()) === 0); }

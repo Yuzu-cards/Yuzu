@@ -13,7 +13,7 @@
 .calib { display: block; width: 100%; max-width: 560px; height: auto; }
 
 /* ---- Desktop: Areas, Recap, Systems and Mastered on the left; the numbers, heatmap and calibration on the right */
-@media (min-width: 1100px) {
+@media (min-width: 1300px) {
   .progress-cols { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 28px; align-items: start; }
   .progress-side > .stat-grid:first-child { margin-top: 0; }
 }

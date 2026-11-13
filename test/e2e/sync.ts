@@ -48,7 +48,7 @@ try {
   await study(A, ["good"]); await study(B, ["again"]);
   await A.click("nav.tabs >> text=Settings"); await A.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await B.click("nav.tabs >> text=Settings"); await B.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await A.waitForTimeout(300);
   await Promise.all([A.click("text=Sync now"), B.click("text=Sync now")]);
-  const settled = /pushed|Up to date|pulled|retry in a minute/;
+  const settled = /pushed|Up to date|pulled|retry in a minute|trying again|retry at/;
   await A.waitForFunction((re) => re.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), settled, { timeout: 60000 });
   await B.waitForFunction((re) => re.test([...document.querySelectorAll("p.small")].map((p) => p.textContent).join(" ")) && !/Syncing/.test(document.body.innerText), settled, { timeout: 60000 });
   console.log("race — A:", await status(A)); console.log("race — B:", await status(B));

@@ -273,7 +273,8 @@ function examLine(e: ExamStatus): string {
   if (e.lastNewIn === null) return `Needs ${e.needPerDay} new cards a day. ${gets}, so the last would come in more than a year from now.`;
   const before = e.daysLeft - e.lastNewIn;
   if (e.onTrack) return `${gets}: the last come in on ${dmy(e.finishOn!)}, ${plural(before, "day")} before the exam.`;
-  return `Needs ${e.needPerDay} new cards a day. ${gets}: the last come in on ${dmy(e.finishOn!)}${before > 0 ? `, only ${plural(before, "day")} before the exam` : ", after the exam"}.${e.needPerDay <= limit ? " Starting each day with “Study this” gives it the whole limit." : ""}`;
+  const stillNew = before > 0 ? 0 : Math.max(0, e.unseen - e.share * Math.max(0, e.daysLeft));
+  return `Needs ${e.needPerDay} new cards a day. ${gets}: the last come in on ${dmy(e.finishOn!)}${before > 0 ? `, only ${plural(before, "day")} before the exam` : `, after the exam${stillNew ? ` (about ${stillNew.toLocaleString()} will still be new on the day)` : ""}`}.${e.needPerDay <= limit ? " Starting each day with “Study this” gives it the whole limit." : ""}`;
 }
 /** Exam countdowns: days left, what's introduced, the new cards a day it needs, and drills on what you'd forget. Plus the mixed-system drill. */
 function Countdowns({ onStudy }: { onStudy: OnStudy }) {

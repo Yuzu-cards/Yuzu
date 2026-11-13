@@ -102,7 +102,7 @@ try {
   ok("the Sketchy copy's size is read once, then kept in its own small key and in memory", sk.a === 7 && sk.key === 7 && sk.b === 7, JSON.stringify(sk));
 
   // ---- 6. The full backup, written in slices, is the same as the one-piece backup
-  const same = await C.evaluate(async () => { const y = (window as any).yuzu; const fr: number[] = []; const blob = await y.backupBlob((f: number) => fr.push(f)); const a = JSON.parse(await blob.text()); const b = JSON.parse(JSON.stringify(y.backup())); delete a.at; delete b.at; const ks = (o: any) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]])); return { same: ks(a) === ks(b), last: fr[fr.length - 1], n: a.cards.length }; });
+  const same = await C.evaluate(async () => { const y = (window as any).yuzu; const fr: number[] = []; const blob = await y.backupBlob(false, (f: number) => fr.push(f)); const a = JSON.parse(await blob.text()); const b = JSON.parse(JSON.stringify(y.backup())); delete a.at; delete b.at; const ks = (o: any) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]])); return { same: ks(a) === ks(b), last: fr[fr.length - 1], n: a.cards.length }; });
   ok("the full backup written in slices equals the one-piece backup, with progress to 100 %", same.same && same.last === 1 && same.n === 119, JSON.stringify(same));
   await C.close(); await ctx.close();
 

@@ -41,7 +41,7 @@ async function context(w: number, h: number, ui: string, size: string): Promise<
   await ctx.addInitScript("window.__name = (f) => f"); /* tsx names inner arrow functions */
   await ctx.addInitScript(`try { localStorage.setItem("yuzu-ui", ${JSON.stringify(ui)}); localStorage.setItem("yuzu-size", ${JSON.stringify(size)}); sessionStorage.setItem("yuzu-from", "citrus"); } catch {}`);
   const p = await ctx.newPage(); p.on("pageerror", (e) => errors.push(`${w} ${ui} ${size}: ${e.message}`));
-  await p.goto(URL); await p.waitForFunction(() => (window as any).yuzu?.loaded, null, { timeout: 20000 }); return { ctx, p };
+  await p.goto(URL + "?from=citrus"); await p.waitForFunction(() => (window as any).yuzu?.loaded, null, { timeout: 20000 }); return { ctx, p };
 }
 async function openAll(p: Page) { await p.evaluate(() => document.querySelectorAll(".screen details").forEach((d) => { (d as HTMLDetailsElement).open = true; })); await p.waitForTimeout(150); }
 try {
@@ -71,7 +71,7 @@ try {
     await p.locator("#lib-cards button.chip:has-text('Select')").click(); await p.locator("#lib-cards button.chip:has-text('All ')").click(); await p.waitForTimeout(200);
     const bar = await p.evaluate(() => { const b = document.querySelector(".bulk-bar") as HTMLElement; const btns = [...b.querySelectorAll<HTMLElement>(".btn")]; const tops = new Set(btns.map((x) => Math.round(x.getBoundingClientRect().top)));
       return { labels: btns.map((x) => x.textContent), rows: tops.size, minH: Math.min(...btns.map((x) => x.getBoundingClientRect().height)), h: Math.round(b.getBoundingClientRect().height), count: b.querySelector(".small")?.textContent }; });
-    ok(`${tag} 03-12: the bulk bar is one row of Study · Pause · Flag · Tag · More…, each at least 44 px`, bar.labels.join() === "Study,Pause,Flag,Tag,More…" && bar.rows === 1 && bar.minH >= 44 && bar.h <= 110 && bar.count === "190 selected", JSON.stringify(bar));
+    ok(`${tag} 03-12: the bulk bar is one row of Study · Pause · Flag · Tag · More…, each at least 44 px`, bar.labels.join() === "Study,Pause,Flag,Tag,More…" && bar.rows === 1 && bar.minH >= 44 && bar.h <= 110 && bar.count === "190 cards selected", JSON.stringify(bar));
     if (SHOTS) await p.screenshot({ path: `${SHOTS}/f-${tag}-bulk.png` });
     await p.locator(".bulk-bar >> text=More…").click(); await p.waitForTimeout(200);
     const more = await p.locator(".kit-sheet .kit-item").allInnerTexts();

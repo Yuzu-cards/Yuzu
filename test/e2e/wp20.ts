@@ -54,7 +54,7 @@ try {
 
   // ---- 05-12 jump row: page order, no chip without its group
   const jr = await page.evaluate(() => {
-    const chips = [...document.querySelectorAll<HTMLElement>(".jump-row .chip")].map((c) => c.dataset.to!);
+    const chips = [...document.querySelectorAll<HTMLElement>(".jump-row .chip[data-to]")].map((c) => c.dataset.to!);
     const page = [...document.querySelectorAll<HTMLElement>("details.section[id]")].map((d) => d.id).filter((id) => chips.includes(id));
     return { chips, page, dead: chips.filter((id) => !document.getElementById(id)), h: Math.round(document.querySelector(".jump-row .chip")!.getBoundingClientRect().height) };
   });
@@ -74,10 +74,10 @@ try {
   // ---- 05-10 dates
   const bf = page.locator('[aria-label="Break from"] input[type=text]'), bt = page.locator('[aria-label="Break to"] input[type=text]');
   await bf.fill("20/11/2026"); await bf.press("Enter"); await page.waitForTimeout(200); await bt.fill("10/11/2026"); await bt.press("Enter"); await page.waitForTimeout(200);
-  const brk = await S(page); const bmsg = await page.locator('[aria-label="Break to"]').innerText();
+  const brk = await S(page); const bmsg = await page.locator('span.kit-date[aria-label="Break to"]').innerText();
   ok("a break ending before it starts is refused, with the reason", brk.breakFrom === "2026-11-20" && brk.breakTo === "" && /Must be on or after 20\/11\/2026/.test(bmsg), `${brk.breakFrom} ${brk.breakTo} · ${bmsg}`);
   await page.fill("#s-exam input[placeholder='Step 1']", "Old exam"); const ed = page.locator('[aria-label="Exam date"] input[type=text]'); await ed.fill("01/01/2020"); await ed.press("Enter"); await page.waitForTimeout(200);
-  ok("an exam in the past is refused and Add exam stays off", /Must be on or after/.test(await page.locator('[aria-label="Exam date"]').innerText()) && await page.locator("#s-exam button:has-text('Add exam')").isDisabled());
+  ok("an exam in the past is refused and Add exam stays off", /Must be on or after/.test(await page.locator('span.kit-date[aria-label="Exam date"]').innerText()) && await page.locator("#s-exam button:has-text('Add exam')").isDisabled());
 
   // ---- 05-21 rollover up to 12:00
   const opts = await page.locator("select").evaluateAll((els) => { const s = els.find((e) => [...(e as HTMLSelectElement).options].some((o) => o.text === "04:00")) as HTMLSelectElement | undefined; return s ? [...s.options].map((o) => o.value) : []; });
@@ -111,9 +111,10 @@ try {
   const row = await page.locator("[data-testid=backup-row]").first().innerText();
   ok("a backup row shows dd/mm/yyyy, the time and the counts", /12\/11\/2026/.test(row) && /21:05/.test(row) && /6 cards/.test(row), row.replace(/\n/g, " | "));
   ok("Roll back is styled as dangerous", await page.locator("[data-testid=backup-row] button:has-text('Roll back')").evaluate((e) => e.classList.contains("danger")));
-  await page.locator("[data-testid=backup-row] button:has-text('Roll back')").tap(); await page.waitForTimeout(200);
-  ok("Roll back asks in the 8-bit sheet (no browser dialog)", await page.locator('[role=dialog][aria-label="Roll back to 12/11/2026?"]').count() === 1 && dialogs.length === 0, dialogs.join(" / "));
-  await page.locator('[role=dialog] .kit-cancel').tap(); await page.waitForTimeout(200);
+  await page.locator("[data-testid=backup-row] button:has-text('Roll back')").tap(); await page.waitForSelector('[role=dialog][aria-label^="Roll"]', { timeout: 5000 }).catch(() => {});
+  // Roll back first previews the backup from Drive (wp05; covered with a stand-in Drive in wp05.ts), so here only: never a browser dialog
+  ok("Roll back never opens a browser dialog", dialogs.length === 0, dialogs.join(" / "));
+  if (await page.locator('[role=dialog] .kit-cancel').count()) { await page.locator('[role=dialog] .kit-cancel').tap(); await page.waitForTimeout(200); }
   await page.evaluate(() => localStorage.removeItem("yuzu-google"));
 
   // ---- 05-7 Delete everything: lists what goes, needs DELETE typed; then everything (settings too) is gone

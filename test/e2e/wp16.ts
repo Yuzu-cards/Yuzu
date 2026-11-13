@@ -63,12 +63,12 @@ try {
   await p.click("button.chip >> text=Select"); const all = p.getByRole("button", { name: /^All \d/ }).first();
   ok("\"All\" names the card count", /All 6 cards/.test(await all.innerText()));
   await all.click(); ok("the bar says how many cards are selected", /6 cards selected/.test(await p.locator(".bulk-bar").innerText()));
-  await p.click(".bulk-bar >> text=Suspend"); await p.waitForTimeout(400);
+  await p.click(".bulk-bar >> text=Pause"); await p.waitForTimeout(400);
   const susp = await p.evaluate(() => [...(window as any).yuzu.cards.values()].filter((c: any) => c.source === "German::Wortschatz" && c.suspended).length);
   ok("Suspend on All suspends every card of every note (both directions)", susp === 6, `${susp} of 6`);
   await p.click("button.chip >> text=Select"); await p.locator(".list-row").first().click();
   ok("tapping one row selects all its note's cards", /2 cards selected/.test(await p.locator(".bulk-bar").innerText()));
-  await p.click(".bulk-bar >> text=Unsuspend"); await p.waitForTimeout(400);
+  await p.click(".bulk-bar >> text=More…"); await p.click(".kit-sheet >> text=Unpause"); await p.waitForTimeout(400);
   const susp2 = await p.evaluate(() => [...(window as any).yuzu.cards.values()].filter((c: any) => c.source === "German::Wortschatz" && c.suspended).length);
   ok("…and Unsuspend acts on both", susp2 === 4, `${susp2} still paused`);
   if (shots) await p.screenshot({ path: `${shots}/wp16-counts.png` });

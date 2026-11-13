@@ -24,14 +24,14 @@ test("sketchyCount, the ask-claude list and refsKey are cached until a note chan
   assert.notEqual(s.refsKey(), k1);
   s.notes.set("n0", note(0, { tags: [] })); assert.equal(s.improveList().length, 9);
   s.notes.delete("n3"); assert.deepEqual(s.sketchyCount(), { notes: 17, tags: 8 });
-  // a plain Map put in its place (anything that replaces the whole map) is never cached
-  s.notes = new Map(s.notes); assert.equal(s.notesRev(), ""); s.notes.set("n5", note(5, { fields: ["a", "b", ""] })); assert.deepEqual(s.sketchyCount(), { notes: 16, tags: 8 });
+  // a whole new map put in its place (a restore, a load) is wrapped and counted from scratch, under a new id
+  const r1 = s.notesRev(); s.notes = new Map(s.notes); assert.notEqual(s.notesRev(), r1); s.notes.set("n5", note(5, { fields: ["a", "b", ""] })); assert.deepEqual(s.sketchyCount(), { notes: 16, tags: 8 });
 });
 
 test("the full backup written in slices is the same JSON as the one-piece backup", async () => {
   const s = fresh();
   for (let i = 0; i < 9000; i++) s.reviews.push({ id: "r" + i, cid: "c" + (i % 50), ts: 1_700_000_000_000 + i * 1000, rating: 3, state: "review", elapsed: 1, scheduled: 1, ms: 1000 } as any);
-  const fr: number[] = []; const blob = await s.backupBlob((f) => fr.push(f));
+  const fr: number[] = []; const blob = await s.backupBlob(false, (f) => fr.push(f));
   const a = JSON.parse(await blob.text()); const b = JSON.parse(JSON.stringify(s.backup())); delete a.at; delete b.at;
   assert.deepEqual(a, b); assert.equal(fr[fr.length - 1], 1); assert.ok(fr.length >= 3);
 });

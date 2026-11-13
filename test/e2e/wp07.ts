@@ -15,7 +15,7 @@ async function open(ctx: BrowserContext, label: string, clock = false): Promise<
 }
 const pack = (id: string, n: number) => ({ yuzu_pack: 1, id, category: "Medicine::Undo", cards: Array.from({ length: n }, (_, i) => ({ id: "q" + i, front: `Q${i} question`, back: `answer ${i}` })) });
 const front = (p: Page) => p.locator(".study .card-host").first().evaluate((el) => (el.shadowRoot!.querySelector(".card")!.textContent ?? "").trim().match(/Q\d+/)?.[0] ?? "").catch(() => "");
-const left = async (p: Page) => (await p.locator(".study-top span.small").innerText().catch(() => "")).match(/(\d+) left/)?.[1] ?? "";
+const left = async (p: Page) => (await p.locator(".study-top span.num").innerText().catch(() => "")).match(/(\d+) left/)?.[1] ?? "";
 const reviews = (p: Page) => p.evaluate(() => (window as any).yuzu.reviews.length as number);
 async function grade(p: Page, g: 1 | 2 | 3 | 4) { await p.waitForSelector(".show-bar", { timeout: 4000 }); await p.keyboard.press(" "); await p.waitForSelector(".answer-bar", { timeout: 4000 }); await p.keyboard.press(String(g)); await p.waitForTimeout(150); }
 async function study(p: Page) { await p.evaluate(() => window.dispatchEvent(new CustomEvent("yuzu-study"))); await p.waitForSelector(".study .card-host", { timeout: 5000 }); }

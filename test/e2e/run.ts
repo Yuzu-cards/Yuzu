@@ -62,8 +62,8 @@ try {
   // Card pack import with an image, then study it
   await page.click("nav.tabs >> text=Settings"); await page.evaluate(() => document.querySelectorAll("details").forEach((d) => { (d as HTMLDetailsElement).open = true; }));
   await page.setInputFiles('input[type=file] >> nth=0', "test/fixtures/hyperkalemia.yuzu.json");
-  await page.waitForFunction(() => document.body.innerText.includes("cards added"), null, { timeout: 30000 });
-  console.log("pack:", await page.locator("text=/cards added/").first().innerText());
+  await page.waitForFunction(() => /cards?\)? added/.test(document.body.innerText), null, { timeout: 30000 });
+  console.log("pack:", await page.locator("text=/cards?\\)? added/").first().innerText());
   await page.click("nav.tabs >> text=Library"); await page.click(".seg >> text=Decks");
   await page.fill("input[placeholder^=Search]", "peaked (tented) t waves, best seen"); await page.waitForTimeout(300);
   await page.locator(".list-row").first().click(); await page.waitForSelector("text=Preview");

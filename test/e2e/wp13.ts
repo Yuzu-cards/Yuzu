@@ -79,8 +79,8 @@ try {
     const ov = await p.locator(".col-side > p").first().innerText();
     ok("01-12 a small backlog is 'already in today's session', not 'extra a day'", /9 overdue, already in today's session/.test(ov) && !/extra a day/.test(ov), ov);
     const exams = await p.locator(".card-box", { hasText: "cards in scope" }).allInnerTexts();
-    ok("01-10 exam today / tomorrow: triage, no pace sum", /Exam today — skip new cards: run Weakest 30/.test(exams[0] ?? "") && /Exam tomorrow — skip new cards/.test(exams[1] ?? "") && !/review-only/.test((exams[0] ?? "") + (exams[1] ?? "")) && !/Set \d+ a day/.test(exams[1] ?? ""), exams.slice(0, 2).join(" || ").replace(/\n/g, " | "));
-    ok("01-10 finishing after the exam: says how many will still be new on the day", /You won't see all 25 new cards before the exam: at your limit of 1 a day, about 22 will still be new on the day/.test(exams[2] ?? ""), (exams[2] ?? "").replace(/\n/g, " | "));
+    ok("01-10 exam today / tomorrow: triage, no pace sum", /Too late for the 25 new cards: review the weakest 30/.test(exams[0] ?? "") && /Too late for the \d+ new cards/.test(exams[1] ?? "") && !/review-only/.test((exams[0] ?? "") + (exams[1] ?? "")) && !/Set \d+ a day/.test(exams[1] ?? ""), exams.slice(0, 2).join(" || ").replace(/\n/g, " | "));
+    ok("01-10 finishing after the exam: says how many will still be new on the day", /after the exam \(about \d+ will still be new on the day\)/.test(exams[2] ?? ""), (exams[2] ?? "").replace(/\n/g, " | "));
     await shot(p, "cardio-paper-1440");
     await p.locator(".coach-row button.stack", { hasText: "Tomorrow: finish Cardio" }).click(); await p.waitForSelector(".study .card-host", { timeout: 5000 }).catch(() => {});
     ok("01-9 …and the tap opens a real session (not an empty one)", (await p.locator(".study .card-host").count()) === 1);

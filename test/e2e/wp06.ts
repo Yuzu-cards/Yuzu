@@ -19,7 +19,7 @@ async function open(ctx: BrowserContext, label: string, pack: unknown, settings:
 const reviews = (p: Page) => p.evaluate(() => (window as any).yuzu.reviews.length as number);
 const inStudy = async (p: Page) => (await p.locator(".study").count()) === 1;
 const answerShown = async (p: Page) => (await p.locator(".answer-bar").count()) === 1;
-const overlays = (p: Page) => p.locator(".sheet-backdrop, [role=dialog]").count();
+const overlays = (p: Page) => p.locator(".sheet-backdrop").count();
 const basic = { yuzu_pack: 1, id: "keys", category: "Medicine::Keys", cards: Array.from({ length: 14 }, (_, i) => ({ id: "k" + i, front: `Key question ${i}`, back: `answer ${i}` })) };
 const padOf = (p: Page) => async (b: number) => { await p.evaluate((i) => { (window as any).__pad.buttons[i].pressed = true; }, b); await p.waitForTimeout(70); await p.evaluate((i) => { (window as any).__pad.buttons[i].pressed = false; }, b); await p.waitForTimeout(90); };
 const A = 0, B = 1, MENU = 9, UP = 12, DOWN = 13, LEFT = 14, RIGHT = 15;
@@ -60,7 +60,7 @@ try {
   await K.waitForSelector(".sheet textarea"); await K.click(".sheet textarea"); await K.keyboard.type("2 3 i m split it"); await K.waitForTimeout(200);
   const it = await K.evaluate(() => (document.querySelector(".sheet textarea") as HTMLTextAreaElement | null)?.value ?? "GONE");
   ok("02-1 typing in the Needs improving note grades nothing and opens no Card info", (await reviews(K)) === r0 && it === "2 3 i m split it" && (await overlays(K)) === 1, it);
-  await K.click(".sheet b"); await K.keyboard.press(" "); await K.keyboard.press("2"); await K.waitForTimeout(200);
+  await K.click(".sheet .sheet-title"); await K.keyboard.press(" "); await K.keyboard.press("2"); await K.waitForTimeout(200);
   ok("07-3 with the Needs improving sheet open (focus off the box), Space and 2 grade nothing", (await reviews(K)) === r0);
   await K.keyboard.press("Escape"); await K.waitForTimeout(200);
   ok("…Esc closes that sheet and the session stays", (await overlays(K)) === 0 && (await inStudy(K)));

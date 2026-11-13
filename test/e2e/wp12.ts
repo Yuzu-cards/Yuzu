@@ -43,7 +43,7 @@ try {
     const order = await P.evaluate(() => { const ids = [...document.querySelectorAll("details.section[id]")].map((d) => d.id); return ids; });
     const chips = await P.evaluate(() => [...document.querySelectorAll(".jump-row .chip")].map((b) => b.textContent));
     const want = ["s-look", "s-study", "s-exam", "s-remind", "s-google", "s-sync", "s-improve", "s-import", "s-media", "s-inbox", "s-data", "s-diag"];
-    ok(`${tag} the page order of the groups matches the jump row`, JSON.stringify(order.filter((x) => want.includes(x))) === JSON.stringify(want) && chips[0] === "Look" && chips.indexOf("Google") === chips.indexOf("Languages") + 1, order.join(","));
+    ok(`${tag} the page order of the groups matches the jump row`, JSON.stringify(order.filter((x) => want.includes(x))) === JSON.stringify(want) && chips[0] === "Look" && chips.indexOf("Google") === (chips.includes("Languages") ? chips.indexOf("Languages") : chips.indexOf("Reminders")) + 1, order.join(","));
     const gTop = () => P.evaluate(() => Math.round(document.getElementById("s-google")!.getBoundingClientRect().top + scrollY));
     const g0 = await gTop(); await P.click("#s-study > summary"); await P.waitForTimeout(150); const g1 = await gTop(); await P.click("#s-study > summary");
     ok(`${tag} closing a left-column group does not move the right column`, g0 === g1, `${g0} → ${g1}`);
@@ -75,7 +75,7 @@ try {
     } else { ok(`${tag} below 1500px the preview stays a sheet`, !dock.dock && dock.backdrop); await P.click('[aria-label="Close preview"]'); await P.waitForTimeout(100); }
     await P.click("nav.tabs >> text=Progress"); await P.waitForTimeout(200);
     const pc = await P.evaluate(() => { const c = document.querySelector(".progress-cols"); return c ? getComputedStyle(c).gridTemplateColumns.split(" ").length : 0; });
-    ok(`${tag} Progress: ${w >= 1500 ? "two columns" : "one column"}`, w >= 1500 ? pc === 2 : pc <= 1, String(pc));
+    ok(`${tag} Progress: ${w >= 1300 ? "two columns" : "one column"}`, w >= 1300 ? pc === 2 : pc <= 1, String(pc));
 
     // ---- 07-8: hover hints — none after a click; rail hints beside the rail; they go by themselves
     await P.mouse.move(w / 2, h - 40); await P.waitForTimeout(100);

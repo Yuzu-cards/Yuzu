@@ -397,7 +397,7 @@ export function DateField({ value, onChange, min, label, placeholder = "dd/mm/yy
   const take = (iso: string) => { if (min && iso < min) { setBad("min"); return; } setBad(""); onChange(iso); };
   const commit = () => { if (!text.trim()) { setBad(""); onChange(""); return; } const iso = isoOf(text); if (iso) take(iso); else setBad("form"); };
   return (
-    <span className="kit-date">
+    <span className="kit-date" role="group" aria-label={label}>
       <input type="text" aria-label={label ?? "Date (dd/mm/yyyy)"} inputMode="numeric" placeholder={placeholder} maxLength={10} value={text} aria-invalid={!!bad || undefined} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
       <button type="button" className="chip" aria-label="Choose from a calendar" onClick={() => { const n = native.current; if (!n) return; if ((n as any).showPicker) try { (n as any).showPicker(); return; } catch { /* falls through */ } n.click(); }}>📅</button>
       <input ref={native} type="date" tabIndex={-1} aria-hidden="true" value={value} min={min} onChange={(e) => { if (e.target.value) { setText(dmyOf(e.target.value)); take(e.target.value); } else onChange(""); }} style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />

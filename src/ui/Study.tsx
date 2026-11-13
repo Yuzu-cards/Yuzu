@@ -425,11 +425,13 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const snap = (): Snap => ({ queue, idx, done: doneCount, results });
   const push = (a: Act) => { acts.current = [...acts.current.slice(-19), a]; setActsRev((n) => n + 1); };
   const restore = (v?: Snap) => { if (!v) return; setQueue(v.queue); setIdx(v.idx); setDoneCount(v.done); setResults(v.results); };
-  const undoing = useRef(false);
+  const undoing = useRef(false); const undoMore = useRef(0);
   async function undo() {
-    if (undoing.current || busy.current) return; undoing.current = true;
-    try { await undoTop(); } finally { undoing.current = false; setActsRev((n) => n + 1); }
+    if (undoing.current || busy.current) { if (undoing.current) undoMore.current++; return; } // a quick second Ctrl+Z waits its turn instead of being lost
+    undoing.current = true;
+    try { await undoTop(); } finally { undoing.current = false; setActsRev((n) => n + 1); if (undoMore.current > 0) { undoMore.current--; setTimeout(() => { void undoRef.current(); }, 0); } }
   }
+  const undoRef = useRef(undo); undoRef.current = undo;
   async function undoTop() {
     const a = acts.current[acts.current.length - 1];
     if (!a) { // nothing done in this session (e.g. just reopened after a reload): the store may still hold the last answer
@@ -451,7 +453,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     if (a.kind === "master") { const n = await store.undoMaster(a.master); if (n) { restore(a.view); flash("Brought back — no longer retired"); } else flash("Nothing to undo"); return; }
   }
   const canUndo = acts.current.length > 0 || !!store.canUndoLast();
-  function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 1400); }
+  const flashT = useRef<ReturnType<typeof setTimeout>>(undefined);
+  function flash(msg: string) { setToast(msg); clearTimeout(flashT.current); flashT.current = setTimeout(() => setToast(""), 1400); } // a newer message gets its own full time
 
   // Swipe to rate (← Again · ↓ Hard · → Good · ↑ Easy); a swipe on the question shows the answer. A label follows the
   // finger and the card flies off. Vertical swipes only count when the card isn't scrolling that way.
