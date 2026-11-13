@@ -263,6 +263,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [hookText, setHookText] = useState("");
   const [leech, setLeech] = useState<{ cardId: string; lapses: number } | null>(null);
   const [menu, setMenu] = useState(false); const [hands, setHands] = useState(false);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null); useEffect(() => { if (!menu) setMenuAt(null); }, [menu]); // a right-click opens it at the pointer
   const [word, setWord] = useState<WordHit | null>(null);
   const holdMode = (() => { try { return localStorage.getItem("yuzu-hold") === "system" ? "system" : "yuzu"; } catch { return "yuzu"; } })();
   const total = queue.length;
@@ -594,7 +595,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       {word && <WordSheet hit={word} deckPath={card.source} noteId={card.nid} onClose={() => setWord(null)} onSearch={onSearch} onMenu={() => setMenu(true)} />}
       {menu && (<>
         <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
-        <div className="menu" role="menu" aria-label="Card menu" ref={menuRef} onKeyDown={(e) => {
+        <div className="menu" style={menuAt ? { position: "fixed", right: "auto", left: Math.max(8, Math.min(menuAt.x, innerWidth - 380)), top: Math.max(8, Math.min(menuAt.y, innerHeight - 440)) } : undefined} role="menu" aria-label="Card menu" ref={menuRef} onKeyDown={(e) => {
           if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End" && e.key !== "Tab") return;
           const items = [...e.currentTarget.querySelectorAll<HTMLElement>("button:not([disabled])")]; if (!items.length) return;
           e.preventDefault(); const i = items.indexOf(document.activeElement as HTMLElement); const n = items.length;
@@ -615,7 +616,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <span className="where">{title ?? card.source.split("::").slice(-2).join(" › ")}</span>
         {card.flag ? <span className="chip orange" style={{ minHeight: 24, padding: "2px 8px" }}>flagged</span> : null}
       </div>
-      <div className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onContextMenu={(e) => { if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; e.preventDefault(); setMenu(true); }} onClick={() => { if (holdPaper.wasHeld()) return; if (!showAnswer) setShowAnswer(true); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+      <div className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onContextMenu={(e) => { if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; e.preventDefault(); setMenuAt(e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : null); setMenu(true); }} onClick={() => { if (holdPaper.wasHeld()) return; if (!showAnswer) setShowAnswer(true); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         style={flying ? { transform: flyTo[flying] } : { transform: drag ? `translate(${drag.dx * 0.45}px, ${drag.dy * 0.35}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag && showAnswer && (() => { const g = dirOf(drag); const near = g ?? dirOf({ dx: drag.dx * 1.6, dy: drag.dy * 1.6 }); if (!near) return null; const [t, col] = SWIPE_LABEL[near]; return <div className="swipe-label" style={{ color: col, opacity: g ? 1 : 0.55, left: Math.max(8, Math.min(window.innerWidth - 110, drag.x - 50)), top: Math.max(60, drag.y - 120), position: "fixed" }}>{t}</div>; })()}
         {rendered && <Paper card={card} html={showAnswer ? (mcq && rendered.mcqBack !== undefined ? rendered.mcqBack : rendered.back) : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>

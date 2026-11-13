@@ -133,21 +133,29 @@ export function ActionSheet({ title, sub, items, onClose, children }: { title: s
  * Hold (≈0.45 s) anything with data-hint="Title|explanation" and a bubble explains it. The tap that ends the hold is
  * swallowed, so holding never triggers the button. Mount once.
  */
+type HintPos = { title: string; text: string; x: number; y: number; below: boolean; side?: boolean };
+/** Over or under the element, centred; on the desktop rail to its right, so it never covers the next tabs. */
+function place(el: HTMLElement, r: DOMRect, below: boolean, t: string, rest: string[]): HintPos {
+  const title = rest.length ? t : "", text = rest.length ? rest.join("|") : t;
+  if (el.closest("nav.tabs") && window.innerWidth >= 1100) return { title, text, x: r.right + 8, y: Math.min(Math.max(r.top + r.height / 2, 60), window.innerHeight - 60), below: false, side: true };
+  return { title, text, x: Math.min(Math.max(r.left + r.width / 2, 130), window.innerWidth - 130), y: below ? r.bottom + 8 : r.top - 8, below };
+}
 export function HintLayer() {
-  const [hint, setHint] = useState<{ title: string; text: string; x: number; y: number; below: boolean } | null>(null);
+  const [hint, setHint] = useState<HintPos | null>(null);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined, hideTimer: ReturnType<typeof setTimeout> | undefined;
     let start: { x: number; y: number } | null = null; let swallow = false;
     const clear = () => { clearTimeout(timer); timer = undefined; start = null; };
     const down = (e: PointerEvent) => {
-      setHint(null);
+      setHint(null); clearTimeout(hoverTimer); clearTimeout(hideTimer); quiet = hoverEl; // a click ends hovering: no hint pops up after it
+
       const el = (e.target as Element | null)?.closest?.("[data-hint]") as HTMLElement | null; if (!el) return;
       // An element with its own hold action (data-hold) keeps the hold, unless the hint sits inside it (more specific).
       const holder = (e.target as Element).closest("[data-hold]"); if (holder && (holder === el || el.contains(holder))) return;
       start = { x: e.clientX, y: e.clientY }; clearTimeout(timer);
       timer = setTimeout(() => {
         const r = el.getBoundingClientRect(); const below = r.top < 110; const raw = el.getAttribute("data-hint") ?? ""; const [t, ...rest] = raw.split("|");
-        setHint({ title: rest.length ? t : "", text: rest.length ? rest.join("|") : t, x: Math.min(Math.max(r.left + r.width / 2, 130), window.innerWidth - 130), y: below ? r.bottom + 8 : r.top - 8, below });
+        setHint(place(el, r, below, t, rest));
         swallow = true; buzz(10); clearTimeout(hideTimer); hideTimer = setTimeout(() => setHint(null), 5000);
       }, 450);
     };
@@ -155,27 +163,30 @@ export function HintLayer() {
     const click = (e: MouseEvent) => { if (!swallow) return; swallow = false; e.preventDefault(); e.stopPropagation(); };
     const up = () => { clear(); if (swallow) setTimeout(() => (swallow = false), 400); };
     const ctx = (e: Event) => { if ((e.target as Element | null)?.closest?.("[data-hint]")) e.preventDefault(); };
-    const scroll = () => { clear(); setHint(null); };
-    // A mouse: hovering a hint shows it after a moment (no hold needed); leaving hides it.
-    let hoverEl: HTMLElement | null = null; let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+    const scroll = () => { clear(); clearTimeout(hoverTimer); setHint(null); };
+    // A mouse: hovering a hint shows it after a moment (no hold needed); leaving, clicking or scrolling hides it, and it
+    // goes by itself after 4 s. The element just clicked stays quiet until the pointer leaves it.
+    let hoverEl: HTMLElement | null = null; let hoverTimer: ReturnType<typeof setTimeout> | undefined; let quiet: HTMLElement | null = null;
     const over = (e: PointerEvent) => {
       if (e.pointerType !== "mouse") return; const el = (e.target as Element | null)?.closest?.("[data-hint]") as HTMLElement | null; if (el === hoverEl) return;
-      hoverEl = el; clearTimeout(hoverTimer); if (!el) { setHint(null); return; }
-      hoverTimer = setTimeout(() => { if (hoverEl !== el || !el.isConnected) return; const r = el.getBoundingClientRect(); const below = r.top < 110; const raw = el.getAttribute("data-hint") ?? ""; const [t, ...rest] = raw.split("|");
-        setHint({ title: rest.length ? t : "", text: rest.length ? rest.join("|") : t, x: Math.min(Math.max(r.left + r.width / 2, 130), window.innerWidth - 130), y: below ? r.bottom + 8 : r.top - 8, below }); }, 650);
+      hoverEl = el; clearTimeout(hoverTimer); if (el !== quiet) quiet = null; setHint(null); if (!el || el === quiet) return;
+      const rail = !!el.closest("nav.tabs") && window.innerWidth >= 1100; // the rail's labels are already visible: wait longer
+      hoverTimer = setTimeout(() => { if (hoverEl !== el || !el.isConnected || quiet === el) return; const r = el.getBoundingClientRect(); const below = r.top < 110; const raw = el.getAttribute("data-hint") ?? ""; const [t, ...rest] = raw.split("|");
+        setHint(place(el, r, below, t, rest)); clearTimeout(hideTimer); hideTimer = setTimeout(() => setHint(null), 4000); }, rail ? 900 : 650);
     };
-    document.addEventListener("pointerover", over, true);
+    const out = (e: PointerEvent) => { if (e.pointerType === "mouse" && !e.relatedTarget) { hoverEl = null; quiet = null; clearTimeout(hoverTimer); setHint(null); } }; // left the window
+    document.addEventListener("pointerover", over, true); document.addEventListener("pointerout", out, true);
     document.addEventListener("pointerdown", down, true); document.addEventListener("pointermove", move, true); document.addEventListener("pointerup", up, true);
     document.addEventListener("pointercancel", clear, true); document.addEventListener("click", click, true); document.addEventListener("contextmenu", ctx, true); window.addEventListener("scroll", scroll, true);
     return () => {
-      clearTimeout(timer); clearTimeout(hideTimer); clearTimeout(hoverTimer); document.removeEventListener("pointerover", over, true);
+      clearTimeout(timer); clearTimeout(hideTimer); clearTimeout(hoverTimer); document.removeEventListener("pointerover", over, true); document.removeEventListener("pointerout", out, true);
       document.removeEventListener("pointerdown", down, true); document.removeEventListener("pointermove", move, true); document.removeEventListener("pointerup", up, true);
       document.removeEventListener("pointercancel", clear, true); document.removeEventListener("click", click, true); document.removeEventListener("contextmenu", ctx, true); window.removeEventListener("scroll", scroll, true);
     };
   }, []);
   if (!hint) return null;
   return createPortal(
-    <div role="tooltip" data-testid="hint" className="kit-hint" style={{ left: hint.x, top: hint.y, transform: `translate(-50%, ${hint.below ? "0" : "-100%"})` }}>
+    <div role="tooltip" data-testid="hint" className="kit-hint" data-side={hint.side ? "" : undefined} style={{ left: hint.x, top: hint.y, transform: hint.side ? "translate(0, -50%)" : `translate(-50%, ${hint.below ? "0" : "-100%"})` }}>
       {hint.title && <b>{hint.title}</b>}{hint.text}
     </div>, document.body);
 }
@@ -198,7 +209,9 @@ export function useHold(onHold: ((p: HoldPoint) => void) | null, ms = 500) {
     },
     onPointerMove: (e: React.PointerEvent) => { if (start.current && Math.hypot(e.clientX - start.current.x, e.clientY - start.current.y) > 10) cancel(); },
     onPointerUp: cancel, onPointerLeave: cancel, onPointerCancel: cancel,
-    onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
+    // Right-click, the ContextMenu key, Shift+F10 (and pad Y / key M, which send a contextmenu) open the same menu as a
+    // hold. A touch long-press also fires contextmenu, but there the hold timer already answers it.
+    onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; cancel(); onHold({ x: e.clientX, y: e.clientY, target: e.target as Element }); },
     "data-holding": pressing ? "" : undefined, "data-hold": "",
   } : {};
   const wasHeld = () => { const h = held.current; held.current = false; return h; };
@@ -351,4 +364,29 @@ export function ConfirmHost() {
   const no = () => { const r = req; setReq(null); queueMicrotask(() => r.resolve(!!r.ok)); };
   const yes = () => { req.resolve(true); };
   return <ActionSheet title={req.title} sub={req.sub} onClose={no} items={[{ label: req.ok ? "OK" : req.yes || "Yes", danger: !req.ok && req.danger !== false, onClick: yes }]} />;
+}
+
+// ---------------------------------------------------------------- pick one (a <select> opened from the gamepad)
+type PickReq = { title: string; options: { label: string; disabled?: boolean }[]; current: number; resolve: (i: number | null) => void };
+let pushPick: ((r: PickReq) => void) | null = null;
+/** A sheet of choices; answers the picked index, or null for Cancel / B / Escape. */
+export function pickSheet(title: string, options: { label: string; disabled?: boolean }[], current = -1): Promise<number | null> {
+  return new Promise((resolve) => { if (pushPick) pushPick({ title, options, current, resolve }); else resolve(null); });
+}
+export function PickHost() {
+  const [req, setReq] = useState<PickReq | null>(null);
+  useEffect(() => { pushPick = (r) => setReq(r); return () => { pushPick = null; }; }, []);
+  useEffect(() => { if (!req) return; const id = requestAnimationFrame(() => { const items = document.querySelectorAll<HTMLElement>(".kit-sheet .kit-item"); const el = items[Math.max(0, req.current)]; try { (el as any)?.focus({ focusVisible: true }); } catch { el?.focus(); } }); return () => cancelAnimationFrame(id); }, [req]);
+  if (!req) return null;
+  let picked: number | null = null;
+  const close = () => { const r = req; setReq(null); queueMicrotask(() => r.resolve(picked)); };
+  return <ActionSheet title={req.title} onClose={close} items={req.options.map((o, i) => ({ label: o.label, disabled: o.disabled, hint: i === req.current ? "✓" : undefined, onClick: () => { picked = i; } }))} />;
+}
+
+/** True while a media query matches (e.g. a wide screen), following window resizes. */
+export function useMedia(query: string): boolean {
+  const get = () => typeof window !== "undefined" && !!window.matchMedia?.(query).matches;
+  const [on, setOn] = useState(get);
+  useEffect(() => { const m = window.matchMedia?.(query); if (!m) return; const f = () => setOn(m.matches); f(); m.addEventListener("change", f); return () => m.removeEventListener("change", f); }, [query]);
+  return on;
 }

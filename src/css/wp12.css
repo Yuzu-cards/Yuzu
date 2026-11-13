@@ -1,0 +1,50 @@
+/* WP12 — desktop (Steam Deck at a 27" monitor): wide-screen layout, hints on the rail, the card menu where it was opened. */
+
+/* Settings: two fixed, independent columns (left = Look … Languages, right = Google … Diagnostics), so opening a group
+   never moves the other column. The jump row lists the groups in the same order. */
+@media (min-width: 1100px) {
+  .settings-cols { columns: auto; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 28px; align-items: start; }
+  .settings-cols > p { grid-column: 1 / -1; }
+  .settings-col > details.section:first-child { margin-top: 0; }
+  /* Rail labels are read from a desk: a size up from 10 px */
+  .tab { font-size: 11px; line-height: 11px; }
+}
+.settings-col { min-width: 0; }
+
+/* Wide screens: use the room (the content stays centred next to the rail) */
+@media (min-width: 1700px) { .screen { max-width: 1480px; } }
+@media (min-width: 2300px) { .screen { max-width: 1680px; } }
+
+/* Progress in two columns: the overview on the left, calibration, systems and categories on the right */
+@media (min-width: 1500px) {
+  .progress-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 32px; align-items: start; }
+  .progress-cols .pcol > h2:first-child { margin-top: 0; }
+}
+.pcol { min-width: 0; }
+
+/* Library: on a wide screen the preview sits beside the list instead of covering it */
+@media (min-width: 1500px) {
+  .screen.lib-docked { max-width: none; padding-right: calc(min(560px, 34vw) + 52px); }
+  .lib-dock { position: fixed; top: calc(14px + var(--safe-t)); bottom: 14px; right: 24px; width: min(560px, 34vw); overflow: auto; z-index: 15;
+    background: var(--ink-2); border: 2px solid var(--line); padding: 14px; box-shadow: 4px 4px 0 rgba(0,0,0,.35); }
+  .lib-dock .paper { min-height: 200px; }
+}
+:root:is([data-ui="clean"], [data-ui="paper"]) .lib-dock { border-radius: var(--r) !important; border-width: 1px; box-shadow: none; }
+
+/* Hints beside the rail get a pointer to the tab */
+.kit-hint[data-side] { max-width: 280px; }
+
+/* The card menu: under the ⋯ of the study column (not at the window edge), and never taller than the window */
+.menu { max-height: calc(100dvh - 16px); overflow: auto; }
+@media (min-width: 900px) { .menu { right: max(10px, calc((100vw - 900px) / 2 + 10px)); } }
+
+/* Tall desktop screens: the answer buttons sit right under the card instead of at the far bottom edge */
+@media (min-width: 900px) and (min-height: 1100px) {
+  .study > .study-body { flex: 0 1 auto; }
+  .study > .answer-bar, .study > .show-bar { margin-bottom: auto; }
+}
+
+/* Wide desktop screens: the card text grows with the screen (and still follows the Text size setting, which zooms the
+   study body around it), so it reads from a desk at a 27" monitor. */
+@media (min-width: 1700px) and (min-height: 900px) { .study .study-body .card-host { zoom: 1.15; } }
+@media (min-width: 2300px) and (min-height: 1200px) { .study .study-body .card-host { zoom: 1.3; } }

@@ -10,7 +10,7 @@ import { Boss } from "./Boss";
 import { Inbox } from "./Inbox";
 import { ShortcutsSheet } from "./Shortcuts";
 import { startGamepad } from "../lib/gamepad";
-import { ConfirmHost, FieldLabels, HintLayer, SnackbarHost, confirmSheet, tellSheet, snackbar } from "./kit";
+import { ConfirmHost, FieldLabels, HintLayer, PickHost, SnackbarHost, confirmSheet, tellSheet, snackbar } from "./kit";
 
 type Tab = "today" | "library" | "progress" | "settings";
 const TAB_HINTS: Record<Tab, string> = {
@@ -74,7 +74,7 @@ function Recovery({ error }: { error: string }) {
   );
 }
 
-export function App() { return <ErrorBoundary><AppInner /><HintLayer /><SnackbarHost /><ConfirmHost /><FieldLabels /></ErrorBoundary>; }
+export function App() { return <ErrorBoundary><AppInner /><HintLayer /><SnackbarHost /><ConfirmHost /><PickHost /><FieldLabels /></ErrorBoundary>; }
 
 function AppInner() {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
@@ -101,19 +101,33 @@ function AppInner() {
     const tabs: Tab[] = ["today", "library", "progress", "settings"];
     const onTab = (e: Event) => { if (study || document.querySelector(".sheet-backdrop, [role=dialog]")) return; /* not behind a sheet */ const d = (e as CustomEvent).detail as number; setInbox(false); setTab((t) => tabs[(tabs.indexOf(t) + d + tabs.length) % tabs.length]); };
     const onStudy = () => { if (!study && store.loaded && !document.querySelector(".sheet-backdrop, [role=dialog]")) startStudy(""); };
+    const onKeys = () => setKeysOpen(true);
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null; if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+      // Esc (pad B) in a text field outside a sheet: a search box empties first; then the field lets go of the keys.
+      if (e.key === "Escape" && !study && t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA") && !/^(range|checkbox|radio)$/.test((t as HTMLInputElement).type) && !t.closest(".sheet-backdrop, [role=dialog]")) {
+        const f = t as HTMLInputElement; e.preventDefault();
+        if (f.value && (f.type === "search" || /^search/i.test(f.placeholder))) { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(f, ""); f.dispatchEvent(new Event("input", { bubbles: true })); }
+        else f.blur();
+        return;
+      }
       if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+      // The hold menu of the focused row: the ContextMenu key, Shift+F10 or M (right-click and pad Y do the same).
+      const holder = (document.activeElement as HTMLElement | null)?.closest?.("[data-hold]");
+      if (holder && !study && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10") || e.key.toLowerCase() === "m")) {
+        e.preventDefault(); const r = holder.getBoundingClientRect(); holder.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: r.left + Math.min(40, r.width / 2), clientY: r.bottom - 4 })); return;
+      }
       if (e.key === "?") { e.preventDefault(); if (!document.querySelector('[role=dialog][aria-label="Controls"]')) setKeysOpen(true); return; } // on top of any sheet; Esc unwinds one at a time
       if (study || document.querySelector(".sheet-backdrop, [role=dialog]")) return;
       const k = e.key.toLowerCase(); const go = (x: Tab) => { e.preventDefault(); setInbox(false); setTab(x); };
       if (k === "t") go("today"); else if (k === "l") go("library"); else if (k === "p") go("progress"); else if (k === "s") go("settings");
       else if (k === "/") { e.preventDefault(); const q = document.querySelector<HTMLInputElement>('input[type=search], input[placeholder^="Search"]'); if (q) q.focus(); else { setTab("library"); setTimeout(() => document.querySelector<HTMLInputElement>('input[type=search], input[placeholder^="Search"]')?.focus(), 80); } }
       else if (k === "n" || k === "c" || k === "w") { e.preventDefault(); setTab("today"); store.openOnToday(k === "n" ? "add" : k === "c" ? "capture" : "workload"); }
-      else if (e.key === "Enter" && tab === "today" && (!t || t === document.body)) { e.preventDefault(); startStudy(""); }
+      else if (k === "g") { e.preventDefault(); startStudy(""); }
+      else if (e.key === "Enter" && tab === "today" && (!t || t === document.body || !!t.closest("nav.tabs"))) { e.preventDefault(); startStudy(""); }
     };
-    window.addEventListener("keydown", onKey); window.addEventListener("yuzu-tab", onTab); window.addEventListener("yuzu-study", onStudy);
-    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("yuzu-tab", onTab); window.removeEventListener("yuzu-study", onStudy); };
+    window.addEventListener("keydown", onKey); window.addEventListener("yuzu-tab", onTab); window.addEventListener("yuzu-study", onStudy); window.addEventListener("yuzu-keys", onKeys);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("yuzu-tab", onTab); window.removeEventListener("yuzu-study", onStudy); window.removeEventListener("yuzu-keys", onKeys); };
   });
 
   // Sketchy out, once (the user's call, 12/11/2026): after start-up settles, with Undo while the app is open.
