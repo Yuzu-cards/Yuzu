@@ -16,8 +16,9 @@ import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
 import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError, folderAppeared } from "./google";
-import { DriveMedia, DriveSync, writeStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
+import { DriveMedia, DriveSync, writeStatus, readStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
+import { mergeSettings, stampChanges, sanitizeSettings, shareable, withoutDeviceFields } from "./settingsync";
 declare const __VERSION__: string;
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, stampCard, stampNote, type NoteConflict, type ShardCache, type SyncConfig } from "./sync";
 
@@ -188,7 +189,7 @@ export class Store {
   googleStatus: { state: "off" | "working" | "ok" | "error"; message: string; at: number } = { state: "off", message: "Not connected", at: 0 };
   mediaVersion = 0;
   private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false; private driveAgain = false;
-  private lastStatusFp = ""; private lastStatusAt = 0;
+  private lastStatusFp = ""; private lastStatusAt = 0; private lastStatusLook = 0; private statusMark = ""; private statusWroteAt = ""; private statusTimer: ReturnType<typeof setTimeout> | null = null; private syncedThisSession = false;
   googleConnected(): boolean { return tokenValid(); }
   googleSignedIn(): boolean { return !!savedToken(); }
   googleEmail(): string { return savedToken()?.email ?? ""; }
@@ -404,15 +405,43 @@ export class Store {
       extra: { due, minutesNeeded: needMin, overdue: this.overdueCount(), newPerDay: this.settings.newPerDay, goal: this.settings.dailyGoal, reviewedToday: todayRevs.length, totalCards: this.cards.size, streak, knownNow: Math.round(this.knowledgeNow(now).known), retention30: all ? Math.round((ok / all) * 100) : null, cards: this.cards.size, rota: Object.keys(this.rota).sort().slice(-1)[0] ?? null, exams: (this.settings.deadlines ?? []).filter((d) => d.date >= today).map((d) => { const e = this.examStatus(d, now); return { name: d.name, date: d.date, daysLeft: e.daysLeft, needNewPerDay: e.needPerDay, covered: Math.round(e.coverage * 100), predictedRecall: e.predicted === null ? null : Math.round(e.predicted * 100), onTrack: e.onTrack }; }) },
     };
   }
+  /**
+   * Tell Citrus how Yuzu stands (My Apps/hub/yuzu/status.json). Every device writes the same file, so (hub contract, "Two phones"):
+   * only a device that has synced this session writes (one that just woke up hasn't pulled the other's reviews); a change inside the
+   * 5-minute gap is written when the gap ends; when another device wrote the file since, this one writes again, unless that
+   * device's numbers for today are ahead (it holds reviews not synced yet). A file binned on Drive is recreated (06-7, 06-8).
+   */
   async writeHubStatus(force = false): Promise<boolean> {
+    // One at a time: the sync, the refresh and a tap can ask together, and parallel first writes would each create a file.
+    const run = this.statusQueue.then(() => this.writeHubStatusNow(force)); this.statusQueue = run.catch(() => false); return run;
+  }
+  private statusQueue: Promise<unknown> = Promise.resolve();
+  private async writeHubStatusNow(force: boolean): Promise<boolean> {
     if (!tokenValid()) return false;
     try {
+      if (force && this.syncConfigured() && !this.statusReady()) await this.sync("manual").catch(() => {});
       const status = this.hubStatus(); const fp = statusFingerprint(status);
       try { localStorage.setItem("citrus.status.yuzu", JSON.stringify(status)); } catch { /* same-origin readers only */ }
-      if (!force && (fp === this.lastStatusFp || Date.now() - this.lastStatusAt < 5 * 60000)) return false;
-      await writeStatus(status, this.gcache); this.lastStatusFp = fp; this.lastStatusAt = Date.now(); await db.setMeta("gcache", this.gcache); return true;
+      if (this.syncConfigured() && !this.statusReady()) return false;
+      if (force && fp === this.lastStatusFp && Date.now() - this.lastStatusAt < 10000) return true; // the sync just before wrote it
+      const GAP = 5 * 60000; const now = Date.now();
+      if (!force) {
+        if (fp === this.lastStatusFp) { if (now - this.lastStatusLook < GAP) return false; } // nothing new here: look for another device's write at most every 5 min
+        else if (now - this.lastStatusAt < GAP) { this.statusLater(GAP - (now - this.lastStatusAt)); return false; }
+      }
+      this.lastStatusLook = now;
+      const cur = await readStatus(this.gcache, this.statusMark); const me = status.device;
+      const mine = !cur.status || (cur.status.device === me && cur.status.updatedAt === this.statusWroteAt);
+      if (cur.id && cur.status && mine) this.statusMark = cur.mark; // the file is still the one written here
+      if (cur.id && !force && fp === this.lastStatusFp && mine) return false;
+      const other = cur.status && !mine ? cur.status : null;
+      if (other && other.today?.date === status.today.date && Number((other.extra as any)?.reviewedToday ?? 0) > Number((status.extra as any)?.reviewedToday ?? 0)) { this.statusMark = cur.mark; return false; } // that device is ahead: its next sync brings its reviews here
+      await writeStatus(status, this.gcache, true); this.lastStatusFp = fp; this.lastStatusAt = Date.now(); this.statusWroteAt = status.updatedAt; this.statusMark = ""; await db.setMeta("gcache", this.gcache); return true;
     } catch (e: any) { this.log(false, `status.json: ${e?.message ?? e}`, 0); return false; }
   }
+  /** Synced this session, and the last sync went through: this device's numbers include the other devices'. */
+  private statusReady() { return this.syncedThisSession && this.syncStatus.state === "ok"; }
+  private statusLater(ms: number) { if (this.statusTimer) return; this.statusTimer = setTimeout(() => { this.statusTimer = null; this.writeHubStatus(false).catch(() => {}); }, ms + 1000); }
   /**
    * Citrus's blocks for Yuzu on a date (today by default), from plan.json: the ones you accepted in Citrus (or did), else
    * its suggestions, marked as such. Blocks are Yuzu's when Citrus tagged them "yuzu" or their title says cards/reviews.
@@ -594,13 +623,17 @@ export class Store {
           if (got.cards) { const changed: Card[] = []; pulledC = mergeCards(this.cards, got.cards, this.tombstones, { notes: this.notes, changed }); await db.putMany("cards", changed); }
           if (revived.length) pulledC += await this.reviveCards(revived, gh, remote, got.files, progress);
           if (got.reviews) { const m = mergeReviews(this.reviews, got.reviews, this.tombstones); pulledR = m.added; if (m.added) { const ids = new Set(this.reviews.map((r) => r.id)); await db.putMany("reviews", got.reviews.filter((r) => !ids.has(r.id))); this.reviews = m.list; } }
-          if (got.settings && (got.settings as any).updatedAt > ((this.settings as any).updatedAt ?? 0)) {
-            const { sync: _s, deviceName: _d, nightCards: _n, swipe: _w, typeAnswers: _t, mediaDownload: _m, theme: _th, sfx: _sf, autoplay: _ap, cardStyle: _cs, ...rest } = got.settings as any; // per-device fields stay local
-            const oldW = (this.settings.scheduler.w?.length ?? 0) < 21 || ((rest as any).scheduler?.w?.length ?? 21) < 21;
-            this.settings = { ...this.settings, ...rest }; this.settings.scheduler = { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }; if (oldW) this.settings.fit = null; setActiveWeights(this.settings.scheduler.w); await db.setMeta("settings", this.settings);
+          if (got.settings) {
+            // Field by field: the later change of each setting wins; device-only fields never come from another device (05-2).
+            const merged = mergeSettings(this.settings, got.settings as any);
+            if (merged.changed.length || (merged.settings as any).updatedAt !== (this.settings as any).updatedAt) {
+              const oldW = merged.changed.includes("scheduler") && ((this.settings.scheduler.w?.length ?? 0) < 21 || ((got.settings as any).scheduler?.w?.length ?? 21) < 21);
+              this.settings = sanitizeSettings(merged.settings, DEFAULT_SETTINGS); this.settings.scheduler = { ...this.settings.scheduler, w: toFsrs6(this.settings.scheduler.w) }; if (oldW) this.settings.fit = null; setActiveWeights(this.settings.scheduler.w); await db.setMeta("settings", this.settings);
+            }
           }
           if (got.mastery) {
-            const ids = new Set(this.mastery.log.map((e) => e.id)); const log = [...this.mastery.log, ...got.mastery.log.filter((e) => !ids.has(e.id))];
+            const ids = new Set(this.mastery.log.map((e) => e.id)); const back = (e: MasteredEntry) => { const c = this.cards.get(e.id); return !!c && (c.mod ?? 0) > e.at; }; // brought back after it was retired: not retired any more
+            const log = [...this.mastery.log, ...got.mastery.log.filter((e) => !ids.has(e.id))].filter((e) => !back(e));
             const kept = { ...this.mastery.kept }; for (const [k, v] of Object.entries(got.mastery.kept ?? {})) kept[k] = Math.max(kept[k] ?? 0, v);
             this.mastery = { log, kept }; await db.setMeta("mastery", this.mastery);
           }
@@ -649,7 +682,7 @@ export class Store {
         if (!this.shardCache.size) { const saved = await db.getMeta<[string, { fp: string; hash: string }][]>("shardCache", []); for (const [k, v] of saved) this.shardCache.set(k, v); }
         const { hashes, make } = await GitHubSync.shard({
           notetypes: [...this.notetypes.values()], notes: [...this.notes.values()], cards: [...this.cards.values()], reviews: this.reviews, tombstones: this.tombstones, media: await this.packMedia(), mediaIndex, mediaWants: wants, mastery: this.mastery, improve: this.improve, hooks: this.hooks,
-          settings: syncedSettings(this.settings),
+          settings: { ...shareable(this.settings), updatedAt: (this.settings as any).updatedAt ?? 0 } as any, // this device's own fields stay here
         }, this.shardCache);
         try {
           const counts = { notes: this.notes.size, cards: this.cards.size, reviews: this.reviews.length };
@@ -694,7 +727,7 @@ export class Store {
         }
       }
       this.log(true, summary, Date.now() - t0);
-      this.setSync("ok", summary);
+      this.syncedThisSession = true; this.setSync("ok", summary);
       // The rota may have arrived from another device with the settings; Citrus gets a fresh status after every sync that changed something.
       const rota = this.settings.google?.rota ?? {}; if (JSON.stringify(rota) !== JSON.stringify(this.rota)) { this.rota = rota; this.rebuildShiftWeights(); }
       if (tokenValid()) this.writeHubStatus(false).catch(() => {});
@@ -902,7 +935,7 @@ export class Store {
     if (rs) { this.rotaSeen = rs.seen; this.rotaCheckedOn = rs.on; }
     if (pl) { this.plan = pl.plan; this.planAt = pl.at; }
     this.gcache = gcache; this.dismissedPairs = new Set(dismissed); this.inbox = inbox; this.undoStack = undoStack; this.hooks = hooks; this.improve = improve; this.mastery = mastery; this.packLog = packLog; this.mergeLog = mergeLog;
-    this.settings = { ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) }, google: { ...DEFAULT_SETTINGS.google, ...(saved.google ?? {}) } };
+    this.settings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...saved, sync: { ...DEFAULT_SETTINGS.sync, ...(saved.sync ?? {}) }, scheduler: { ...DEFAULT_CONFIG, ...(saved.scheduler ?? {}) }, google: { ...DEFAULT_SETTINGS.google, ...(saved.google ?? {}) } }, DEFAULT_SETTINGS);
     // 02/11/2026: the repositories moved from the Amaerys account to the Yuzu-cards organisation (a new token is needed too).
     if (/^amaerys$/i.test(this.settings.sync.owner)) { this.settings = { ...this.settings, sync: { ...this.settings.sync, owner: "Yuzu-cards" } }; this.syncOwnerMoved = true; await db.setMeta("settings", this.settings); }
     // FSRS-6 (28/10/2026): 19 saved weights → 21; re-tune on the user's history under FSRS-6 shortly after start.
@@ -947,11 +980,13 @@ export class Store {
   }
 
   async saveSettings(patch: Partial<Settings>) {
-    this.settings = { ...this.settings, ...patch, updatedAt: stamp() } as Settings;
+    // Each synced field keeps its own change time; values are kept inside what the app can work with (05-2, 10-7).
+    const prev = this.settings; const next = sanitizeSettings({ ...prev, ...patch } as Settings, DEFAULT_SETTINGS);
+    this.settings = stampChanges(prev, next, stamp(), Object.keys(patch));
     if (patch.scheduler) setActiveWeights(this.settings.scheduler.w);
     this.bump();
     await this.persist("saving settings", db.setMeta("settings", this.settings));
-    this.touch();
+    if ((this.settings as any).updatedAt !== (prev as any).updatedAt) this.touch(); // a device-only change (colour, sound) has nothing to sync
   }
 
   /** Merge an import. Existing cards keep their Yuzu review state unless they had none. */
@@ -1380,23 +1415,73 @@ export class Store {
   }
   async refreshBackups(): Promise<BackupInfo[]> { if (!tokenValid()) return this.backups.list; this.backups.list = await listBackups(this.gcache); this.bump(); return this.backups.list; }
   /**
-   * Put a backup's records back. `missing`: notes, cards and reviews that were deleted since (their tombstones are lifted).
-   * `all`: also any note or card that now differs from the backup (progress made since is lost for those cards).
-   * Restored records get fresh change stamps, so they win over other devices at the next sync.
+   * What putting a backup back would do (the counts the question before it shows; the same plan restoreBackup applies).
+   * `missing` ("Bring back deleted"): notes, cards and reviews deleted since, except cards retired as mastered and merged duplicates
+   * (those were removed on purpose; they are counted so the question can say so). `all` ("Roll back"): the collection as it was in
+   * the backup — every note and card back to its backed-up state (retired and merged ones too), notes added since deleted, and
+   * reviews made since removed, so the history matches the cards. Settings and the Mastered log of other cards are not touched.
    */
-  async restoreBackup(name: string, mode: "missing" | "all"): Promise<{ notes: number; cards: number; reviews: number }> {
+  async previewBackup(name: string, mode: "missing" | "all") { const { plan } = await this.planBackup(name, mode); return plan.counts; }
+  private backupRead: { name: string; at: number; snap: Awaited<ReturnType<typeof readBackup>>["snap"] } | null = null;
+  private async planBackup(name: string, mode: "missing" | "all") {
     if (!tokenValid()) throw new Error("Google needs a tap to reconnect first");
-    const { snap } = await readBackup(this.gcache, name); const now = stamp(); const out = { notes: 0, cards: 0, reviews: 0 };
-    const nts = (snap.notetypes ?? []).filter((nt) => !this.notetypes.has(nt.id)); for (const nt of nts) this.notetypes.set(nt.id, nt); if (nts.length) await db.putMany("notetypes", nts);
-    const notes: Note[] = [], cards: Card[] = [];
-    for (const n of snap.notes ?? []) { const l = this.notes.get(n.id); if (l ? mode === "all" && JSON.stringify([l.fields, l.tags, l.ntid]) !== JSON.stringify([n.fields, n.tags, n.ntid]) : true) notes.push({ ...n, modified: now }); }
+    if (!this.backupRead || this.backupRead.name !== name || Date.now() - this.backupRead.at > 10 * 60000) this.backupRead = { name, at: Date.now(), snap: (await readBackup(this.gcache, name)).snap }; // the question, then the restore: read once
+    const snap = this.backupRead.snap;
+    const retired = new Set(this.mastery.log.map((e) => e.id)); const mergedNotes = new Set<string>(), mergedCards = new Set<string>();
+    for (const e of this.mergeLog) { for (const n of e.dropped ?? []) mergedNotes.add(n.id); for (const c of e.cards ?? []) mergedCards.add(c.id); }
+    const cardsOf = new Map<string, Card[]>(); for (const c of snap.cards ?? []) { const l = cardsOf.get(c.nid); if (l) l.push(c); else cardsOf.set(c.nid, [c]); }
+    const noteDiffers = (l: Note, n: Note) => JSON.stringify([l.fields, l.tags, l.ntid]) !== JSON.stringify([n.fields, n.tags, n.ntid]);
+    const cardDiffers = (l: Card, c: Card) => l.due !== c.due || l.state !== c.state || l.stability !== c.stability || l.difficulty !== c.difficulty || l.reps !== c.reps || l.lapses !== c.lapses || l.lastReview !== c.lastReview || !!l.suspended !== !!c.suspended || (l.flag ?? 0) !== (c.flag ?? 0);
+    const notes: Note[] = [], cards: Card[] = []; let skipRetired = 0, skipMerged = 0;
+    const isRetiredNote = (nid: string) => { const cs = cardsOf.get(nid) ?? []; return cs.length > 0 && cs.every((c) => retired.has(c.id)); };
+    for (const n of snap.notes ?? []) {
+      const l = this.notes.get(n.id);
+      if (l) { if (mode === "all" && noteDiffers(l, n)) notes.push(n); continue; }
+      if (mode === "missing" && mergedNotes.has(n.id)) { skipMerged++; continue; }
+      if (mode === "missing" && isRetiredNote(n.id)) continue; // counted with its cards below
+      notes.push(n);
+    }
     const have = new Set([...notes.map((n) => n.id), ...this.notes.keys()]);
-    for (const c of snap.cards ?? []) { if (!have.has(c.nid)) continue; const l = this.cards.get(c.id); if (l ? mode === "all" && (l.due !== c.due || l.state !== c.state || l.stability !== c.stability) : true) cards.push({ ...c, mod: now }); }
+    for (const c of snap.cards ?? []) {
+      if (!have.has(c.nid)) { if (mode === "missing" && retired.has(c.id)) skipRetired++; else if (mode === "missing" && mergedCards.has(c.id) && !mergedNotes.has(c.nid)) skipMerged++; continue; }
+      const l = this.cards.get(c.id);
+      if (l) { if (mode === "all" && cardDiffers(l, c)) cards.push(c); continue; }
+      if (mode === "missing" && retired.has(c.id)) { skipRetired++; continue; }
+      if (mode === "missing" && mergedCards.has(c.id)) { skipMerged++; continue; }
+      cards.push(c);
+    }
+    // Roll back: what was added since goes (notes not in the backup, with their cards; reviews not in the backup).
+    const inSnapNotes = new Set((snap.notes ?? []).map((n) => n.id)); const dropNotes = mode === "all" ? [...this.notes.keys()].filter((id) => !inSnapNotes.has(id)) : [];
+    const inSnapCards = new Set((snap.cards ?? []).map((c) => c.id)); const dropNoteSet = new Set(dropNotes);
+    const dropCards = mode === "all" ? [...this.cards.values()].filter((c) => dropNoteSet.has(c.nid) || !inSnapCards.has(c.id)).map((c) => c.id) : [];
+    const inSnapRevs = new Set((snap.reviews ?? []).map((r) => r.id)); const dropRevs = mode === "all" ? this.reviews.filter((r) => !inSnapRevs.has(r.id)).map((r) => r.id) : [];
+    const rids = new Set(this.reviews.map((r) => r.id)); const gone = new Set(dropCards); const cardWillBe = new Set([...cards.map((c) => c.id), ...[...this.cards.keys()].filter((id) => !gone.has(id))]);
+    const revs = (snap.reviews ?? []).filter((r) => !rids.has(r.id) && cardWillBe.has(r.cid));
+    const unretire = cards.filter((c) => retired.has(c.id)).map((c) => c.id);
+    return { plan: { notes, cards, revs, dropNotes, dropCards, dropRevs, unretire, counts: { notes: notes.length, cards: cards.length, reviews: revs.length, retiredSkipped: skipRetired, mergedSkipped: skipMerged, notesRemoved: dropNotes.length, cardsRemoved: dropCards.length, reviewsRemoved: dropRevs.length, unretired: unretire.length } } };
+  }
+  /**
+   * Put a backup's records back (see previewBackup for exactly what each mode does). Restored records get fresh change stamps and
+   * removed ones tombstones, so they win over other devices at the next sync.
+   */
+  async restoreBackup(name: string, mode: "missing" | "all") {
+    const { plan } = await this.planBackup(name, mode); const now = stamp();
+    const nts = (this.backupRead!.snap.notetypes ?? []).filter((nt) => !this.notetypes.has(nt.id)); for (const nt of nts) this.notetypes.set(nt.id, nt); if (nts.length) await db.putMany("notetypes", nts);
+    const notes = plan.notes.map((n) => ({ ...n, modified: now })), cards = plan.cards.map((c) => ({ ...c, mod: now }));
     for (const n of notes) { this.notes.set(n.id, n); delete this.tombstones["n:" + n.id]; } for (const c of cards) { this.cards.set(c.id, c); delete this.tombstones["c:" + c.id]; }
-    const rids = new Set(this.reviews.map((r) => r.id)); const revs = (snap.reviews ?? []).filter((r) => !rids.has(r.id) && this.cards.has(r.cid));
-    for (const r of revs) delete this.tombstones["r:" + r.id]; if (revs.length) { this.reviews = this.reviews.concat(revs); }
-    await this.persist("restoring", (async () => { await db.putMany("notes", notes); await db.putMany("cards", cards); if (revs.length) await db.putMany("reviews", revs); await db.setMeta("tombstones", this.tombstones); })());
-    out.notes = notes.length; out.cards = cards.length; out.reviews = revs.length; this.treeCache.clear(); this.bump(); this.touch(); return out;
+    for (const id of plan.dropNotes) { this.notes.delete(id); this.tombstones["n:" + id] = now; }
+    for (const id of plan.dropCards) { this.cards.delete(id); this.tombstones["c:" + id] = now; }
+    if (plan.dropRevs.length) { const set = new Set(plan.dropRevs); this.reviews = this.reviews.filter((r) => !set.has(r.id)); for (const id of plan.dropRevs) this.tombstones["r:" + id] = now; }
+    for (const r of plan.revs) delete this.tombstones["r:" + r.id]; if (plan.revs.length) this.reviews = this.reviews.concat(plan.revs).sort((a, b) => a.ts - b.ts);
+    // A retired card that is back is no longer retired (the Mastered log stops listing it; see the mastery merge in sync).
+    if (plan.unretire.length) { const set = new Set(plan.unretire); this.mastery = { ...this.mastery, log: this.mastery.log.filter((e) => !set.has(e.id)) }; }
+    if (plan.dropCards.length) this.dropUndo(new Set(plan.dropCards));
+    await this.persist("restoring", (async () => {
+      await db.putMany("notes", notes); await db.putMany("cards", cards); if (plan.revs.length) await db.putMany("reviews", plan.revs);
+      if (plan.dropNotes.length) await db.deleteMany("notes", plan.dropNotes); if (plan.dropCards.length) await db.deleteMany("cards", plan.dropCards); if (plan.dropRevs.length) await db.deleteMany("reviews", plan.dropRevs);
+      await db.setMeta("tombstones", this.tombstones); if (plan.unretire.length) await db.setMeta("mastery", this.mastery);
+    })());
+    this.backupRead = null; this.treeCache.clear(); this.dueByDay = null; this.bump(); this.touch(); return plan.counts;
   }
   // ---- Reminders: a notification at your time if cards are due and today's goal isn't met -------------------------------------------
   // A web app has no server to push from. Yuzu leaves the facts (cards due, goal met, light days) where its service worker can read
@@ -2319,9 +2404,20 @@ export class Store {
     const { sync, ...settings } = this.settings;
     return { app: "yuzu", version: 1, quick: true, at: Date.now(), settings: { ...settings, sync: { ...sync, token: "" } }, cards: [...this.cards.values()].filter((c) => c.reps > 0 || c.suspended || c.flag), reviews: this.reviews, tombstones: this.tombstones, hooks: this.hooks, improve: this.improve, mastery: this.mastery };
   }
+  /** What a backup file holds, for the question before restoring it. Throws when it isn't a Yuzu backup. */
+  describeBackupFile(data: any): { at: number; quick: boolean; notes: number; cards: number; reviews: number; settings: boolean } {
+    if (!data || typeof data !== "object" || data.app !== "yuzu") throw new Error("This is not a Yuzu backup file");
+    const len = (v: unknown) => (Array.isArray(v) ? v.length : 0);
+    return { at: Number(data.at) || 0, quick: !!data.quick, notes: len(data.notes), cards: len(data.cards), reviews: len(data.reviews), settings: !!data.settings && typeof data.settings === "object" };
+  }
+  /**
+   * Merge a backup file into this device. Records merge (the later change wins); the backup's synced settings replace these,
+   * checked and stamped as a change made now (so the next sync carries them); this device's own settings (name, where it syncs,
+   * look and sound) stay as they are; note types come in only where this device lacks them.
+   */
   async restore(data: any, onProgress?: (m: string, f: number) => void) {
-    if (data?.app !== "yuzu") throw new Error("Not a Yuzu backup file");
-    for (const nt of data.notetypes ?? []) this.notetypes.set(nt.id, nt);
+    this.describeBackupFile(data);
+    const nts = (Array.isArray(data.notetypes) ? data.notetypes : []).filter((nt: Notetype) => nt?.id && !this.notetypes.has(nt.id)); for (const nt of nts) this.notetypes.set(nt.id, nt);
     if (data.tombstones) { this.tombstones = mergeTombstones(this.tombstones, data.tombstones); await db.setMeta("tombstones", this.tombstones); }
     if (data.improve) { const merged = { ...this.improve }; for (const [k, v] of Object.entries(data.improve as typeof this.improve)) if ((merged[k]?.m ?? -1) < v.m) merged[k] = v; this.improve = merged; await db.setMeta("improve", merged); }
     if (data.mastery) { const ids = new Set(this.mastery.log.map((e) => e.id)); this.mastery = { log: [...this.mastery.log, ...(data.mastery.log ?? []).filter((e: any) => !ids.has(e.id))], kept: { ...(data.mastery.kept ?? {}), ...this.mastery.kept } }; await db.setMeta("mastery", this.mastery); }
@@ -2331,13 +2427,21 @@ export class Store {
     const known = new Set(this.reviews.map((r) => r.id));
     const m = mergeReviews(this.reviews, data.reviews ?? []); this.reviews = m.list;
     onProgress?.("Saving", 0.3);
-    await db.putMany("notetypes", data.notetypes ?? []);
+    if (nts.length) await db.putMany("notetypes", nts);
     await db.putMany("notes", (data.notes ?? []).filter((x: Note) => this.notes.get(x.id) === x), 1000);
     await db.putMany("cards", (data.cards ?? []).filter((x: Card) => this.cards.get(x.id) === x), 2000);
     await db.putMany("reviews", (data.reviews ?? []).filter((r: Review) => !known.has(r.id)), 5000);
-    if (data.settings) { const { sync, ...rest } = data.settings; this.settings = { ...this.settings, ...rest, sync: { ...this.settings.sync, ...(sync ?? {}), token: this.settings.sync.token || sync?.token || "" } }; await db.setMeta("settings", this.settings); }
+    let settings = 0;
+    if (data.settings && typeof data.settings === "object") {
+      const from = withoutDeviceFields(data.settings) as Partial<Settings>; const before = JSON.stringify(this.settings);
+      if (from.scheduler) from.scheduler = { ...this.settings.scheduler, ...from.scheduler, w: toFsrs6((from.scheduler as any).w ?? this.settings.scheduler.w) };
+      if (from.google) from.google = { ...this.settings.google, ...from.google };
+      await this.saveSettings(from); setActiveWeights(this.settings.scheduler.w);
+      if (JSON.stringify(this.settings) !== before) settings = 1;
+    }
+    this.rota = this.settings.google?.rota ?? {}; this.rebuildShiftWeights(); this.treeCache.clear(); this.dueByDay = null;
     this.bump(); this.touch();
-    return { notes: n, cards: c, reviews: m.added };
+    return { notes: n, cards: c, reviews: m.added, settings };
   }
 
   async updateNote(noteId: string, fields: string[], userTags: string[]) {

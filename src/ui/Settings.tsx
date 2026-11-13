@@ -97,6 +97,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   const [msg, setMsg] = useState("");
   const [frac, setFrac] = useState(0);
   const [result, setResult] = useState<string>("");
+  const [dataMsg, setDataMsg] = useState<string>("");
   const [last, setLast] = useState<{ at: number; summary: any } | null>(null);
   const [skipLanguages, setSkipLanguages] = useState(false);
   const s = store.settings;
@@ -166,7 +167,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <DeviceToggles />
         </div>
       </details>
-      <details className="section" id="s-study" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
+      <details className="section" id="s-study" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span><span className="where sync mix" title="Kept the same on all your devices, except Slate cards, Swipe to rate and Type the answer, which stay on this device">syncs · 3 this device</span></summary>
       <div className="card-box">
         <Slider label="New cards per day" value={s.newPerDay} min={0} max={100} step={1} onCommit={(v) => store.saveSettings({ newPerDay: v })} sub="Each new card brings about 10 reviews over its first year." />
         <Slider label="Daily review goal" value={Math.min(s.dailyGoal, 500)} min={10} max={500} step={10} onCommit={(v) => store.saveSettings({ dailyGoal: v })} />
@@ -237,7 +238,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
-      <details className="section" id="s-media" open><summary>Images and sounds <span className="small muted">files for your cards</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
+      <details className="section" id="s-media" open><summary>Images and sounds <span className="small muted">files for your cards</span><span className="where dev mix" title="The files, playing sounds automatically and downloading shared images stay on this device; Hidden fields and Share images between devices are the same on all your devices">this device · 2 sync</span></summary>
       <div className="card-box">
         {(() => { const m = mediaStat; const pct = m.total ? Math.round((m.stored / m.total) * 100) : 100; return (<>
           <div className="stat-grid" style={{ marginTop: 0 }}>
@@ -361,8 +362,18 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.quickBackup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
           <button className="btn grow" onClick={() => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Full backup</button>
           <button className="btn grow" onClick={() => restoreRef.current?.click()}>Restore backup</button>
-          <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const r = await store.restore(JSON.parse(await f.text())); setResult(`Restored: ${r.cards} cards, ${r.notes} notes and ${r.reviews} reviews merged.`); } catch (err: any) { setResult("Restore failed: " + err.message); } e.target.value = ""; }} />
+          <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => {
+            const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; setDataMsg("");
+            const fail = (m: string) => { setDataMsg("Restore failed: " + m); snackbar("Restore failed"); };
+            let data: any; try { data = JSON.parse(await f.text()); } catch { fail(`${f.name} is not a backup file Yuzu can read.`); return; }
+            let info; try { info = store.describeBackupFile(data); } catch (err: any) { fail(err?.message ?? String(err)); return; }
+            const what = `${info.cards.toLocaleString()} cards${info.notes ? `, ${info.notes.toLocaleString()} notes` : ""} and ${info.reviews.toLocaleString()} reviews`;
+            if (!(await confirmSheet({ title: `Merge the backup${info.at ? ` from ${fmtDate(info.at)}` : ""} into this device?`, sub: `${info.quick ? "A quick backup: " : ""}${what}. Cards and reviews merge with what is here (the later change of each wins).${info.settings ? " Your study settings are replaced by the backup's; this device's name, sync and look stay as they are." : ""}`, yes: "Merge backup", danger: false }))) return;
+            try { const r = await store.restore(data); const m = `Restored: ${r.cards.toLocaleString()} cards, ${r.notes.toLocaleString()} notes and ${r.reviews.toLocaleString()} reviews merged${r.settings ? "; study settings taken from the backup" : ""}.`; setDataMsg(m); snackbar("Backup merged"); }
+            catch (err: any) { fail(err?.message ?? String(err)); }
+          }} />
         </div>
+        {dataMsg && <p className="small" role="status" style={{ margin: "8px 0 0" }}>{dataMsg}</p>}
         <button className="btn danger block" style={{ marginTop: 10 }} onClick={async () => { if (await confirmSheet({ title: "Delete everything on this device?", sub: "All cards and reviews here are deleted. A backup or a sync can bring them back.", yes: "Delete everything" })) await store.wipe(); }}>Delete everything on this device</button>
       </div>
       </details>
@@ -521,7 +532,7 @@ function GoogleSection() {
   for (let i = 0; i < 10; i++) { const iso = store.isoToday(d); const sh = store.shiftOn(iso); if (sh && sh.kind !== "off") coming.push(`${iso.slice(8, 10)}/${iso.slice(5, 7)} ${sh.kind === "night" ? "🌙" : sh.kind === "leave" ? "✈" : "☀️"} ${sh.code}`); d.setDate(d.getDate() + 1); }
   const plan = store.planToday(); const months = Object.keys(g.rota ?? {}).sort();
   return (
-    <details className="section" id="s-google" open><summary>Google <span className="small muted">Drive home · Citrus Maxima</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
+    <details className="section" id="s-google" open><summary>Google <span className="small muted">Drive home · Citrus Maxima</span><span className="where sync mix" title="Kept the same on all your devices, except the Google sign-in and whether cards sync through Drive or GitHub, which belong to this device">syncs · sign-in this device</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared with Citrus Maxima, Orange and your other apps. <b>Drive</b> keeps the collection and the master copy of every image and sound (<b>My Apps › Yuzu</b>). Yuzu reports what it needs to <b>Citrus</b> (My Apps › hub › yuzu) and reads back Citrus's plan and your shifts, so nights become light days.</p>
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
@@ -542,12 +553,22 @@ function GoogleSection() {
         </div>}
         {plan.length > 0 && <p className="small" style={{ margin: "10px 0 0" }}>{plan[0].accepted ? "Citrus planned" : "Citrus suggests"} for today: {plan.map((b) => `${b.start || "any time"}${b.end ? `–${b.end}` : ""} · ${b.minutes || "?"} min`).join(", ")}</p>}
         {signed && store.syncBackend() === "drive" && <details className="how" style={{ marginTop: 10 }} onToggle={(e) => { if ((e.target as HTMLDetailsElement).open) act(async () => { await store.refreshBackups().catch(() => {}); }); }}><summary className="small">Backups on Drive ({store.backups.list.length})</summary>
-          <p className="small muted" style={{ margin: "6px 0" }}>Once a day, after a sync that changed something, Drive copies the whole collection into <b>My Apps/Yuzu/backups/&lt;date&gt;</b> (nothing is uploaded again). The last 7 days and one a week for 4 weeks are kept. <b>Bring back deleted</b> restores notes, cards and reviews you deleted since; <b>Roll back</b> also resets any card or note that changed since (its progress since then is lost).</p>
+          <p className="small muted" style={{ margin: "6px 0" }}>Once a day, after a sync that changed something, Drive copies the whole collection into <b>My Apps/Yuzu/backups/&lt;date&gt;</b> (nothing is uploaded again). The last 7 days and one a week for 4 weeks are kept. <b>Bring back deleted</b> restores the notes, cards and reviews deleted since that day; cards retired as mastered and merged duplicates stay as they are. <b>Roll back</b> makes the collection what it was that day: every note and card goes back to its state then (retired and merged ones included), notes added since are deleted and reviews made since are removed. Settings are not touched. Both show the numbers and ask first.</p>
           <div className="row" style={{ gap: 8, flexWrap: "wrap" }}><button className="btn" disabled={busy || store.backups.busy} onClick={() => act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; return store.backupNow(true); })}>Back up now</button>{store.backups.busy && <span className="small muted">{store.backups.message}</span>}</div>
           {store.backups.list.map((b) => <div key={b.name} className="row small" style={{ gap: 8, margin: "6px 0", flexWrap: "wrap", alignItems: "center" }}>
             <b>{b.name.split("-").reverse().join("/")}</b>
-            <button className="btn" disabled={busy} onClick={() => act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const r = await store.restoreBackup(b.name, "missing"); return `Brought back ${r.notes} notes, ${r.cards} cards, ${r.reviews} reviews`; })}>Bring back deleted</button>
-            <button className="btn" disabled={busy} onClick={() => { if (!confirm(`Roll back every note and card that changed since ${b.name.split("-").reverse().join("/")}? Progress on those cards since then is lost.`)) return; act(async () => { if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const r = await store.restoreBackup(b.name, "all"); return `Restored ${r.notes} notes, ${r.cards} cards, ${r.reviews} reviews`; }); }}>Roll back</button>
+            <button className="btn" disabled={busy} onClick={() => act(async () => {
+              if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const day = b.name.split("-").reverse().join("/");
+              const p = await store.previewBackup(b.name, "missing"); const kept = [p.retiredSkipped ? `${p.retiredSkipped.toLocaleString()} card${p.retiredSkipped === 1 ? "" : "s"} retired as mastered` : "", p.mergedSkipped ? `${p.mergedSkipped.toLocaleString()} merged duplicate${p.mergedSkipped === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
+              if (!p.notes && !p.cards && !p.reviews) return `Nothing deleted since ${day}${kept ? ` (${kept} stay as they are)` : ""}`;
+              if (!(await confirmSheet({ title: `Bring back what was deleted since ${day}?`, sub: `${p.notes.toLocaleString()} notes, ${p.cards.toLocaleString()} cards and ${p.reviews.toLocaleString()} reviews come back.${kept ? ` ${kept[0].toUpperCase() + kept.slice(1)} stay as they are.` : ""}`, yes: "Bring them back", danger: false }))) return;
+              const r = await store.restoreBackup(b.name, "missing"); return `Brought back ${r.notes.toLocaleString()} notes, ${r.cards.toLocaleString()} cards, ${r.reviews.toLocaleString()} reviews`; })}>Bring back deleted</button>
+            <button className="btn" disabled={busy} onClick={() => act(async () => {
+              if (!(await store.renewOnTap())) return "Google needs a tap to reconnect first"; const day = b.name.split("-").reverse().join("/");
+              const p = await store.previewBackup(b.name, "all");
+              if (!p.notes && !p.cards && !p.reviews && !p.notesRemoved && !p.cardsRemoved && !p.reviewsRemoved) return `The collection is already as it was on ${day}`;
+              if (!(await confirmSheet({ title: `Roll the collection back to ${day}?`, sub: `${p.notes.toLocaleString()} notes and ${p.cards.toLocaleString()} cards go back to how they were${p.unretired ? ` (${p.unretired.toLocaleString()} retired cards return)` : ""}; ${p.notesRemoved.toLocaleString()} notes (${p.cardsRemoved.toLocaleString()} cards) added since are deleted; ${p.reviewsRemoved.toLocaleString()} reviews made since are removed${p.reviews ? ` and ${p.reviews.toLocaleString()} come back` : ""}. Progress since then is lost.`, yes: "Roll back" }))) return;
+              const r = await store.restoreBackup(b.name, "all"); return `Rolled back to ${day}: ${(r.notes + r.cards).toLocaleString()} notes and cards reset, ${r.notesRemoved.toLocaleString()} notes added since deleted, ${r.reviewsRemoved.toLocaleString()} later reviews removed`; })}>Roll back</button>
           </div>)}
         </details>}
         <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={!!store.settings.citrusPlans} onChange={(e) => store.saveSettings({ citrusPlans: e.target.checked })} /> Let Citrus plan Yuzu time (off: Citrus only sees your numbers)</label>
