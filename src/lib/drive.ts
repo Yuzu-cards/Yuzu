@@ -295,8 +295,25 @@ export interface HubProposal { id: string; type: "task" | "note" | "event"; titl
 export interface HubAction { id: string; label: string; url: string; icon?: string; minutes?: number }
 export interface HubStatus { contract?: 2; metrics?: HubMetric[]; progress?: HubProgress[]; inbox?: HubProposal[]; actions?: HubAction[]; app: "yuzu"; title: string; icon: string; color: string; url: string; version: string; device: string; updatedAt: string; summary: string; estimatedMinutes?: number; due: number; streak?: number; nextDue: string; today: { date: string; done: boolean; items: { title: string; minutes: number | null; cards: number }[] }; week: { start: string; end: string; done: number; target: number; need: number; days: { date: string; shift: string; studied: boolean; planned: boolean; slot: string }[] } | null; next: { title: string; minutes: number } | null; asks: { date: string | null; title: string; minutes: number; slot: string }[]; pending: string[]; extra: Record<string, unknown> }
 export function statusFingerprint(status: HubStatus): string { const { updatedAt, ...rest } = status; const s = JSON.stringify(rest); let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return (h >>> 0).toString(16); }
-export async function writeStatus(status: HubStatus, cache: Record<string, string>): Promise<string> {
-  const parent = await ensureFolders(PATHS.hub, cache); const id = await putFile({ parent, name: "status.json", body: JSON.stringify(status, null, 1), id: cache.statusId || null }); cache.statusId = id; return id;
+/**
+ * The status.json Citrus reads now: found by listing the hub folder (a binned copy is never listed), so a file the user or Citrus
+ * deleted is recreated instead of patched forever in the bin (06-7). `mark` tells one write from the next (md5, else modified time);
+ * the content is read only when `known` (the mark of the last file this device wrote) doesn't match.
+ */
+export async function readStatus(cache: Record<string, string>, known = ""): Promise<{ id: string | null; mark: string; status: HubStatus | null }> {
+  const parent = await ensureFolders(PATHS.hub, cache); const all = (await listFiles({ parent, name: "status.json" })).sort((x, y) => ((x.modifiedTime ?? "") < (y.modifiedTime ?? "") ? 1 : -1));
+  const f = all[0]; for (const extra of all.slice(1)) await deleteFile(extra.id).catch(() => {}); // two writes that raced made two files: Citrus must see one
+  if (!f) { delete cache.statusId; return { id: null, mark: "", status: null }; }
+  cache.statusId = f.id; const mark = f.md5 || f.modifiedTime || "";
+  if (known && mark === known) return { id: f.id, mark, status: null };
+  let status: HubStatus | null = null; try { const b = await downloadBytes(f); status = b ? JSON.parse(new TextDecoder().decode(b)) : null; } catch { status = null; }
+  return { id: f.id, mark, status };
+}
+export async function writeStatus(status: HubStatus, cache: Record<string, string>, checked = false): Promise<string> {
+  const parent = await ensureFolders(PATHS.hub, cache);
+  // A cached id may point at a file in the bin (PATCHing it succeeds and nobody sees it): check it, else write a new file (06-7).
+  if (cache.statusId && !checked) { const m = await fileMeta(cache.statusId, "id,trashed").catch(() => null); if (!m || m.trashed) delete cache.statusId; }
+  const id = await putFile({ parent, name: "status.json", body: JSON.stringify(status, null, 1), id: cache.statusId || null }); cache.statusId = id; return id;
 }
 /** Citrus Maxima's plan.json (its publishPlan): 10 days of shifts and blocks per app. */
 export interface CitrusBlock { app?: string; title?: string; date: string; start?: string; end?: string; minutes?: number; status?: string; goalId?: string }
