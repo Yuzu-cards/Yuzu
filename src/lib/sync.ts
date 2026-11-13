@@ -1,6 +1,7 @@
 // GitHub sync. Data lives in a private repo as sharded JSON files written with the Git Data API
-// (one commit per sync). Merge rules: notes → later `modified` wins; cards → later `mod` wins
-// (a review bumps `mod`); reviews → union by id; settings → later wins; tombstones → union.
+// (one commit per sync). Merge rules: notes → per field and per tag, the later change wins (whole note by `modified` when unstamped);
+// cards → scheduling, suspend/flag and deck each go to their later change (whole card by `mod` when unstamped);
+// reviews → union by id; settings → later wins; tombstones → union (an edit after a deletion brings the note and its cards back).
 //
 // Robustness rules:
 // - Every request retries on network errors and 5xx (3 tries, backoff). 4xx errors surface GitHub's message.
@@ -8,7 +9,7 @@
 //   because the Git Data API refuses to create blobs or trees in an empty repository.
 // - A push that loses a race with another device (non-fast-forward) is retried after re-pulling.
 // - Only shards whose fingerprint changed are re-serialized and hashed; unchanged shards reuse cached hashes.
-import type { Card, Note, Notetype, Review } from "./model";
+import type { Card, Note, Notetype, PartStamp, Review } from "./model";
 import { fmtDateTime } from "./dates";
 
 export interface SyncConfig { owner: string; repo: string; token: string; branch?: string }
@@ -273,14 +274,14 @@ export class GitHubSync {
     for (const n of snap.notes) notes[shardOf(n.id, NOTE_SHARDS)].push(n);
     for (let i = 0; i < NOTE_SHARDS; i++) {
       const list = notes[i]; if (!list.length) continue;
-      let sum = 0, ids = 0; for (const n of list) { sum += n.modified; ids = (ids + shardOf(n.id, 1 << 30)) >>> 0; }
+      let sum = 0, ids = 0; for (const n of list) { sum += n.modified + (n.pm ? noteStampSum(n) : 0); ids = (ids + shardOf(n.id, 1 << 30)) >>> 0; }
       await emit(`notes/${i}.json`, `${list.length}:${sum}:${ids}`, () => JSON.stringify(list.sort((a, b) => a.id < b.id ? -1 : 1)));
     }
     const cards: Card[][] = Array.from({ length: CARD_SHARDS }, () => []);
     for (const c of snap.cards) cards[shardOf(c.id, CARD_SHARDS)].push(c);
     for (let i = 0; i < CARD_SHARDS; i++) {
       const list = cards[i]; if (!list.length) continue;
-      let sum = 0, ids = 0; for (const c of list) { sum += (c.mod ?? c.lastReview) + c.due + c.reps + (c.suspended ? 1 : 0) + c.flag; ids = (ids + shardOf(c.id, 1 << 30)) >>> 0; }
+      let sum = 0, ids = 0; for (const c of list) { sum += (c.mod ?? c.lastReview) + c.due + c.reps + (c.suspended ? 1 : 0) + c.flag + (c.pm ? cardStampSum(c) : 0); ids = (ids + shardOf(c.id, 1 << 30)) >>> 0; }
       await emit(`cards/${i}.json`, `${list.length}:${sum}:${ids}`, () => JSON.stringify(list.sort((a, b) => a.id < b.id ? -1 : 1)));
     }
     const byMonth = new Map<string, Review[]>();
@@ -426,19 +427,128 @@ export const COMPACT_EVERY = 300;
 export function mergeTombstones(local: Record<string, number>, remote: Record<string, number>): Record<string, number> {
   const out = { ...local }; for (const [k, t] of Object.entries(remote)) if ((out[k] ?? -1) < t) out[k] = t; return out;
 }
-/** Merge remote records into local maps. Returns counts of records that changed locally. */
-export function mergeNotes(local: Map<string, Note>, remote: Note[], tombs: Record<string, number> = {}): number {
-  let n = 0;
-  for (const r of remote) { if ((tombs["n:" + r.id] ?? -1) >= r.modified) continue; const l = local.get(r.id); if (!l || r.modified > l.modified) { local.set(r.id, r); n++; } }
+/** FNV-1a in base 36: the short fingerprint a part stamp keeps of the value it stamped. */
+export function h32(s: string): string { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return (h >>> 0).toString(36); }
+const schedKey = (c: Card) => `${c.state}|${c.due}|${c.stability}|${c.difficulty}|${c.reps}|${c.lapses}|${c.lastReview}|${c.step}`;
+const userKey = (c: Card) => `${c.suspended ? 1 : 0}|${c.flag}`;
+export const cardMod = (c: Card) => c.mod ?? c.lastReview;
+
+/**
+ * When each part of a card last changed: s = scheduling, u = suspended/flag, d = deck (source).
+ * - u, d: their stamp while the value is still the one stamped; changed since by code that doesn't stamp (an older Yuzu, an import) → `mod`;
+ *   never stamped → 0 (then the scheduling winner decides, which is the old whole-card rule).
+ * - s: its stamp while nothing bumped `mod` after the last suspend/flag/deck change (a review, an undo, a reschedule all bump `mod`), else `mod`.
+ */
+export function cardParts(c: Card): { s: number; u: number; d: number } {
+  const m = cardMod(c), pm = c.pm;
+  if (!pm) return { s: m, u: 0, d: 0 };
+  const u = pm.u ? (pm.u[1] === h32(userKey(c)) ? pm.u[0] : m) : 0;
+  const d = pm.d ? (pm.d[1] === h32(c.source) ? pm.d[0] : m) : 0;
+  const s = pm.s && pm.s[1] === h32(schedKey(c)) && m === Math.max(pm.u?.[0] ?? -1, pm.d?.[0] ?? -1) ? pm.s[0] : m;
+  return { s, u, d };
+}
+/** `next` is `c` with a suspend/flag change ("u") and/or a deck change ("d") made at `now`: stamp those parts and keep the scheduling's own time,
+ *  so a review of the same card on another device keeps this change, and this change keeps that review. */
+export function stampCard(c: Card, next: Card, now: number, parts: ("u" | "d")[]): Card {
+  const p = cardParts(c); const pm: NonNullable<Card["pm"]> = { s: [p.s, h32(schedKey(next))] };
+  if (parts.includes("u")) pm.u = [now, h32(userKey(next))]; else if (p.u) pm.u = [p.u, h32(userKey(next))];
+  if (parts.includes("d")) pm.d = [now, h32(next.source)]; else if (p.d) pm.d = [p.d, h32(next.source)];
+  return { ...next, mod: now, pm };
+}
+/** One card known on two devices. Each part goes to the side that changed it last (ties: the later `mod`, then a fixed order),
+ *  so merge(a, b) and merge(b, a) agree and both devices end up with the same card. */
+export function mergeCard(l: Card, r: Card): Card {
+  const ml = cardMod(l), mr = cardMod(r);
+  if (!l.pm && !r.pm) return mr > ml ? r : l;
+  if (ml === mr && JSON.stringify(l) === JSON.stringify(r)) return l; // same copy on both
+  const pl = cardParts(l), pr = cardParts(r);
+  const leftWins = (a: number, b: number, ka: string, kb: string) => (a !== b ? a > b : ml !== mr ? ml > mr : ka >= kb);
+  const sL = leftWins(pl.s, pr.s, schedKey(l), schedKey(r)), uL = leftWins(pl.u, pr.u, userKey(l), userKey(r)), dL = leftWins(pl.d, pr.d, l.source, r.source);
+  const base = sL ? l : r, U = uL ? l : r, D = dL ? l : r;
+  if (U === base && D === base) return base;
+  const m = Math.max(ml, mr), S = sL ? pl.s : pr.s, Ut = uL ? pl.u : pr.u, Dt = dL ? pl.d : pr.d;
+  const out: Card = { ...base, suspended: U.suspended, flag: U.flag, source: D.source, mod: m };
+  const pm: NonNullable<Card["pm"]> = {};
+  if (S !== m) pm.s = [S, h32(schedKey(out))];
+  if (Ut) pm.u = [Ut, h32(userKey(out))];
+  if (Dt) pm.d = [Dt, h32(out.source)];
+  out.pm = pm;
+  const j = JSON.stringify(out); return j === JSON.stringify(base) ? base : j === JSON.stringify(base === l ? r : l) ? (base === l ? r : l) : out;
+}
+
+/** An edit that lost to a newer edit of the same field on another device, kept so nothing is silently lost (Settings → Sync → Replaced edits). */
+export interface NoteConflict { nid: string; field: number; kept: string; lost: string; lostOn: string; keptOn: string; at: number; seen: number }
+const fieldStamp = (n: Note, i: number): { t: number; real: boolean } => { const st = n.pm?.f?.[i]; return st && st[1] === h32(n.fields[i] ?? "") ? { t: st[0], real: true } : { t: n.modified, real: false }; };
+const tagStamp = (n: Note, tag: string): number => { const st = n.pm?.t?.[tag]; if (st === undefined) return 0; return (st > 0) === n.tags.includes(tag) ? Math.abs(st) : n.modified; };
+/** `next` is `prev` edited by the user at `now`: stamp the fields and tags that changed (the others keep their time), so another
+ *  device's edit of a different field or tag is kept on sync instead of the whole note going to whichever edit was later. */
+export function stampNote(prev: Note, next: Note, now: number): Note {
+  const f: PartStamp[] = next.fields.map((v, i) => [i < prev.fields.length && v === prev.fields[i] ? fieldStamp(prev, i).t : now, h32(v)]);
+  const t: Record<string, number> = {}; const was = new Set(prev.tags), is = new Set(next.tags);
+  for (const k of Object.keys(prev.pm?.t ?? {})) { const e = tagStamp(prev, k); t[k] = is.has(k) ? e : -e; }
+  for (const k of is) if (!was.has(k)) t[k] = now;
+  for (const k of was) if (!is.has(k)) t[k] = -now;
+  return { ...next, modified: now, pm: { f, t } };
+}
+/**
+ * One note known on two devices. Fields: each goes to the side that edited it last; tags: each added or removed tag goes to the side that
+ * changed it last (so tags added on both devices are both kept). Notes without stamps, or whose fields no longer line up (note type changed),
+ * merge whole by `modified` as before. `track`: report a field edit made since the last sync that lost to another device's.
+ */
+export function mergeNote(l: Note, r: Note, track?: { since: number; from: string; out: NoteConflict[] }): Note {
+  let lw: boolean; if (l.modified !== r.modified) lw = l.modified > r.modified; else { const jl = JSON.stringify(l), jr = JSON.stringify(r); if (jl === jr) return l; lw = jl > jr; } // (same copy on both: nothing to do)
+  const base = lw ? l : r, other = lw ? r : l;
+  if ((!l.pm && !r.pm) || l.ntid !== r.ntid || l.fields.length !== r.fields.length) return base;
+  const fields: string[] = [], f: PartStamp[] = [];
+  for (let i = 0; i < l.fields.length; i++) {
+    const a = fieldStamp(l, i), b = fieldStamp(r, i);
+    if (l.fields[i] === r.fields[i]) { fields.push(l.fields[i]); f.push([Math.max(a.t, b.t), h32(l.fields[i])]); continue; }
+    const left = a.t !== b.t ? a.t > b.t : lw; const w = left ? a : b, lo = left ? b : a;
+    fields.push((left ? l : r).fields[i]); f.push([w.t, h32((left ? l : r).fields[i])]);
+    if (track && lo.real && lo.t > track.since) track.out.push({ nid: l.id, field: i, kept: (left ? l : r).fields[i], lost: (left ? r : l).fields[i], lostOn: left ? track.from : "this device", keptOn: left ? "this device" : track.from, at: lo.t, seen: Date.now() });
+  }
+  const t: Record<string, number> = {}; const tags: string[] = [];
+  const all = new Set([...base.tags, ...other.tags, ...Object.keys(l.pm?.t ?? {}), ...Object.keys(r.pm?.t ?? {})]);
+  for (const k of all) {
+    const pl = l.tags.includes(k), pr = r.tags.includes(k), sl = tagStamp(l, k), sr = tagStamp(r, k);
+    const on = pl === pr ? pl : sl !== sr ? (sl > sr ? pl : pr) : (lw ? pl : pr);
+    if (on) tags.push(k);
+    if (l.pm?.t?.[k] !== undefined || r.pm?.t?.[k] !== undefined) { const st = Math.max(sl, sr); t[k] = on ? st : -st; }
+  }
+  const out: Note = { ...base, fields, tags, modified: Math.max(l.modified, r.modified), pm: { f, t } };
+  const ed = Math.max(l.edited ?? 0, r.edited ?? 0); if (ed) out.edited = ed;
+  const j = JSON.stringify(out); return j === JSON.stringify(base) ? base : j === JSON.stringify(other) ? other : out;
+}
+/** Sum of a record's part stamps, for shard fingerprints (0 without stamps, so older fingerprints stay the same). */
+export function noteStampSum(n: Note): number { let s = 0; for (const x of n.pm?.f ?? []) s += x[0]; for (const v of Object.values(n.pm?.t ?? {})) s += Math.abs(v); return s; }
+export function cardStampSum(c: Card): number { const p = c.pm; return p ? (p.s?.[0] ?? 0) + (p.u?.[0] ?? 0) + (p.d?.[0] ?? 0) : 0; }
+
+/**
+ * Merge remote notes into the local map. Returns how many changed locally. A tombstone beats a copy modified at or before it; a copy
+ * edited after the deletion brings the note back (`revived` lists those that were not here, so their cards can be brought back too).
+ */
+export function mergeNotes(local: Map<string, Note>, remote: Note[], tombs: Record<string, number> = {}, opts: { changed?: Note[]; revived?: string[]; since?: number; from?: string; conflicts?: NoteConflict[] } = {}): number {
+  let n = 0; const track = opts.conflicts ? { since: opts.since ?? 0, from: opts.from ?? "another device", out: opts.conflicts } : undefined;
+  for (const r of remote) {
+    const tomb = tombs["n:" + r.id] ?? -1; if (tomb >= r.modified) continue;
+    const l = local.get(r.id); const m = l ? mergeNote(l, r, track) : r;
+    if (m !== l) { local.set(r.id, m); n++; opts.changed?.push(m); if (!l && tomb >= 0) opts.revived?.push(r.id); }
+  }
   return n;
 }
-export function mergeCards(local: Map<string, Card>, remote: Card[], tombs: Record<string, number> = {}): number {
+/**
+ * Merge remote cards into the local map. A card tombstone beats a copy changed at or before it. Without `notes`, so does the note's
+ * tombstone. With `notes` (the local notes, already merged) a card is taken exactly when its note is here: a note edited after it was
+ * deleted elsewhere came back and its cards come with it, and a card reviewed elsewhere after its note was deleted here doesn't linger.
+ */
+export function mergeCards(local: Map<string, Card>, remote: Card[], tombs: Record<string, number> = {}, opts: { notes?: Map<string, Note>; changed?: Card[] } = {}): number {
   let n = 0;
   for (const r of remote) {
-    if ((tombs["c:" + r.id] ?? -1) >= (r.mod ?? r.lastReview) || (tombs["n:" + r.nid] ?? -1) >= (r.mod ?? r.lastReview)) continue;
-    const l = local.get(r.id);
-    const rm = (r as any).mod ?? r.lastReview, lm = (l as any)?.mod ?? l?.lastReview ?? -1;
-    if (!l || rm > lm) { local.set(r.id, r); n++; }
+    const t = cardMod(r);
+    if ((tombs["c:" + r.id] ?? -1) >= t) continue;
+    if (opts.notes ? !opts.notes.has(r.nid) : (tombs["n:" + r.nid] ?? -1) >= t) continue; // (notes merge first: a card whose note isn't here is an orphan)
+    const l = local.get(r.id); const m = l ? mergeCard(l, r) : r;
+    if (m !== l) { local.set(r.id, m); n++; opts.changed?.push(m); }
   }
   return n;
 }
