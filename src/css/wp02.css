@@ -1,0 +1,2 @@
+/* WP02: a very long deck or pack name wraps instead of widening the page (10-14). */
+.tree-row .name, .list-row .t, .crumbs, .kit-snack .grow { overflow-wrap: anywhere; }

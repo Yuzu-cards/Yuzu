@@ -56,7 +56,7 @@ export function CardEditor({ full = false, onClose }: { full?: boolean; onClose:
   const clear = () => { setText(""); setExtra(""); setFront(""); setBack(""); setQuestion(""); setOpts([{ text: "", why: "" }, { text: "", why: "" }, { text: "", why: "" }]); setRight(0); setExpl(""); setWord(""); setArticle(""); setPlural(""); setMeaning(""); setExample(""); setAudio(""); setImage(""); setOrd(0); setSide("front"); };
   const save = async () => {
     setBusy(true);
-    try { const msg = await store.importPack(pack()); remember("yuzu-edit-kind", kind); remember("yuzu-edit-deck", deck.trim()); snackbar(/added/.test(msg) ? `Saved to ${deck.split("::").slice(-1)[0]}` : msg); clear(); }
+    try { const r = await store.importPackDetailed(pack()); remember("yuzu-edit-kind", kind); remember("yuzu-edit-deck", deck.trim()); if (r.added + r.updated + r.repaired > 0) { snackbar(`Saved to ${(deck.trim() || "Medicine::Inbox").split("::").filter((x) => x.trim()).slice(-1)[0] ?? "Inbox"}`); clear(); } else snackbar(r.skippedDuplicate ? "Already in your collection — not added. Your text is still here." : r.message); }
     catch (e: any) { snackbar(e?.message ?? String(e)); } finally { setBusy(false); }
   };
 

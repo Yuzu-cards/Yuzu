@@ -6,8 +6,10 @@ import { fmtDate } from "../lib/dates";
 import { store } from "../lib/store";
 import { IconClose } from "./icons";
 import { useBack } from "./useBack";
+import { parsePack, describeInvalid, countOf } from "../import/pack";
+import { str, strTags } from "../lib/coerce";
 
-const clean = (s: string) => (s ?? "").replace(/\{\{c\d+::(.*?)(?:::[^}]*)?\}\}/g, "[$1]").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+const clean = (s: unknown) => str(s).replace(/\{\{c\d+::(.*?)(?:::[^}]*)?\}\}/g, "[$1]").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
 function Review({ sha, onDone }: { sha: string; onDone: () => void }) {
   const e = store.inbox.find((x) => x.sha === sha);
@@ -26,23 +28,26 @@ function Review({ sha, onDone }: { sha: string; onDone: () => void }) {
       </div>
     );
   }
-  const cards: any[] = p.cards ?? [];
+  const cards: any[] = Array.isArray(p.cards) ? p.cards : [];
   const keep = cards.length - dropped.size;
+  // Broken cards are named before Add (they used to be called duplicates afterwards).
+  const broken = (() => { try { return parsePack(p, []).invalid; } catch { return []; } })(); const brokenAt = new Set(broken.map((b) => b.index));
   return (
     <>
       <div className="card-box">
         <b>{p.name ?? e.file}</b>
-        <div className="small muted">{cards.length} cards → {p.category ?? "Medicine::Inbox"}{p.tags?.length ? ` · ${p.tags.filter((t: string) => !t.startsWith("auto::")).join(", ")}` : ""}</div>
+        <div className="small muted">{countOf(cards.length, "card")} → {str(p.category) || "Medicine::Inbox"}{strTags(p.tags).length ? ` · ${strTags(p.tags).filter((t) => !t.startsWith("auto::")).join(", ")}` : ""}</div>
+        {broken.length > 0 && <p className="small" style={{ marginBottom: 0 }}><b>{countOf(broken.length, "card")} will be left out as broken:</b> {describeInvalid(broken)}.</p>}
         <p className="small muted" style={{ marginBottom: 0 }}>Tap a card to drop it. Nothing is added until you tap Add.</p>
       </div>
       {cards.map((c, i) => (
         <button key={i} className="list-row" style={{ width: "100%", textAlign: "left", opacity: dropped.has(i) ? 0.4 : 1, flexDirection: "column", alignItems: "stretch", gap: 2 }} onClick={() => { const d = new Set(dropped); d.has(i) ? d.delete(i) : d.add(i); setDropped(d); }}>
-          <span style={{ whiteSpace: "normal" }}>{dropped.has(i) ? "✗ " : ""}{clean(c.text ?? c.front ?? c.question ?? (c.masks ? `${c.front ?? "Image"} (image occlusion, ${c.masks.length} boxes)` : ""))}</span>
-          {(c.back || c.extra || c.options || c.masks) && <span className="small muted" style={{ whiteSpace: "normal" }}>{clean(c.back ?? c.extra ?? (c.options ? c.options.map((o: any, i: number) => (typeof o === "string" ? (i === c.answer || String.fromCharCode(65 + i) === c.answer ? "✓ " : "") + o : (o.correct ? "✓ " : "") + o.text)).join(" · ") : (c.masks ?? []).map((m: any) => m.label).filter(Boolean).join(" · "))).slice(0, 160)}</span>}
+          <span style={{ whiteSpace: "normal" }}>{dropped.has(i) ? "✗ " : ""}{brokenAt.has(i) ? "⚠ broken · " : ""}{clean(c?.text ?? c?.front ?? c?.question ?? (Array.isArray(c?.masks) ? `${str(c.front) || "Image"} (image occlusion, ${countOf(c.masks.length, "box", "boxes")})` : ""))}</span>
+          {(c?.back || c?.extra || Array.isArray(c?.options) || Array.isArray(c?.masks)) && <span className="small muted" style={{ whiteSpace: "normal" }}>{clean(c.back ?? c.extra ?? (Array.isArray(c.options) ? c.options.map((o: any, i: number) => (typeof o === "string" ? (i === c.answer || String.fromCharCode(65 + i) === c.answer ? "✓ " : "") + o : (o.correct ? "✓ " : "") + o.text)).join(" · ") : (Array.isArray(c.masks) ? c.masks : []).map((m: any) => str(m?.label)).filter(Boolean).join(" · "))).slice(0, 160)}</span>}
         </button>
       ))}
       <div className="row" style={{ marginTop: 12, position: "sticky", bottom: "calc(76px + var(--safe-b))", background: "var(--ink)", padding: "8px 0" }}>
-        <button className="btn primary grow" disabled={busy || keep === 0} onClick={async () => { setBusy(true); setMsg(await store.acceptInbox(sha, cards.map((_, i) => i).filter((i) => !dropped.has(i)))); setBusy(false); onDone(); }}>Add {keep} card{keep === 1 ? "" : "s"}</button>
+        <button className="btn primary grow" disabled={busy || keep === 0} onClick={async () => { setBusy(true); setMsg(await store.acceptInbox(sha, cards.map((_, i) => i).filter((i) => !dropped.has(i)))); setBusy(false); onDone(); }}>Add {countOf(keep, "card")}</button>
         <button className="btn" disabled={busy} onClick={async () => { await store.dismissInbox(sha); onDone(); }}>Discard pack</button>
       </div>
       {msg && <p className="small">{msg}</p>}
@@ -64,14 +69,14 @@ export function Inbox({ onClose }: { onClose: () => void }) {
       {store.inbox.map((e) => (
         <button key={e.sha} className="tree-row" style={{ width: "100%", textAlign: "left" }} onClick={() => setOpen(e.sha)}>
           <span className="name">{e.pack.name ?? e.file}</span>
-          <span className="small muted">{e.pack.yuzu_curation ? "curation" : `${e.pack.cards?.length ?? 0} cards`}</span>
+          <span className="small muted">{e.pack.yuzu_curation ? "curation" : countOf(Array.isArray(e.pack.cards) ? e.pack.cards.length : 0, "card")}</span>
         </button>
       ))}
       {store.packLog.length > 0 && (
         <>
           <h2>Added packs</h2>
           {store.packLog.map((p) => (
-            <div key={p.id + p.at} className="list-row"><span className="t">{p.name} · {p.noteIds.length} cards · {fmtDate(p.at)}</span><button className="chip" onClick={async () => { if (await confirmSheet({ title: `Remove “${p.name}”?`, sub: `All ${p.noteIds.length} cards and their review history go with it.`, yes: "Remove pack" })) setMsg(`Removed ${await store.removePack(p.id)} cards.`); }}>Remove</button></div>
+            <div key={p.id + p.at} className="list-row"><span className="t">{p.name} · {countOf(p.noteIds.length, "note")} · {fmtDate(p.at)}</span><button className="chip" onClick={async () => { if (await confirmSheet({ title: `Remove “${p.name}”?`, sub: `All ${countOf(p.noteIds.length, "note")}, their cards and review history go with it.`, yes: "Remove pack" })) setMsg(`Removed ${await store.removePack(p.id)} cards.`); }}>Remove</button></div>
           ))}
         </>
       )}

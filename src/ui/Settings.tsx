@@ -135,7 +135,8 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         onProgress: (m, f) => { setMsg(m); if (f !== undefined) setFrac(f); },
       }, { skipDeckPrefixes: skipLanguages ? ["Languages"] : [] });
       const merged = await store.applyImport(res, (m, f) => { setMsg(m); setFrac(f); });
-      setResult(`Imported ${res.summary.notes.toLocaleString()} notes, ${res.summary.cards.toLocaleString()} cards and ${res.summary.reviews.toLocaleString()} reviews (${merged.newCards.toLocaleString()} new cards${merged.organized ? `, ${merged.organized.toLocaleString()} placed in your categories` : ""}, ${merged.updated.toLocaleString()} notes updated from Anki). ${res.summary.media ? `${res.summary.media.toLocaleString()} images and sounds referenced.` : ""}`);
+      { const n = (x: number, one: string, many = one + "s") => `${x.toLocaleString()} ${x === 1 ? one : many}`; const changes = [merged.newCards ? `added ${n(merged.newCards, "new card")}${merged.organized ? ` (${merged.organized.toLocaleString()} placed in your categories)` : ""}` : "", merged.updated ? `updated ${n(merged.updated, "note")} from Anki` : "", merged.reviews ? `added ${n(merged.reviews, "review")}` : ""].filter(Boolean); // lead with what changed (05-14)
+        setResult(`Imported — ${changes.length ? changes.join(", ") + ` (the file had ${n(res.summary.notes, "note")}, ${n(res.summary.cards, "card")}).` : `nothing new: all ${n(res.summary.cards, "card")} in the file ${res.summary.cards === 1 ? "was" : "were"} already here.`} ${res.summary.media ? `${n(res.summary.media, "image or sound", "images and sounds")} referenced.` : ""}`); }
       // The same file may carry the media: continue straight into adding it.
       if (res.summary.media && await hasMedia(file)) { setBusy(false); await onMedia(file); }
     } catch (e: any) {

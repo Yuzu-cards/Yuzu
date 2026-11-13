@@ -151,3 +151,29 @@ export async function getMeta<T>(key: string, fallback: T): Promise<T> {
   return r ? r.value : fallback;
 }
 export async function setMeta(key: string, value: unknown): Promise<void> { await putOne("meta", { key, value }); }
+/**
+ * Put records into several stores in ONE transaction: all of it is saved or none of it. A card pack used to write its notes
+ * and its cards separately, so a reload or a full disk in between left notes without cards for good.
+ */
+export async function putAtomic(writes: Partial<Record<StoreName, unknown[]>>): Promise<void> {
+  const db = await openDb();
+  const entries = (Object.entries(writes) as [StoreName, unknown[] | undefined][]).filter(([, v]) => v?.length) as [StoreName, unknown[]][];
+  if (!entries.length) return;
+  const t = db.transaction(entries.map(([s]) => BUCKETED[s] ?? s), "readwrite");
+  let err: unknown = null;
+  const fail = (e: unknown) => { if (!err) err = e; try { t.abort(); } catch { /* already over */ } };
+  const finished = new Promise<void>((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(err ?? t.error); t.onabort = () => rej(err ?? t.error ?? new Error("The save was interrupted")); });
+  try {
+    for (const [s, values] of entries) {
+      const bstore = BUCKETED[s];
+      if (!bstore) { const os = t.objectStore(s); for (const v of values) os.put(v); continue; }
+      const os = t.objectStore(bstore); const groups = new Map<number, { id: string }[]>();
+      for (const v of values as { id: string }[]) { const b = bucketOf(v.id); (groups.get(b) ?? groups.set(b, []).get(b)!).push(v); }
+      for (const [b, puts] of groups) {
+        const r = os.get(b);
+        r.onsuccess = () => { try { const m = new Map<string, { id: string }>((r.result as Bucket | undefined)?.rows.map((x) => [x.id, x]) ?? []); for (const v of puts) m.set(v.id, v); os.put({ b, rows: [...m.values()] } as Bucket); } catch (e) { fail(e); } };
+      }
+    }
+  } catch (e) { fail(e); }
+  await finished;
+}
