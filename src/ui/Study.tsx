@@ -3,6 +3,7 @@ import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle } from "../lib/render";
+import { sanitizeFragment, sanitizeCss } from "../lib/sanitize";
 import { MCQ_ID, parseOptions, shuffled } from "../lib/mcq";
 import { latinDigits } from "../lib/num";
 import { voiceSupported, speak, stopSpeaking, listen, stopListening, spokenText, backOnly, RATING_WORDS, LETTER_WORDS } from "../lib/voice";
@@ -50,7 +51,10 @@ export function CardView({ html, css, dark, side = "front", autoplay = false }: 
     const root = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const cls = dark ? "night_mode nightMode" : "";
     const skin = store.settings.cardStyle !== "deck";
-    root.innerHTML = `<style>${BASE_CSS}</style><style>${css}</style>${skin ? `<style>${SKIN_CSS}</style>` : ""}<div class="${cls}"><div class="card ${cls}${skin && isShortCard(html) ? " yz-short" : ""}">${html}</div></div>`;
+    root.innerHTML = `<style></style><style></style>${skin ? "<style></style>" : ""}<div class="${cls}"><div class="card ${cls}${skin && isShortCard(html) ? " yz-short" : ""}"></div></div>`;
+    // Deck CSS and HTML are set as text / cleaned nodes, never spliced into markup (no </style> breakout, no handlers).
+    const sheets = root.querySelectorAll("style"); sheets[0].textContent = BASE_CSS; sheets[1].textContent = sanitizeCss(css); if (skin) sheets[2].textContent = SKIN_CSS;
+    root.querySelector(".card")!.append(sanitizeFragment(html));
     host.scrollTop = 0;
     const own = wireSounds(root, side);
     if (autoplay && own.length) playSounds(own); else stopSounds();

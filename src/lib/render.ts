@@ -106,8 +106,8 @@ export function rewriteMedia(html: string, resolve?: (name: string) => string | 
   // turn each into a native tap-to-open section that works without scripts.
   if (out.includes("hintBtn")) out = out.replace(/<span[^>]*class=["']hintBtn["'][^>]*data-name=["']([^"']+)["'][^>]*>[\s\S]*?<div[^>]*class=["']hints["'][^>]*>([\s\S]*?)<\/div>\s*<\/span>/gi,
     (_, name, body) => `<details class="yz-hint"><summary>${name}</summary><div class="hints">${body}</div></details>`);
-  // Deck HTML runs in the app's origin: drop inline event handlers and javascript: URLs (their functions are gone with the scripts anyway).
-  out = out.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "").replace(/(href|src)\s*=\s*(["']?)\s*javascript:[^"'>\s]*\2/gi, "");
+  // Event handlers, javascript: URLs, iframes and the like are removed by the DOM sanitiser (lib/sanitize.ts) where the
+  // card is shown; a text regex here used to eat ordinary text such as "onset = 2 weeks".
   return out;
 }
 

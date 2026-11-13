@@ -60,7 +60,7 @@ export const PACK_VOCAB: Notetype = {
 export interface PackCard { id?: string; replaces?: string; source?: string; type?: "cloze" | "basic" | "mcq" | "occlusion" | "vocab"; masks?: Mask[]; word?: string; meaning?: string; article?: string; plural?: string; example?: string; audio?: string; lang?: string; question?: string; options?: unknown; answer?: number | string; explanation?: string; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
 export interface Pack { yuzu_pack: 1; id?: string; name?: string; source?: string; category?: string; tags?: string[]; cards: PackCard[] }
 
-export interface PackResult { notetypes: Notetype[]; notes: Note[]; cards: Card[]; media: { name: string; dataUrl: string }[]; skipped: number; similar: number; updated: string[]; unchanged: number }
+export interface PackResult { notetypes: Notetype[]; notes: Note[]; cards: Card[]; media: { name: string; dataUrl: string }[]; skipped: number; similar: number; updated: string[]; unchanged: number; mediaRejected?: number }
 
 export function hash(s: string): string {
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
@@ -75,6 +75,26 @@ export function normalizeText(s: string): string {
 }
 function shingles(s: string): Set<string> { const w = s.split(" "); return new Set(w.length > 1 ? w.slice(1).map((x, i) => w[i] + " " + x) : w); }
 
+const MEDIA_EXT: Record<string, string> = {
+  "image/png": "png", "image/jpeg": "jpeg", "image/jpg": "jpeg", "image/pjpeg": "jpeg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif",
+  "image/svg+xml": "svg", "image/bmp": "bmp", "image/heic": "heic", "image/heif": "heif",
+  "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/ogg": "ogg", "audio/opus": "opus", "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+  "audio/webm": "webm", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/aac": "aac", "audio/flac": "flac",
+};
+/** Largest picture or recording a pack may carry, decoded (a phone photo fits; a runaway base64 blob does not). */
+export const PACK_MEDIA_MAX = 10 * 1024 * 1024;
+/** A pack's data: URL → a short stored file name (hash + known extension), or null when it is not a known image/sound type or too big. */
+export function packMediaName(dataUrl: unknown, kind: "image" | "audio"): string | null {
+  if (typeof dataUrl !== "string") return null;
+  const m = /^data:([a-z]+\/[a-z0-9.+-]+)(;[^,]*)?,/i.exec(dataUrl.slice(0, 200));
+  if (!m) return null;
+  const mime = m[1].toLowerCase(); const ext = MEDIA_EXT[mime];
+  if (!ext || !mime.startsWith(kind + "/")) return null;
+  const body = dataUrl.length - m[0].length; const bytes = /;base64$/i.test(m[2] ?? "") ? body * 0.75 : body;
+  if (bytes > PACK_MEDIA_MAX) return null;
+  return `pack-${hash(dataUrl)}.${ext}`;
+}
+
 export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.now()): PackResult {
   const p = json as Pack;
   if (!p || p.yuzu_pack !== 1 || !Array.isArray(p.cards)) throw new Error("Not a Yuzu card pack (expected { yuzu_pack: 1, cards: [...] })");
@@ -86,20 +106,21 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
     for (const x of sh) (index.get(x) ?? index.set(x, new Set()).get(x)!).add(n.id);
   }
   const notes: Note[] = []; const cards: Card[] = []; const media: PackResult["media"] = [];
-  let skipped = 0, similar = 0, unchanged = 0; const updated: string[] = [];
+  let skipped = 0, similar = 0, unchanged = 0, mediaRejected = 0; const updated: string[] = [];
   const packKey = p.id || p.name || "pack";
   const base = p.category || "Medicine::Inbox";
   p.cards.forEach((c, i) => {
     const type = c.type ?? (c.text ? "cloze" : c.options ? "mcq" : c.masks ? "occlusion" : c.word ? "vocab" : "basic");
     const nt = type === "cloze" ? PACK_CLOZE : type === "mcq" ? PACK_MCQ : type === "occlusion" ? PACK_IO : type === "vocab" ? PACK_VOCAB : PACK_BASIC;
     let imageField = "";
-    if (c.image && /^data:image\//.test(c.image)) { const name = `pack-${hash(c.image)}.${c.image.slice(11, c.image.indexOf(";")) || "png"}`; media.push({ name, dataUrl: c.image }); imageField = `<img src="${name}">`; }
+    if (c.image) { const name = packMediaName(c.image, "image"); if (name) { media.push({ name, dataUrl: c.image }); imageField = `<img src="${name}">`; } else mediaRejected++; }
     const src = c.source ?? p.source ?? "";
     const opts = type === "mcq" ? optionsFromPack(c.options, c.answer) : [];
     const masks = type === "occlusion" ? parseMasks(formatMasks(Array.isArray(c.masks) ? c.masks.map((m) => ({ x: +m.x, y: +m.y, w: +m.w, h: +m.h, label: String(m.label ?? "") })) : [])) : [];
     let audioField = "";
     if (type === "vocab") { const lang = (c.lang ?? (p as any).lang ?? "de-DE").replace(/^de$/i, "de-DE");
-      if (c.audio && /^data:audio\//.test(c.audio)) { const ext = (c.audio.slice(11, c.audio.indexOf(";")) || "mp3").replace("mpeg", "mp3"); const name = `pack-${hash(c.audio)}.${ext}`; media.push({ name, dataUrl: c.audio }); audioField = `[sound:${name}]`; }
+      const aname = c.audio && /^data:/i.test(c.audio) ? packMediaName(c.audio, "audio") : null; if (c.audio && /^data:/i.test(c.audio) && !aname) mediaRejected++;
+      if (aname) { media.push({ name: aname, dataUrl: c.audio! }); audioField = `[sound:${aname}]`; }
       else if (c.audio && /^[\w.-]+\.(mp3|ogg|wav|m4a|opus)$/i.test(c.audio)) audioField = `[sound:${c.audio}]`;
       else audioField = `[tts:${lang}:${[c.article, c.word].filter(Boolean).join(" ")}]`; }
     const fields = type === "vocab" ? [c.word ?? "", c.meaning ?? c.back ?? "", audioField, src, c.article ?? "", c.plural ?? "", c.example ?? "", c.lang ?? (p as any).lang ?? "de-DE"] : type === "occlusion" ? [c.front ?? c.question ?? "Image occlusion", formatMasks(masks), imageField, src, c.extra ?? ""] : type === "cloze" ? [c.text ?? "", c.extra ?? "", imageField, src] : type === "mcq" ? [c.question ?? c.front ?? "", formatOptions(opts), imageField, src, c.explanation ?? c.extra ?? ""] : [c.front ?? "", c.back ?? "", imageField, src];
@@ -139,7 +160,7 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
       cards.push({ id: `${id}-${ord}`, nid: id, ord, state: "new", suspended: false, flag: 0, due: t, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: t, mod: t, source: c.category || base });
     }
   }
-  return { notetypes: [PACK_CLOZE, PACK_BASIC, PACK_MCQ, PACK_IO, PACK_VOCAB], notes, cards, media, skipped, similar, updated, unchanged };
+  return { notetypes: [PACK_CLOZE, PACK_BASIC, PACK_MCQ, PACK_IO, PACK_VOCAB], notes, cards, media, skipped, similar, updated, unchanged, mediaRejected };
 }
 
 export function packOrds(type: string, text?: string, masks?: number): number[] {
@@ -153,5 +174,5 @@ export function packOrds(type: string, text?: string, masks?: number): number[] 
 export function describePack(r: PackResult): string {
   const added = r.notes.length - r.updated.length;
   const t = r.notes.filter((n) => !r.updated.includes(n.id)).slice(0, 3).map((n) => noteTitle(n)).join(" · ");
-  return `${added} cards added${r.updated.length ? `, ${r.updated.length} updated (review history kept)` : ""}${r.unchanged ? `, ${r.unchanged} unchanged` : ""}${r.skipped ? `, ${r.skipped} skipped as duplicates` : ""}${r.similar ? `, ${r.similar} tagged needs-review::similar` : ""}${t ? ` — ${t}` : ""}`;
+  return `${added} cards added${r.updated.length ? `, ${r.updated.length} updated (review history kept)` : ""}${r.unchanged ? `, ${r.unchanged} unchanged` : ""}${r.skipped ? `, ${r.skipped} skipped as duplicates` : ""}${r.similar ? `, ${r.similar} tagged needs-review::similar` : ""}${r.mediaRejected ? `, ${r.mediaRejected} picture${r.mediaRejected === 1 ? "" : "s"} or sound${r.mediaRejected === 1 ? "" : "s"} left out (not a known image or sound type, or over ${PACK_MEDIA_MAX / 1048576} MB)` : ""}${t ? ` — ${t}` : ""}`;
 }
