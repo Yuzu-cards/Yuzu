@@ -70,7 +70,7 @@ try {
   const drill = await p3.evaluate(() => { const y = (window as any).yuzu; const q = y.drillQueue(10); return q.map((c: any) => y.notes.get(c.nid).tags.find((t: string) => t.startsWith("auto::System::"))); });
   ok("the mixed drill alternates systems", drill.length === 10 && drill.every((t: string, i: number) => i === 0 || t !== drill[i - 1]), drill.join(","));
   await p3.click("nav.tabs >> text=Today"); await p3.waitForSelector("text=Step 1", { timeout: 5000 });
-  ok("Today shows the countdown and its verdict", /10 days|9 days|11 days/.test(await p3.locator(".screen").innerText()) && /Needs \d+ new cards a day/.test(await p3.locator(".screen").innerText()));
+  ok("Today shows the countdown and its verdict", /10 days|9 days|11 days/.test(await p3.locator(".screen").innerText()) && /Needs \d+ new cards a day|You won't see all \d+ new cards before the exam/.test(await p3.locator(".screen").innerText()));
   const hs = await p3.evaluate(async () => (await (window as any).yuzu.hubStatus())); ok("status.json asks about the exam when behind", hs.pending.some((t: string) => /Step 1 in \d+ days: needs/.test(t)) && hs.extra.exams?.[0]?.name === "Step 1", JSON.stringify(hs.pending));
   const { normalizeStatus } = await import("../vendor/citrus-inbound.mjs");
   const cit = normalizeStatus(JSON.parse(JSON.stringify(hs)), "yuzu");
@@ -82,7 +82,7 @@ try {
   await p3.click("button:has-text('Patient case')"); ok("…the style changes the role it plays", /emergency department consultant/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
   await p3.selectOption("select >> nth=0", { label: "Step 1 (exam)" }); ok("…and an exam can be chosen as the source", /revising for Step 1/.test(await p3.inputValue('textarea[aria-label="Prompt for Claude"]')));
   await p3.click('button[aria-label="Close practice"]');
-  if (!(await p3.locator("button:has-text('Mixed drill')").isVisible())) await p3.click("text=More for today"); await p3.click("button:has-text('Mixed drill')"); await p3.waitForSelector(".study .card-host", { timeout: 10000 });
+  if (!(await p3.locator(".more-today button:has-text('Mixed drill')").isVisible())) await p3.click("text=More for today"); await p3.click(".more-today button:has-text('Mixed drill')"); await p3.waitForSelector(".study .card-host", { timeout: 10000 });
   ok("the mixed drill opens as a study session", (await p3.locator(".study-top").count()) > 0);
   // ---- Deep links from Citrus: ?from=citrus&do=<id> opens the screen; "← Citrus" leads back
   await p3.goto(`http://127.0.0.1:${port}/?from=citrus&do=drill`); await p3.waitForSelector(".study .card-host", { timeout: 15000 });

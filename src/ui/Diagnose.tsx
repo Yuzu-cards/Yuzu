@@ -12,7 +12,7 @@ export function DiagnoseSheet({ onClose }: { onClose: () => void }) {
   return (
     <div className="sheet-backdrop" onClick={onClose}><div className="sheet" role="dialog" aria-label="Why so many reviews" onClick={(e) => e.stopPropagation()} style={{ maxHeight: "92vh", overflow: "auto" }}>
       <div className="row"><b className="grow">Why so many reviews?</b><button className="icon-btn" aria-label="Close" onClick={onClose}><IconClose /></button></div>
-      <p className="small muted" style={{ marginTop: 4 }}>About <b>{Math.round(d.perDay).toLocaleString()}</b> review{Math.round(d.perDay) === 1 ? "" : "s"} a day over the last 30 days; <b>{d.dueToday.toLocaleString()}</b> due today. What's driving it, biggest first, worked out from your own reviews. Nothing changes until you tap a fix, and each one can be undone.</p>
+      <p className="small muted" style={{ marginTop: 4 }}>About <b>{Math.round(d.perDay).toLocaleString()}</b> review{Math.round(d.perDay) === 1 ? "" : "s"} a day over the last 30 days; {(() => { const t = store.tree(), rv = t.reviewDue ?? 0, ln = t.learningDue ?? 0; return <><b>{rv.toLocaleString()}</b> review{rv === 1 ? "" : "s"} due today{ln ? <>, plus <b>{ln.toLocaleString()}</b> learning</> : null}.</>; })()} What's driving it, biggest first, worked out from your own reviews. Nothing changes until you tap a fix, and each one can be undone.</p>
       {shown.length === 0 && <div className="card-box small">{d.causes.length ? "All the suggested fixes are in. Give it a few days to show." : "Nothing unusual: no backlog, a moderate new-card pace, few leeches and a sensible target. The load is what your collection needs."}</div>}
       {shown.map((c, i) => (
         <div key={c.id} className="card-box diag" style={{ marginTop: 8 }}>

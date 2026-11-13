@@ -11,6 +11,7 @@ import { PracticeSheet } from "./Practice";
 import { DiagnoseSheet } from "./Diagnose";
 import { CardEditor } from "./CardEditor";
 import { sendImproveToClaude } from "./Improve";
+import { bossPool, BOSS_SIZE, BOSS_PASS } from "./Boss";
 
 /** A yuzu cut in half, drawn on a 30×30 pixel grid: 8 segments fill (yellow; orange while partly done) toward the daily goal. */
 export function YuzuGoal({ value, max, size = 150, center, sub }: { value: number; max: number; size?: number; center?: string | number; sub?: string }) {
@@ -52,15 +53,24 @@ type OnStudy = (path: string, view?: View, extra?: { only?: "all" | "due" | "new
 type Filter = "flagged" | "improve" | "suspended" | "leech" | "overfilled";
 export function Today({ onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
   const v = store.getVersion();
-  const d = useMemo(() => derive(), [v]);
+  const [tick, setTick] = useState(0);
+  const d = useMemo(() => derive(), [v, tick]);
+  // A learning step (or a review) falling due later today: one timer to the soonest, so "ready" and Study wake up by themselves.
+  useEffect(() => { if (!d.nextDue) return; const t = setTimeout(() => setTick((x) => x + 1), Math.min(2 ** 31 - 1, Math.max(250, d.nextDue - Date.now() + 500))); return () => clearTimeout(t); }, [d.nextDue, tick]);
+  useEffect(() => { const on = () => { if (document.visibilityState === "visible") setTick((x) => x + 1); }; document.addEventListener("visibilitychange", on); return () => document.removeEventListener("visibilitychange", on); }, []);
   return <TodayView {...d} onStudy={onStudy} onInbox={onInbox} onSearch={onSearch} onBoss={onBoss} onFilter={onFilter} onTab={onTab} />;
 }
 
+// The boss pool walks the collection, so its size is kept a minute per system (it changes slowly: stability ≥ 7 days).
+const bossCounts = new Map<string, { at: number; n: number }>();
+function bossCount(name: string, now: number) { const c = bossCounts.get(name); if (c && Math.abs(now - c.at) < 60000) return c.n; const n = bossPool(name, "systems").length; bossCounts.set(name, { at: now, n }); return n; }
 function derive() {
   const pins = store.settings.pins.map((p) => {
     const cards = store.cardsIn(p.path, p.view); const now = Date.now();
     const name = p.view === "smart" ? (store.settings.smart.find((s) => s.id === p.path)?.name ?? "Smart deck") : (p.path.split("::").pop() || "All");
-    return { ...p, name, due: cards.filter((c) => !c.suspended && c.state !== "new" && c.due <= now).length, fresh: cards.filter((c) => !c.suspended && c.state === "new").length };
+    let due = 0, learn = 0, fresh = 0; // the hero's words: due = reviews due now, learning = steps due now, unseen = never studied
+    for (const c of cards) { if (c.suspended) continue; if (c.state === "new") fresh++; else if (c.due <= now) { if (c.state === "review") due++; else learn++; } }
+    return { ...p, name, due, learn, fresh };
   });
   const tree = store.tree();
   const stats = store.stats();
@@ -69,8 +79,13 @@ function derive() {
   const now = Date.now();
   // Reviews falling due each of the next 7 days; cards already overdue are counted apart (a backlog would flatten the chart).
   const day0 = store.dayStart(now); const forecast = [0, 0, 0, 0, 0, 0, 0]; let overdue = 0;
+  // Also: what is due right now (for "held back"), and the next card that falls due later today (learning steps above all).
+  let reviewNow = 0, learnNow = 0, laterLearn = 0, laterReview = 0, nextDue = 0; const end = day0 + DAY;
   for (const c of store.cards.values()) {
-    if (c.suspended || c.state !== "review") continue;
+    if (c.suspended || c.state === "new") continue;
+    if (c.due <= now) { if (c.state === "review") reviewNow++; else learnNow++; }
+    else if (c.due < end) { if (c.state === "review") laterReview++; else laterLearn++; if (!nextDue || c.due < nextDue) nextDue = c.due; }
+    if (c.state !== "review") continue;
     if (c.due < day0) { overdue++; continue; }
     const d = Math.floor((c.due - day0) / DAY); if (d < 7) forecast[d]++;
   }
@@ -79,14 +94,18 @@ function derive() {
   const missed = store.missedToday(now); const weakest = store.weakestSystem(now);
   // A boss fight worth offering: a system with 10+ well-learned cards that has not been beaten in the last 14 days.
   const mastery = store.masteryBySystem(now);
-  const bossReady = [...mastery].filter(([name, m]) => m.mastered + m.durable >= 10 && (now - (store.settings.bosses[`systems:${name}`]?.at ?? 0)) > 14 * DAY).sort((a, b) => (b[1].mastered + b[1].durable) - (a[1].mastered + a[1].durable)).slice(0, 1).map(([name, m]) => ({ name, ready: m.mastered + m.durable }))[0] ?? null;
-  return { pins, tree, stats, queue, counts, now, forecast, maxF, overdue, top, missed, weakest, bossReady };
+  // "ready" is the boss's own pool (well-learned = in review with stability ≥ 7 days), so the tip says what the fight will hold.
+  const bossReady = [...mastery].filter(([name, m]) => m.mastered + m.durable >= 10 && (now - (store.settings.bosses[`systems:${name}`]?.at ?? 0)) > 14 * DAY).sort((a, b) => (b[1].mastered + b[1].durable) - (a[1].mastered + a[1].durable)).slice(0, 3).map(([name]) => ({ name, ready: bossCount(name, now) })).find((b) => b.ready >= 10) ?? null;
+  const newLeft = Math.max(0, store.settings.newPerDay - store.reviewedToday(now).newCards);
+  // reviews the daily cap keeps out of today's session
+  const capped = store.settings.maxReviewsPerDay > 0 && reviewNow > Math.max(0, store.settings.maxReviewsPerDay - stats.today);
+  return { pins, tree, stats, queue, counts, now, day0, forecast, maxF, overdue, top, missed, weakest, bossReady, reviewNow, learnNow, laterLearn, laterReview, nextDue, newLeft, capped };
 }
 
-function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, overdue, top, missed, weakest, bossReady, onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
+function TodayView({ pins, tree, stats, queue, counts, now, day0, forecast, maxF, overdue, top, missed, weakest, bossReady, reviewNow, learnNow, laterLearn, laterReview, nextDue, newLeft, capped, onStudy, onInbox, onSearch, onBoss, onFilter, onTab }: ReturnType<typeof derive> & { onStudy: OnStudy; onInbox?: () => void; onSearch?: (q: string) => void; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onTab?: (t: "today" | "library" | "progress" | "settings") => void }) {
   // the headline counts what the session holds, so its parts add up to the number in the ring
   const parts = { review: 0, learning: 0, fresh: 0 }; for (const c of queue) { if (c.state === "new") parts.fresh++; else if (c.state === "review") parts.review++; else parts.learning++; }
-  const held = Math.max(0, tree.due - parts.review - parts.learning); // tree.due already counts learning cards that are due
+  const held = Math.max(0, reviewNow + learnNow - parts.review - parts.learning); // due now (reviews + learning steps) but not in the session
   const [q, setQ] = useState("");
   const [sheet, setSheet] = useState<{ title: string; sub?: string; items: SheetItem[] } | null>(null);
   const [recap, setRecap] = useState(false); const [capture, setCapture] = useState(false); const [work, setWork] = useState(false); const [quick, setQuick] = useState(false);
@@ -95,14 +114,14 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
   const pinList = useRef<HTMLDivElement>(null);
   const { handle } = useDragReorder({ listRef: pinList, onMove: (a, b) => { const p = [...store.settings.pins]; const [x] = p.splice(a, 1); p.splice(b, 0, x); store.saveSettings({ pins: p }); } });
   const unpin = (path: string, view: View) => { const before = store.settings.pins; store.saveSettings({ pins: before.filter((x) => !(x.path === path && x.view === view)) }); snackbar("Unpinned", () => store.saveSettings({ pins: before })); };
-  const deckSheet = (title: string, path: string, view: View, due: number, fresh: number, pinned: boolean, sub?: string) => setSheet({ title, sub, items: [
-    { label: "Study", onClick: () => onStudy(path, view), disabled: due + fresh === 0 },
-    { label: `Due only (${due.toLocaleString()})`, onClick: () => onStudy(path, view, { only: "due" }), disabled: !due },
-    { label: `New only (${fresh.toLocaleString()})`, onClick: () => onStudy(path, view, { only: "new" }), disabled: !fresh },
+  const deckSheet = (title: string, path: string, view: View, due: number, fresh: number, pinned: boolean, sub?: string) => { const today = Math.min(fresh, newLeft); setSheet({ title, sub, items: [
+    { label: "Study", onClick: () => onStudy(path, view), disabled: due + today === 0 },
+    { label: `Due and learning only (${due.toLocaleString()})`, onClick: () => onStudy(path, view, { only: "due" }), disabled: !due },
+    { label: `New only (${today.toLocaleString()} today)`, onClick: () => onStudy(path, view, { only: "new" }), disabled: !today },
     ...(view === "systems" && onBoss ? [{ label: "Boss fight", onClick: () => onBoss(path, view, path.split("::").pop() || path) }] : []),
     pinned ? { label: "Move to top", onClick: () => { const p = store.settings.pins.filter((x) => !(x.path === path && x.view === view)); store.saveSettings({ pins: [{ path, view }, ...p] }); } } : { label: "Pin to Today", onClick: () => store.saveSettings({ pins: [...store.settings.pins, { path, view }] }) },
     ...(pinned ? [{ label: "Unpin", danger: true, onClick: () => unpin(path, view) }] : []),
-  ] });
+  ] }); };
   const goalDone = stats.today >= stats.goal && stats.goal > 0;
   return (
     <div className="screen">
@@ -112,20 +131,28 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
       {work && <DiagnoseSheet onClose={() => setWork(false)} />}
       {quick && <CardEditor onClose={() => setQuick(false)} />}
       {recap && <Recap initial={new Date().getDate() <= 7 ? "last-month" : "month"} onClose={() => setRecap(false)} />}
-      <div className="brand">{fromCitrus && <a className="chip back-citrus" href="https://amaerys.github.io/Citrus-Maxima/?from=yuzu" aria-label="Back to Citrus">← Citrus</a>}<YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" /><button className="chip" aria-label="Quick add a card" onClick={() => setQuick(true)}>＋ Card</button><button className="chip" aria-label="Capture" onClick={() => setCapture(true)}>＋ Capture</button>
+      <div className="brand">{fromCitrus && <a className="chip back-citrus" href={citrusHref()} aria-label="Back to Citrus" onClick={() => { try { sessionStorage.removeItem("yuzu-from"); sessionStorage.removeItem("yuzu-from-url"); } catch { /* fine */ } }}>← Citrus</a>}<YuzuMark size={32} /><h1>Yuzu</h1><div className="grow" /><button className="chip" aria-label="Quick add a card" onClick={() => setQuick(true)}>＋ Card</button><button className="chip" aria-label="Capture" onClick={() => setCapture(true)}>＋ Capture</button>
         {store.syncConfigured() && <span className={"chip" + (store.syncStatus.state === "error" ? "" : " yuzu")} data-hint={`Sync|${store.syncStatus.message || "Ready"}. Tap to sync now, or pull the page down.`} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "syncing…" : store.syncStatus.state === "error" ? "sync failed" : store.hasUnsynced() ? "unsynced" : "synced"}</span>}
       </div>
       {store.inbox.length > 0 && onInbox && <button className="card-box row" style={{ width: "100%", textAlign: "left", marginBottom: 10, borderColor: "var(--yuzu)" }} onClick={onInbox}><span className="grow"><b>{store.inbox.length} new pack{store.inbox.length === 1 ? "" : "s"} from Claude</b><div className="small muted">Review the cards before they join your collection</div></span><span className="chip yuzu">Review</span></button>}
       {store.cards.size === 0 ? (
-        <div className="card-box"><div style={{ fontWeight: 700, marginBottom: 6 }}>Nothing to study yet</div><div className="muted small">Go to Settings and import your Anki collection. Review history comes with it, so nothing starts over.</div></div>
+        <div className="card-box today-empty"><div style={{ fontWeight: 700, marginBottom: 6 }}>Nothing to study yet</div><div className="muted small">{store.inbox.length > 0 ? "Claude's pack is waiting: review it and its cards join your collection. Or bring in your Anki collection (review history comes with it, so nothing starts over), or write a card yourself." : "Bring in your Anki collection (review history comes with it, so nothing starts over), or write your first card."}</div>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+            {store.inbox.length > 0 && onInbox && <button className="btn primary grow" onClick={onInbox}>Review the pack</button>}
+            {onTab && <button className={"btn grow" + (store.inbox.length ? "" : " primary")} onClick={() => { onTab("settings"); setTimeout(() => { const el = document.getElementById("s-import") as HTMLDetailsElement | null; if (el) { el.open = true; el.scrollIntoView({ block: "start" }); } }, 60); }}>Import from Anki</button>}
+            <button className="btn grow" onClick={() => setQuick(true)}>Write a card</button>
+          </div></div>
       ) : (
         <div className="today-cols"><div className="col-main">
           <div className={"hero" + (goalDone ? " goal-done" : "")}>
             <span data-hint={`Goal yuzu|${stats.today} of today's ${stats.goal} reviews done; the segments fill toward the goal. The number in the middle: ${queue.length} cards ready now.`}><YuzuGoal value={stats.today} max={stats.goal} size={150} center={queue.length} sub="ready" /></span>
             <div>
-              <div className="lead"><b data-hint="Ready|Everything this session would hold: due reviews, cards in learning steps and today's new cards.">{queue.length.toLocaleString()} cards</b> ready: <span data-hint="Due|Learned cards whose recall is predicted to have dropped to your target — review them today.">{parts.review.toLocaleString()} due</span>, <span data-hint="Learning|Cards in their first short steps (minutes) or relearning after a lapse.">{parts.learning.toLocaleString()} learning</span> and <span data-hint={`New|Cards you haven't seen; up to ${store.settings.newPerDay} a day (Settings → Studying).`}>{parts.fresh.toLocaleString()} new</span> for today.{held > 0 && <span className="muted" data-hint={`Held back|${held.toLocaleString()} more are due but wait for another day: a card whose sibling (another card of the same note) is in today's session waits, and so does anything past your daily cap (Settings → Studying).`}> {held.toLocaleString()} more wait for another day.</span>}</div>
-              <div className="lead" style={{ marginTop: 6 }}>Goal <b>{stats.today} / {stats.goal}</b>{stats.today >= stats.goal ? ", done for today" : ""}.</div>
-              <button className="btn primary" style={{ marginTop: 14 }} onClick={() => onStudy("")} disabled={queue.length === 0}><IconPlay /> Study</button>
+              {queue.length === 0 ? <div className="lead"><b className="all-done">All done for today.</b>{(() => { const n = laterLearn + laterReview; if (!n) return null; const at = new Date(nextDue).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); const what = `${n.toLocaleString()} ${laterReview ? "" : "learning "}card${n === 1 ? "" : "s"}`; return n === 1 ? <> {what} comes back at <b>{at}</b>.</> : <> {what} come back later today, the first at <b>{at}</b>.</>; })()}{held > 0 && <span className="muted"> {held.toLocaleString()} more wait for another day.</span>}</div> : <div className="lead"><b data-hint="Ready|Everything this session would hold: due reviews, cards in learning steps and today's new cards.">{queue.length.toLocaleString()} cards</b> ready: <span data-hint="Due|Learned cards whose recall is predicted to have dropped to your target — review them today.">{parts.review.toLocaleString()} due</span>, <span data-hint="Learning|Cards in their first short steps (minutes) or relearning after a lapse.">{parts.learning.toLocaleString()} learning</span> and <span data-hint={`New|Cards you haven't seen; up to ${store.settings.newPerDay} a day (Settings → Studying).`}>{parts.fresh.toLocaleString()} new</span> for today.{held > 0 && <span className="muted" data-hint={`Held back|${held.toLocaleString()} more are due but wait for another day: a card whose sibling (another card of the same note) is in today's session waits, and so does anything past your daily cap (Settings → Studying).`}> {held.toLocaleString()} more wait for another day.</span>}</div>}
+              <div className="lead" style={{ marginTop: 6 }}>{goalDone && <span className="goal-star" aria-hidden="true">★</span>}Goal <b>{stats.today} / {stats.goal}</b>{goalDone ? <b className="goal-reached"> — reached!</b> : ""}</div>
+              {queue.length > 0 ? <button className="btn primary" style={{ marginTop: 14 }} onClick={() => onStudy("")}><IconPlay /> Study</button>
+                : missed.length > 0 ? <button className="btn primary" style={{ marginTop: 14 }} onClick={() => onStudy("", "decks", { preset: missed, title: "Missed today" })}><IconPlay /> Redo misses ({missed.length})</button>
+                : counts.review + counts.learning + counts.relearning > 0 ? <button className="btn primary" style={{ marginTop: 14 }} onClick={() => { const drill = store.drillQueue(30); if (drill.length) onStudy("", "decks", { preset: drill, title: "Mixed drill" }); else snackbar("Nothing to drill yet"); }}><IconPlay /> Mixed drill</button>
+                : <button className="btn primary" style={{ marginTop: 14 }} disabled><IconPlay /> Study</button>}
             </div>
           </div>
           <div className="stat-grid">
@@ -136,17 +163,17 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
           </div>
           {onSearch && <form className="field" style={{ margin: "12px 0 0" }} onSubmit={(e) => { e.preventDefault(); if (q.trim()) onSearch(q.trim()); }}><input placeholder="Search all cards and tags" value={q} onChange={(e) => setQ(e.target.value)} /></form>}
           <Countdowns onStudy={onStudy} />
-          <Coach missed={missed} weakest={weakest} bossReady={bossReady} overdue={overdue} onStudy={onStudy} onBoss={onBoss} onFilter={onFilter} onRecap={() => setRecap(true)} onTab={onTab} />
+          <Coach missed={missed} weakest={weakest} bossReady={bossReady} overdue={overdue} newLeft={newLeft} onStudy={onStudy} onBoss={onBoss} onFilter={onFilter} onRecap={() => setRecap(true)} onTab={onTab} />
           <MoreForToday onStudy={onStudy} />
           </div><div className="col-side">
           <h2>Next 7 days</h2>
-          <p className="small muted" style={{ margin: "-4px 0 8px" }}>Reviews falling due each day, so you see heavy days coming.{overdue > 0 ? <> Plus <b style={{ color: "var(--orange)" }}>{overdue.toLocaleString()} overdue</b>: about <b>{Math.ceil(overdue / 7).toLocaleString()} extra a day</b> clears them in a week.</> : null}</p>
+          <p className="small muted" style={{ margin: "-4px 0 8px" }}>Reviews falling due each day, so you see heavy days coming.{overdue > 0 ? (overdue > Math.max(1, stats.goal) || capped ? <> Plus <b style={{ color: "var(--orange)" }}>{overdue.toLocaleString()} overdue</b>: about <b>{Math.ceil(overdue / 7).toLocaleString()} extra a day</b> clears them in a week.</> : <> Plus <b style={{ color: "var(--orange)" }}>{overdue.toLocaleString()} overdue</b>, already in today's session.</>) : null}</p>
           <div className="card-box forecast" style={{ height: 108 }}>
             {forecast.map((n, i) => (
-              <div key={i} className={i === 0 ? "today" : ""} data-hint={`${i === 0 ? "Today" : new Date(now + i * DAY).toLocaleDateString(undefined, { weekday: "long" })}|${n.toLocaleString()} review${n === 1 ? "" : "s"} fall due${i === 0 && overdue ? `, plus ${overdue.toLocaleString()} overdue` : ""}.`}>
+              <div key={i} className={i === 0 ? "today" : ""} data-hint={`${i === 0 ? "Today" : new Date(day0 + i * DAY + 12 * 3600e3).toLocaleDateString(undefined, { weekday: "long" })}|${n.toLocaleString()} review${n === 1 ? "" : "s"} fall due${i === 0 && overdue ? `, plus ${overdue.toLocaleString()} overdue` : ""}.`}>
                 <span className="small muted num">{n.toLocaleString()}</span>
                 <i style={{ height: Math.max(3, (n / maxF) * 44) }} />
-                <span className="small muted">{i === 0 ? "today" : new Date(now + i * DAY).toLocaleDateString(undefined, { weekday: "short" })}</span>
+                <span className="small muted">{i === 0 ? "today" : new Date(day0 + i * DAY + 12 * 3600e3).toLocaleDateString(undefined, { weekday: "short" })}</span>
               </div>
             ))}
           </div>
@@ -154,8 +181,8 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
             <div ref={pinList}>
             {pins.map((p, i) => (
               <div key={p.view + p.path} data-drag-item className="row" style={{ gap: 0, alignItems: "stretch" }}>
-                <HoldRow className="stack grow" style={{ "--spine": p.view === "systems" ? systemColor(p.name) : "var(--orange)", marginBottom: 8 } as any} onTap={() => onStudy(p.path, p.view)} onHold={() => deckSheet(p.name, p.path, p.view, p.due, p.fresh, true)}>
-                  <span className="name">{p.name}<div className="meta">{p.due.toLocaleString()} due · {p.fresh.toLocaleString()} new</div></span>
+                <HoldRow className="stack grow" style={{ "--spine": p.view === "systems" ? systemColor(p.name) : "var(--orange)", marginBottom: 8 } as any} onTap={() => onStudy(p.path, p.view)} onHold={() => deckSheet(p.name, p.path, p.view, p.due + p.learn, p.fresh, true)}>
+                  <span className="name">{p.name}<div className="meta">{p.due.toLocaleString()} due{p.learn ? ` · ${p.learn.toLocaleString()} learning` : ""} · {p.fresh.toLocaleString()} unseen</div></span>
                   <span className="muted"><IconPlay /></span>
                 </HoldRow>
                 {pins.length > 1 && <DragHandle {...handle(i, p.name, pins.length)} />}
@@ -163,8 +190,8 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
             ))}</div></>)}
           {top.length > 0 && (<><h2>By category</h2>
             {top.map((c) => (
-              <HoldRow key={c.path} className="stack" style={{ "--spine": "var(--yuzu)" } as any} onTap={() => onStudy(c.path)} onHold={() => deckSheet(c.name, c.path, "decks", c.due + c.learning, c.newCount, store.settings.pins.some((x) => x.path === c.path && x.view === "decks"))}>
-                <span className="name">{c.name}<div className="meta">{c.due.toLocaleString()} due · {c.learning} learning · {c.newCount.toLocaleString()} new</div></span>
+              <HoldRow key={c.path} className="stack" style={{ "--spine": "var(--yuzu)" } as any} onTap={() => onStudy(c.path)} onHold={() => deckSheet(c.name, c.path, "decks", c.due, c.newCount, store.settings.pins.some((x) => x.path === c.path && x.view === "decks"))}>
+                <span className="name">{c.name}<div className="meta">{(c.reviewDue ?? 0).toLocaleString()} due{c.learningDue ? ` · ${c.learningDue.toLocaleString()} learning` : c.learning ? ` · ${c.learning.toLocaleString()} learning later` : ""} · {c.newCount.toLocaleString()} unseen</div></span>
                 <span className="muted"><IconPlay /></span>
               </HoldRow>
             ))}</>)}
@@ -178,10 +205,11 @@ function TodayView({ pins, tree, stats, queue, counts, now, forecast, maxF, over
  * Coach (from Orange 8.2.0): up to four soft suggestions that wait for a tap and can be dismissed for the day.
  * Nothing changes until you choose it; anything that moves cards can be undone.
  */
-function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter, onRecap, onTab }: { onTab?: (t: any) => void; missed: Card[]; weakest: { name: string; retention: number; n: number } | null; bossReady: { name: string; ready: number } | null; overdue: number; onStudy: OnStudy; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onRecap: () => void }) {
-  const today = new Date().toDateString();
-  const [gone, setGone] = useState<string[]>(() => { try { const x = JSON.parse(localStorage.getItem("yuzu-coach") ?? "{}"); return x.day === today ? x.ids : []; } catch { return []; } });
-  const dismiss = (id: string) => { const ids = [...gone, id]; setGone(ids); try { localStorage.setItem("yuzu-coach", JSON.stringify({ day: today, ids })); } catch { /* fine */ } };
+function Coach({ missed, weakest, bossReady, overdue, newLeft, onStudy, onBoss, onFilter, onRecap, onTab }: { onTab?: (t: any) => void; missed: Card[]; weakest: { name: string; retention: number; n: number } | null; bossReady: { name: string; ready: number } | null; overdue: number; newLeft: number; onStudy: OnStudy; onBoss?: (path: string, view: View, name: string) => void; onFilter?: (f: Filter) => void; onRecap: () => void }) {
+  const today = store.isoToday(new Date(store.dayStart())); // the study day (starts at the rollover hour, 04:00 by default), not the calendar day
+  const [saved, setSaved] = useState<{ day: string; ids: string[] }>(() => { try { const x = JSON.parse(localStorage.getItem("yuzu-coach") ?? "{}"); return { day: String(x.day ?? ""), ids: Array.isArray(x.ids) ? x.ids : [] }; } catch { return { day: "", ids: [] }; } });
+  const gone = saved.day === today ? saved.ids : []; // a new study day brings the tips back, even with Today left open
+  const dismiss = (id: string) => { const next = { day: today, ids: [...gone, id] }; setSaved(next); try { localStorage.setItem("yuzu-coach", JSON.stringify(next)); } catch { /* fine */ } };
   const over = store.overfilled().filter((id) => !store.improveFor(id)).length;
   const marked = store.improveList().length;
   const lastMonth = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).getTime(), thisMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
@@ -202,16 +230,19 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
   else if (tmrwNight) tips.push({ id: "tmrw", spine: "var(--night, #5b6cff)", title: "Night shift tomorrow — do the full session today", meta: `Tomorrow is a light day; ${overdue ? `clear the ${overdue.toLocaleString()} overdue ` : "get ahead "}now`, act: () => onStudy(""), why: "Rota|From Citrus Maxima (or the schedule file on Drive)." });
   if (store.googleStatus.state === "error" && /tap/i.test(store.googleStatus.message)) tips.push({ id: "google", spine: "var(--amber)", title: "Tap to reconnect Google", meta: "Google's sign-in lasts an hour; this tap renews it and syncs", act: () => { store.sync("manual").catch(() => {}); store.googleRefresh("manual").catch(() => {}); }, why: "Google|Phones only let Google's sign-in window open from a tap, so an hour after the last one Yuzu waits for you. No password: it renews straight away." });
   const next = store.settings.newPerDay > 0 ? store.learnNext() : null;
-  if (next) tips.push({ id: "next-" + next.name, spine: systemColor(next.name), title: next.started ? `Next: finish ${next.name}` : `Next: start ${next.name}`, meta: next.started ? `${next.seen.toLocaleString()} of ${next.total.toLocaleString()} seen — finish a system before opening another` : `${next.total.toLocaleString()} cards, the biggest system you haven't started`, act: () => onStudy(next.name, "systems", { only: "new", title: `New: ${next.name}` }), why: "Learn next|A teacher's rule: one system at a time. Half-finished systems come first (closest to done first), then the biggest untouched one. New cards from it, today's limit still applies." });
+  // Today's new-card limit used up: the tip says it's for tomorrow, and a tap is an explicit "10 more today" past the limit.
+  const extra = () => store.cardsIn(next!.name, "systems").filter((c) => !c.suspended && c.state === "new").sort((a, b) => a.due - b.due || a.created - b.created).slice(0, 10);
+  if (next && newLeft <= 0) tips.push({ id: "next-" + next.name, spine: systemColor(next.name), title: next.started ? `Tomorrow: finish ${next.name}` : `Tomorrow: start ${next.name}`, meta: `Today's ${store.settings.newPerDay === 1 ? "new card is" : `${store.settings.newPerDay.toLocaleString()} new cards are`} in — tap to learn 10 more from it today`, act: () => onStudy(next.name, "systems", { preset: extra(), title: `10 more: ${next.name}` }), why: "Learn next|A teacher's rule: one system at a time. Today's new-card limit is used up, so this goes first tomorrow; a tap adds 10 more today, past the limit." });
+  else if (next) tips.push({ id: "next-" + next.name, spine: systemColor(next.name), title: next.started ? `Next: finish ${next.name}` : `Next: start ${next.name}`, meta: next.started ? `${next.seen.toLocaleString()} of ${next.total.toLocaleString()} seen — finish a system before opening another` : `${next.total.toLocaleString()} cards, the biggest system you haven't started`, act: () => onStudy(next.name, "systems", { only: "new", title: `New: ${next.name}` }), why: "Learn next|A teacher's rule: one system at a time. Half-finished systems come first (closest to done first), then the biggest untouched one. New cards from it, today's limit still applies." });
   if (recapReady) tips.push({ id: "recap", spine: "var(--orange)", title: `Your ${new Date(lastMonth).toLocaleString(undefined, { month: "long" })} recap is ready`, meta: "Persona, best day, nemesis card — and a share card", act: onRecap, why: "Recap|A look back at last month from your real reviews." });
-  if (overdue >= 50 || store.tree().due >= Math.max(150, store.settings.dailyGoal * 2)) tips.push({ id: "why-" + store.isoToday(), spine: "var(--amber)", title: "Why so many reviews?", meta: "What's driving your load, biggest first, with a fix for each", why: "Ranked from your own reviews: backlog, new-card pace, leeches, target recall, days off, tuning.", act: () => store.openOnToday("workload") });
+  if (overdue >= 50 || store.tree().due >= Math.max(150, store.settings.dailyGoal * 2)) tips.push({ id: "why-" + today, spine: "var(--amber)", title: "Why so many reviews?", meta: "What's driving your load, biggest first, with a fix for each", why: "Ranked from your own reviews: backlog, new-card pace, leeches, target recall, days off, tuning.", act: () => store.openOnToday("workload") });
   if (overdue >= 50) tips.push({ id: "postpone", spine: "var(--clay)", title: `${overdue.toLocaleString()} cards overdue — spread them over a week`, meta: "The most fragile stay first; sturdy ones wait. Undo anytime.", act: async () => { const r = await store.postponeOverdue(7); if (r) snackbar(`${r.moved.toLocaleString()} cards spread over 7 days`, r.undo); }, why: "Postpone|A big backlog makes every day feel impossible. This moves overdue cards with long, stable memories later and keeps the fragile ones first (FSRS Helper's postpone, simplified)." });
-  if (bossReady && onBoss) tips.push({ id: "boss", spine: "var(--yuzu)", title: `Boss fight: ${bossReady.name}`, meta: `${bossReady.ready} well-learned cards — 20 at random, no hints, 85% to pass`, act: () => onBoss(bossReady.name, "systems", bossReady.name), why: "Boss fight|Mixed, cumulative testing on cards you already know — it shows what really stuck." });
+  if (bossReady && onBoss) tips.push({ id: "boss", spine: "var(--yuzu)", title: `Boss fight: ${bossReady.name}`, meta: `${bossReady.ready.toLocaleString()} well-learned cards — ${bossReady.ready > BOSS_SIZE ? `${BOSS_SIZE} at random` : `all ${bossReady.ready} in random order`}, no hints, ${Math.round(BOSS_PASS * 100)}% to pass`, act: () => onBoss(bossReady.name, "systems", bossReady.name), why: "Boss fight|Mixed, cumulative testing on cards you already know — it shows what really stuck." });
   if (missed.length >= 3) tips.push({ id: "missed", spine: "var(--clay)", title: "Redo today's misses", meta: `${missed.length} cards you got wrong today, once more while they're fresh`, act: () => onStudy("", "decks", { preset: missed, title: "Missed today" }), why: "Same-day retry|A missed card retried before the day ends is recalled clearly better later (Quantum Country's retry experiment)." });
   if (weakest) tips.push({ id: "weak", spine: systemColor(weakest.name), title: `${weakest.name} is slipping`, meta: `${Math.round(weakest.retention * 100)}% recalled this week over ${weakest.n} reviews — a focused session helps`, act: () => onStudy(weakest.name, "systems"), why: "Slipping|This system's recall this week is clearly below your target." });
   if (over >= 10 && onFilter) tips.push({ id: "over", spine: "var(--amber)", title: `${over.toLocaleString()} cards look overfilled`, meta: "Too much on one card — pick some and Claude splits them", act: () => onFilter("overfilled"), why: "Overfilled|Long answers or 6+ list items. One fact per card is recalled better (Wozniak's minimum-information rule)." });
   if (marked >= 5) tips.push({ id: "send", spine: "var(--sky)", title: `Send ${marked} cards to Claude`, meta: "Marked “needs improving” — get them back rewritten or split", act: async () => { const m = await sendImproveToClaude(); if (m) snackbar(m); }, why: "Improve|Claude rewrites them keeping your review history and pictures." });
-  if (!store.syncConfigured() && Date.now() - lastBackup > 30 * DAY && store.cards.size > 100) tips.push({ id: "backup", spine: "var(--line)", title: "No backup in 30 days", meta: "Save one file with everything", act: () => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.json`; a.click(); try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } }, why: "Backup|Without sync, this device holds your only copy." });
+  if (!store.syncConfigured() && Date.now() - lastBackup > 30 * DAY && store.cards.size > 100) tips.push({ id: "backup", spine: "var(--line)", title: lastBackup ? "No backup in 30 days" : "No backup yet", meta: "Save one file with everything", act: () => { const blob = new Blob([JSON.stringify(store.backup())], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.json`; a.click(); try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } }, why: "Backup|Without sync, this device holds your only copy." });
   const shown = tips.filter((t) => !gone.includes(t.id)).slice(0, 4);
   if (!shown.length) return null;
   return (<>
@@ -224,22 +255,24 @@ function Coach({ missed, weakest, bossReady, overdue, onStudy, onBoss, onFilter,
   </>);
 }
 
+/** Where ← Citrus goes: the Citrus page that opened Yuzu (remembered from the deep link), else Citrus Maxima's home. */
+function citrusHref() { let u = ""; try { u = sessionStorage.getItem("yuzu-from-url") ?? ""; } catch { /* fine */ } return (u || "https://amaerys.github.io/Citrus-Maxima/") + "?from=yuzu"; }
 const dmy = (iso: string) => iso.split("-").reverse().join("/");
 /** Exam countdowns: days left, what's introduced, the new cards a day it needs, and drills on what you'd forget. Plus the mixed-system drill. */
 function Countdowns({ onStudy }: { onStudy: OnStudy }) {
   const today = store.isoToday(); const list = (store.settings.deadlines ?? []).filter((d) => d.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1));
   return (<>
-    {list.map((d) => { const e = store.examStatus(d); const pct = Math.round(e.coverage * 100); return (
+    {list.map((d) => { const e = store.examStatus(d); const pct = Math.round(e.coverage * 100); const last = e.daysLeft <= 1; const cap = store.settings.newPerDay; return (
       <div key={d.id} className="card-box" style={{ marginTop: 10 }}>
         <div className="row"><b className="grow">{d.name}</b><span className={"chip" + (e.onTrack ? " yuzu" : " orange")}>{e.daysLeft === 0 ? "today" : e.daysLeft === 1 ? "tomorrow" : `${e.daysLeft} days`}</span></div>
         <div className="small muted" style={{ margin: "4px 0 6px" }}>{dmy(d.date)} · {e.total.toLocaleString()} cards in scope</div>
         <div className="bar" style={{ height: 8, background: "var(--line, #8883)", borderRadius: 4 }}><div style={{ width: pct + "%", height: "100%", background: "var(--yuzu, #f08a24)", borderRadius: 4 }} /></div>
         <p className="small" style={{ margin: "8px 0 4px" }}>{pct}% introduced{e.unseen ? ` · ${e.unseen.toLocaleString()} still new` : " · everything seen"}{e.predicted !== null ? ` · you'd recall about ${Math.round(e.predicted * 100)}% on the day if you stopped reviewing now` : ""}.</p>
-        <p className="small" style={{ margin: "0 0 8px", color: e.onTrack ? undefined : "var(--again)" }}>{e.unseen === 0 ? "All new cards are in; the rest is review." : e.onTrack ? `${e.needPerDay} new a day finishes them with ${e.reviewDays} review-only days before the exam (your limit is ${store.settings.newPerDay}).` : `Needs ${e.needPerDay} new cards a day; your limit is ${store.settings.newPerDay}. At that pace the last new cards come in on ${dmy(e.finishOn!)}.`}</p>
+        <p className="small" style={{ margin: "0 0 8px", color: e.onTrack || last ? undefined : "var(--again)" }}>{last ? `Exam ${e.daysLeft === 0 ? "today" : "tomorrow"} — skip new cards: run Weakest 30 and your due reviews.` : e.unseen === 0 ? "All new cards are in; the rest is review." : e.onTrack ? `${e.needPerDay} new a day finishes them ${e.reviewDays ? `with ${e.reviewDays} review-only day${e.reviewDays === 1 ? "" : "s"} before the exam` : "by the day before the exam"} (your limit is ${cap}).` : e.finishOn! >= d.date ? `You won't see all ${e.unseen.toLocaleString()} new cards before the exam: at your limit of ${cap} a day, about ${Math.max(0, e.unseen - cap * e.daysLeft).toLocaleString()} will still be new on the day. ${e.needPerDay} a day would cover them.` : `Needs ${e.needPerDay} new cards a day; your limit is ${cap}. At that pace the last new cards come in on ${dmy(e.finishOn!)}, leaving fewer review-only days.`}</p>
         <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
           <button className="btn grow" onClick={() => onStudy(d.path, d.view)}>Study this</button>
           <button className="btn grow" disabled={!e.seen} onClick={() => onStudy(d.path, d.view, { preset: store.examWeakest(d), title: d.name + " · weakest" })}>Weakest 30</button>
-          {!e.onTrack && store.settings.newPerDay < e.needPerDay && <button className="btn grow" onClick={async () => { await store.saveSettings({ newPerDay: e.needPerDay }); snackbar(`New cards a day: ${e.needPerDay}`); }}>Set {e.needPerDay} a day</button>}
+          {!last && !e.onTrack && store.settings.newPerDay < e.needPerDay && <button className="btn grow" onClick={async () => { await store.saveSettings({ newPerDay: e.needPerDay }); snackbar(`New cards a day: ${e.needPerDay}`); }}>Set {e.needPerDay} a day</button>}
         </div>
       </div>); })}
   </>);

@@ -1,0 +1,20 @@
+/* WP13 — Today: "all done" and "goal reached" get a small moment. Arcade: a gold rind, a popping ★ and two pixel sparkles
+   that burst once; Clean/Paper: the ★ and the words only. Reduced motion (styles.css) stops every animation, the gold stays. */
+.hero .goal-star { display: inline-block; color: var(--yuzu); margin-right: 6px; }
+.hero .goal-reached { color: var(--yuzu) !important; }
+.hero .all-done { color: var(--text); }
+.today-empty .btn { min-height: 44px; white-space: nowrap; }
+.today-empty .btn.primary { flex-basis: 100%; }
+
+:root[data-ui="arcade"] .hero.goal-done { border-color: #f2d34b; }
+:root[data-ui="arcade"] .hero.goal-done .ring { filter: drop-shadow(2px 0 0 #c9971c) drop-shadow(-2px 0 0 #c9971c) drop-shadow(0 2px 0 #f2d34b) drop-shadow(0 -2px 0 #f2d34b); }
+:root[data-ui="arcade"] .hero .goal-star { font-family: var(--px); font-size: 12px; line-height: 1; vertical-align: 1px; animation: wp13-pop .45s steps(3, jump-end) 1, wp13-twinkle .8s steps(2, jump-none) .45s 4; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child { position: relative; display: inline-block; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::before,
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::after { content: "✦"; position: absolute; font-family: var(--px); font-size: 14px; color: #f2d34b; pointer-events: none; opacity: 0; animation: wp13-spark 1.2s steps(4, jump-end) .2s 2; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::before { top: -4px; right: -2px; }
+:root[data-ui="arcade"] .hero.goal-done > span:first-child::after { bottom: 2px; left: -4px; animation-delay: .5s; }
+
+@keyframes wp13-pop { 0% { transform: scale(0); } 66% { transform: scale(1.6); } 100% { transform: scale(1); } }
+@keyframes wp13-twinkle { 50% { opacity: .3; } }
+@keyframes wp13-spark { 0% { opacity: 0; transform: scale(.5); } 25% { opacity: 1; transform: scale(1.4); } 75% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(.5); } }
