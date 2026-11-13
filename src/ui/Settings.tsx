@@ -362,7 +362,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device. A quick backup holds only what cannot be rebuilt (reviews, scheduling, settings, your hooks; about 1 MB); the full one includes every card's text.</div>
         <div className="row" style={{ marginTop: 10 }}>
           <button className="btn grow" onClick={async () => { const blob = await store.backupBlob(true); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-quick-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Quick backup</button>
-          <button className="btn grow" onClick={async () => { snackbar("Preparing the backup file…"); const blob = await store.backupBlob(); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }}>Full backup</button>
+          <FullBackupButton />
           <button className="btn grow" onClick={() => restoreRef.current?.click()}>Restore backup</button>
           <input ref={restoreRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={async (e) => {
             const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; setDataMsg("");
@@ -455,14 +455,16 @@ function AutoSend({ busy }: { busy: boolean }) {
   );
 }
 
+/** The last simulated curve, kept across visits to Settings (it took 0.2–0.8 s to redo on every visit). */
+let tradeoffMemo: { key: string; curve: Awaited<ReturnType<typeof retentionTradeoff>>["curve"] } | null = null;
 /** Target recall as a slider: under the thumb, live, what that choice costs (a simulated year with the user's own data). */
 function RetentionSlider() {
   const s = store.settings; const perDay = Math.max(1, s.newPerDay || 10);
-  const [rows, setRows] = useState<{ key: string; curve: Awaited<ReturnType<typeof retentionTradeoff>>["curve"] } | null>(null);
+  const [rows, setRows] = useState<{ key: string; curve: Awaited<ReturnType<typeof retentionTradeoff>>["curve"] } | null>(() => tradeoffMemo);
   const key = `${perDay}:${s.scheduler.w.join(",")}:${store.reviews.length >> 9}`; // redo when the inputs change (or every ~500 reviews)
   useEffect(() => {
     if (rows?.key === key) return; let live = true;
-    const t = setTimeout(() => retentionTradeoff(s.scheduler.w, store.reviews, { perDay, from: 0.8, to: 0.95 }).then((r) => { if (live) setRows({ key, curve: r.curve }); }), 400);
+    const t = setTimeout(() => retentionTradeoff(s.scheduler.w, store.reviews, { perDay, from: 0.8, to: 0.95 }).then((r) => { tradeoffMemo = { key, curve: r.curve }; if (live) setRows(tradeoffMemo); }), 400);
     return () => { live = false; clearTimeout(t); };
   }, [key]);
   const at = (v: number) => rows?.key === key ? rows.curve.find((r) => Math.abs(r.r - v) < 0.001) : undefined;
@@ -668,3 +670,13 @@ function ReplacedEdits() {
   );
 }
 const stripTags = (h: string) => h.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+/** Full backup, written a slice at a time with a percentage (one JSON.stringify of the whole collection froze a tablet for ~8 s). */
+function FullBackupButton() {
+  const [pct, setPct] = useState<number | null>(null);
+  return <button className="btn grow" disabled={pct !== null} onClick={async () => {
+    setPct(0);
+    try { const blob = await store.backupBlob(false, (f) => setPct(Math.round(f * 100))); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `yuzu-backup-${dmy()}.json`; try { localStorage.setItem("yuzu-last-backup", String(Date.now())); } catch { /* fine */ } a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
+    catch (e: any) { snackbar("Backup failed: " + (e?.message ?? e)); }
+    finally { setPct(null); }
+  }}>{pct === null ? "Full backup" : `Backing up… ${pct}%`}</button>;
+}

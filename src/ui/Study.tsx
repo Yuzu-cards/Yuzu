@@ -394,7 +394,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     if (!card || busy.current) return;
     busy.current = true;
     const ms = Date.now() - shownAt.current;
-    const before = store.stats().today;
+    const before = store.reviewedToday().reviews; // not stats(): that walks the whole review log for a streak this throws away
     // A "surprise": forgotten although the scheduler was ≥90% sure you'd know it (a mature card). Confident errors are
     // the ones corrected best when looked at right away (the hypercorrection effect).
     const rNow = card.lastReview ? retrievability((Date.now() - card.lastReview) / DAY, card.stability) : 0;
