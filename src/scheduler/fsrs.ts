@@ -113,11 +113,18 @@ export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = 
   const scheduleStep = (idx: number, stepList: number[]) => {
     next.step = idx; next.due = now + stepList[idx] * 60000;
   };
+  // Hard keeps the card on its step but never waits as briefly as Again (Anki's convention): on the first step it is the
+  // average of the first two steps (1m/10m → 6m), or 1.5× a single step (at most a day more); later steps repeat.
+  const scheduleHard = (idx: number, stepList: number[]) => {
+    const s = stepList[idx];
+    const mins = idx > 0 ? s : stepList.length > 1 ? (stepList[0] + stepList[1]) / 2 : Math.min(s * 1.5, s + 1440);
+    next.step = idx; next.due = now + mins * 60000;
+  };
 
   if (before === "new" || before === "learning") {
     next.state = "learning";
     if (g === 1) scheduleStep(0, cfg.learningSteps);
-    else if (g === 2) scheduleStep(Math.min(card.step, cfg.learningSteps.length - 1), cfg.learningSteps);
+    else if (g === 2) scheduleHard(Math.min(card.step, cfg.learningSteps.length - 1), cfg.learningSteps);
     else if (g === 3) {
       const nextStep = before === "new" ? 0 + 1 : card.step + 1;
       if (nextStep >= cfg.learningSteps.length) scheduleReview(); else scheduleStep(nextStep, cfg.learningSteps);
@@ -130,7 +137,7 @@ export function rate(card: Card, g: Rating, now: number, cfg: SchedulerConfig = 
     } else scheduleReview();
   } else { // relearning
     if (g === 1) scheduleStep(0, cfg.relearningSteps);
-    else if (g === 2) scheduleStep(Math.min(card.step, cfg.relearningSteps.length - 1), cfg.relearningSteps);
+    else if (g === 2) scheduleHard(Math.min(card.step, cfg.relearningSteps.length - 1), cfg.relearningSteps);
     else {
       const nextStep = card.step + 1;
       if (g === 4 || nextStep >= cfg.relearningSteps.length) scheduleReview(); else scheduleStep(nextStep, cfg.relearningSteps);

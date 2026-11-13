@@ -44,3 +44,14 @@ export function wireSounds(root: ShadowRoot, side: "front" | "back"): string[] {
 export function cardSounds(root: ShadowRoot | null | undefined): string[] {
   return root ? [...root.querySelectorAll<HTMLElement>("button.yz-sound[data-src]")].map((b) => b.dataset.src!) : [];
 }
+
+/** True while a card sound or the card's own spoken word (autoplay) is still going. */
+export function soundsBusy(): boolean {
+  let tts = false; try { tts = typeof speechSynthesis !== "undefined" && (speechSynthesis.speaking || speechSynthesis.pending); } catch { /* fine */ }
+  return queue.length > 0 || (!!player && !player.paused && !!player.getAttribute("src")) || tts;
+}
+/** Resolves once the card's own sounds have finished (or after `maxMs`), so hands-free never talks over them. */
+export function whenSoundsDone(maxMs = 8000): Promise<void> {
+  const end = Date.now() + maxMs;
+  return new Promise((resolve) => { const tick = () => (!soundsBusy() || Date.now() > end ? resolve() : setTimeout(tick, 120)); tick(); });
+}

@@ -41,7 +41,7 @@ export const SKIN_CSS = `
 .card table { border-collapse: collapse !important; margin: 10px 0 !important; font-size: .86em !important; width: auto !important; max-width: 100%; display: block; overflow-x: auto; }
 .card td, .card th { border: 1px solid var(--rule) !important; padding: 5px 8px !important; background: transparent !important; color: inherit !important; text-align: left !important; vertical-align: top; }
 .card th { background: var(--tint) !important; font-weight: 700; }
-.card img { max-width: 100% !important; height: auto !important; border: 2px solid var(--rule); border-radius: 0 !important; margin: 8px auto !important; display: block; background: #fff; }
+.card img { box-sizing: border-box; max-width: 100% !important; height: auto !important; border: 2px solid var(--rule); border-radius: 0 !important; margin: 8px auto !important; display: block; background: #fff; }
 .card .typeans, .card input { font-family: inherit !important; }
 /* language cards: the deck's big headword stays big */
 .card .word, .card .german, .card .front-word, .card #word { font-size: 1.35em !important; font-weight: 700; }

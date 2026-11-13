@@ -30,7 +30,7 @@ try {
   const t2 = await page.locator(".mcq-opt span:nth-child(2)").allInnerTexts(); const ri = t2.findIndex((t) => /Adrenaline IM|^Hyperkalaemia/.test(t));
   await page.keyboard.press(String(ri + 1)); await page.waitForSelector(".answer-bar");
   ok("pressing a number picks that option; a right pick suggests Good", (await page.locator(".mcq-opt.right").count()) === 1 && (await page.locator(".answer-bar .good.suggest").count()) === 1);
-  const back = await page.evaluate(() => (document.querySelector(".study .card-host") as any)?.shadowRoot?.textContent ?? "") + " " + (await page.locator(".mcq").innerText());
+  const back = await page.evaluate(() => [...document.querySelectorAll(".study .card-host")].map((h: any) => h.shadowRoot?.textContent ?? "").join(" ")) + " " + (await page.locator(".mcq").innerText()); // the explanation is its own piece after the options
   ok("the explanation shows on the back", /anterolateral thigh|Peaked T is the first change/.test(back), back.slice(0, 160).replace(/\s+/g, " "));
   await page.screenshot({ path: "test/e2e/shots/mcq.png" });
   // ---- Image occlusion: draw two boxes in the editor, each becomes a card; study hides that box

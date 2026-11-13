@@ -405,7 +405,7 @@ details.how code { font-size: 12px; background: var(--ink-2); padding: 0 4px; }
 :root[data-size="large"] .answer-bar button small { font-size: 13px; }
 /* "Dark cards" stays a dark card in the light interface (the card's own text colours are for a dark card) */
 :root[data-ui="paper"] .paper.slate { background: #1B1E2D; color: #ECEEF7; border-color: #383E57; }
-:root[data-ui="paper"] .slate :is(.mcq-opt, .typeans) { background: #262A3D; border-color: #383E57; color: #ECEEF7; }
+:root[data-ui="paper"] .slate :is(.mcq-opt:not(.right):not(.wrong), .typeans) { background: #262A3D; border-color: #383E57; color: #ECEEF7; }
 
 /* ---- Today: "More for today" fold; Settings: jump row and where-it-lives tags */
 .more-today { margin-top: 10px; }

@@ -17,7 +17,9 @@ let current: SpeechSynthesisUtterance | null = null;
 export function speak(text: string, lang = "en-US"): Promise<void> {
   return new Promise((resolve) => {
     if (!text || typeof speechSynthesis === "undefined") return resolve();
-    try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = lang; u.rate = 1.02; current = u; u.onend = () => resolve(); u.onerror = () => resolve(); speechSynthesis.speak(u); } catch { resolve(); }
+    try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = lang; u.rate = lang.startsWith("en") ? 1.02 : 0.95;
+      // the device's voice for that language (German read with the English voice is wrong practice)
+      const v = speechSynthesis.getVoices?.().find((x) => x.lang.toLowerCase().replace("_", "-").startsWith(lang.slice(0, 2).toLowerCase())); if (v) u.voice = v; current = u; u.onend = () => resolve(); u.onerror = () => resolve(); speechSynthesis.speak(u); } catch { resolve(); }
   });
 }
 export function stopSpeaking() { try { current = null; if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); } catch { /* fine */ } }

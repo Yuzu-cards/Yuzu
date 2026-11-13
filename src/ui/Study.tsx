@@ -5,7 +5,7 @@ import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle } from "../lib/render";
 import { sanitizeFragment, sanitizeCss } from "../lib/sanitize";
 import { MCQ_ID, parseOptions, shuffled } from "../lib/mcq";
-import { latinDigits } from "../lib/num";
+import { expectedAnswer, checkTyped, plainField, VOCAB_NT } from "../lib/typed";
 import { voiceSupported, speak, stopSpeaking, listen, stopListening, spokenText, backOnly, RATING_WORDS, LETTER_WORDS } from "../lib/voice";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
 import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
@@ -16,7 +16,7 @@ import { useHold, Slider, buzz, confirmSheet } from "./kit";
 import { WordSheet, wordAt, type WordHit } from "./Word";
 import { sfx } from "./sfx";
 import { SKIN_CSS, isShortCard } from "./cardskin";
-import { wireSounds, playSounds, stopSounds, cardSounds } from "./sound";
+import { wireSounds, playSounds, stopSounds, cardSounds, whenSoundsDone } from "./sound";
 
 export const BASE_CSS = `
 :host { display:block; contain: layout paint; }
@@ -44,7 +44,7 @@ hr#answer { border: 0; border-top: 2px dashed rgba(0,0,0,.18); margin: 16px -4px
 .night_mode .card, .card.night_mode { color: #f2f2f0; background: transparent; }
 `;
 
-export function CardView({ html, css, dark, side = "front", autoplay = false }: { html: string; css: string; dark: boolean; side?: "front" | "back"; autoplay?: boolean }) {
+export function CardView({ html, css, dark, side = "front", autoplay = false, quiet = false }: { html: string; css: string; dark: boolean; side?: "front" | "back"; autoplay?: boolean; /** a second piece of the same card (MCQ explanation): wires its buttons but never starts or stops sounds */ quiet?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const host = ref.current!;
@@ -57,10 +57,11 @@ export function CardView({ html, css, dark, side = "front", autoplay = false }: 
     root.querySelector(".card")!.append(sanitizeFragment(html));
     host.scrollTop = 0;
     const own = wireSounds(root, side);
+    if (quiet) return;
     if (autoplay && own.length) playSounds(own); else stopSounds();
   }, [html, css, dark]);
-  useEffect(() => () => stopSounds(), []);
-  return <div ref={ref} className={"card-host" + (dark ? " dark" : "")} />;
+  useEffect(() => () => { if (!quiet) stopSounds(); }, []);
+  return <div ref={ref} className={"card-host" + (dark ? " dark" : "") + (quiet ? " card-tail" : "")} />;
 }
 
 /** One line, rotating, after a session. Each is a well-replicated finding, phrased as something to do. */
@@ -106,6 +107,36 @@ function MemoryCurve({ card }: { card: Card }) {
       <div className="row small muted" style={{ justifyContent: "space-between" }}><span>last review</span><span style={{ color: "var(--yuzu)" }}>due {humanInterval((card.due - card.lastReview))} after</span><span>now: {Math.round(rn * 100)}%</span></div>
     </div>
   );
+}
+
+/** How the person is driving study right now, for the hints: a keyboard (a fine pointer, or a key pressed), a gamepad, or touch. */
+function useInputMode(): "touch" | "keys" | "pad" {
+  const [mode, setMode] = useState<"touch" | "keys" | "pad">(() => {
+    try { if ([...(navigator.getGamepads?.() ?? [])].some(Boolean)) return "pad"; return matchMedia("(hover: hover) and (pointer: fine)").matches ? "keys" : "touch"; } catch { return "touch"; }
+  });
+  useEffect(() => {
+    let padAt = 0;
+    const onPad = () => { padAt = Date.now(); setMode("pad"); };
+    // a real key (the pad sends keys too; typing into the answer box on a phone's own keyboard doesn't count)
+    const onKey = (e: KeyboardEvent) => { const t = e.target as HTMLElement | null; if (e.isTrusted && Date.now() - padAt > 300 && e.key !== "Unidentified" && !(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable))) setMode("keys"); };
+    const onPointer = (e: PointerEvent) => { if (e.pointerType === "touch") setMode("touch"); };
+    window.addEventListener("yuzu-pad", onPad); window.addEventListener("keydown", onKey, true); window.addEventListener("pointerdown", onPointer, true);
+    return () => { window.removeEventListener("yuzu-pad", onPad); window.removeEventListener("keydown", onKey, true); window.removeEventListener("pointerdown", onPointer, true); };
+  }, []);
+  return mode;
+}
+/** The key (or pad direction) for a rating button; shown only when a keyboard or pad is in use (CSS). */
+const KeyBadge = ({ k, pad }: { k: string; pad: string }) => <kbd className="key-badge" aria-hidden="true"><span className="kb-key">{k}</span><span className="kb-pad">{pad}</span></kbd>;
+
+/** Hands-free on a Yuzu vocab card: the German side in the note's language (Lang, default de-DE), the meaning in English.
+ *  `played`: the card's own autoplay already said it on this side, so it is not read a second time. */
+function vocabSpeech(note: { fields: string[] } | undefined, nt: { id: string; fields: string[] } | undefined, ord: number, html: string, back: boolean): { text: string; lang: string; played: boolean } | null {
+  if (!note || !nt || nt.id !== VOCAB_NT) return null;
+  const f = (n: string) => plainField(note.fields[nt.fields.indexOf(n)] ?? "");
+  const german = (ord === 0) !== back; // word → meaning: German on the front; meaning → word: German on the back
+  if (!german) return { text: f("Meaning"), lang: "en-US", played: false };
+  const part = back ? html.slice(Math.max(0, html.search(/<hr[^>]*id=["']?answer/i))) : html;
+  return { text: [f("Article"), f("Word")].filter(Boolean).join(" "), lang: f("Lang") || "de-DE", played: !!store.settings.autoplay && /class="yz-sound[ "][^>]*data-src/.test(part) };
 }
 
 const STAMP_HINT: Record<string, string> = {
@@ -154,7 +185,7 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
         {!editing ? (
           <>
             <div className="stat-grid" style={{ marginTop: 0 }}>
-              <div className="stat" data-hint={`State|${STAMP_HINT[card.suspended ? "suspended" : card.state] ?? ""}`}><b>{card.state}</b><span>state</span></div>
+              <div className="stat stat-state" data-hint={`State|${STAMP_HINT[card.suspended ? "suspended" : card.state] ?? ""}`}><b>{card.suspended ? "paused" : card.state}</b><span>state</span></div>
               <div className="stat" data-hint="Stability (S)|How long until your recall of this card drops to 90%. Grows with every successful review."><b>{card.stability ? humanInterval(card.stability * DAY) : "–"}</b><span>stability</span></div>
               <div className="stat" data-hint="Difficulty (D)|1 = easy, 10 = hard for you. Again and Hard push it up; it drifts back slowly. Harder cards grow their intervals more slowly."><b>{card.difficulty ? card.difficulty.toFixed(1) : "–"}</b><span>difficulty /10</span></div>
               <div className="stat" data-hint="Recall now (R)|The predicted chance you'd remember it right now, from your forgetting curve. It comes back when R reaches your target."><b>{r === null ? "–" : Math.round(r * 100) + "%"}</b><span>recall now</span></div>
@@ -213,6 +244,11 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     saveSession({ scope: { path, view, only, title }, ids: queue.map((c) => c.id), idx, plan, done: doneCount, results, startedAt: startedAt.current, savedAt: Date.now() });
   }, [queue, idx, plan, doneCount, results]);
   const [toast, setToast] = useState("");
+  const inputMode = useInputMode();
+  // What happened this session that a toast announced, kept for the summary (a toast on the last card is gone in 1.4 s).
+  const [events, setEvents] = useState<{ goal: boolean; matured: number; leeches: { lapses: number; act: string }[] }>({ goal: false, matured: 0, leeches: [] });
+  const [grew, setGrew] = useState<{ n: number; at: number } | null>(null); // missed cards put back into the queue just now
+  useEffect(() => { if (!grew) return; const t = setTimeout(() => setGrew(null), 2600); return () => clearTimeout(t); }, [grew]);
   const [info, setInfo] = useState(false);
   const [rev, setRev] = useState(0);
   const shownAt = useRef(Date.now());
@@ -263,7 +299,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     const now = Date.now(); const remaining = new Set(queue.slice(idx).map((c) => c.id));
     const back = queue.slice(0, idx).map((c) => store.cards.get(c.id)!).filter((c) => c && !c.suspended && (c.state === "learning" || c.state === "relearning") && c.due <= now && !remaining.has(c.id));
     if (!back.length) return;
-    setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); return [...q.slice(0, at), ...add, ...q.slice(at)]; });
+    setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); setGrew({ n: add.length, at: now }); return [...q.slice(0, at), ...add, ...q.slice(at)]; });
   }, [idx]);
 
   useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setPicked(null); setInfo(false); setTyped(""); setHint(false); setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); }, [card?.id]);
@@ -323,15 +359,18 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     if (!hands || !card || !rendered) return; let dead = false; const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     // a beat first: when the card changes the answer side is still showing for one render, and must not be read
     const t = setTimeout(() => { (async () => {
+      // the card's own sound (a recording, or the German word said by the device on autoplay) goes first, never cut off
+      await whenSoundsDone(); if (dead) return;
+      const v = vocabSpeech(note, nt, card.ord, showAnswer ? rendered.back : rendered.front, showAnswer);
       if (!showAnswer) {
-        const q = spokenText(rendered.front); const opts = mcq ? mcq.map((o, i) => `${String.fromCharCode(65 + i)}. ${o.text}`).join(". ") : "";
-        await speak(opts ? `${q}. ${opts}` : q); if (dead) return;
+        const q = v ? v.text : spokenText(rendered.front); const opts = mcq ? mcq.map((o, i) => `${String.fromCharCode(65 + i)}. ${o.text}`).join(". ") : "";
+        if (!v?.played) await speak(opts ? `${q}. ${opts}` : q, v?.lang); if (dead) return;
         if (mcq) { const k = await listen(LETTER_WORDS, 12000); if (dead) return; if (k !== null && mcq[Number(k)]) { setPicked(Number(k)); setShowAnswer(true); return; } }
         else await wait(Math.min(9000, 3000 + q.split(" ").length * 120));
         if (dead) return; setShowAnswer(true);
       } else {
-        const say = mcq && picked !== null ? `${mcqRight ? "Correct." : "Not quite."} ${mcq.find((o) => o.correct)?.text ?? ""}. ${backOnly(rendered.back)}` : backOnly(rendered.back);
-        await speak(say); if (dead) return;
+        const say = mcq && picked !== null ? `${mcqRight ? "Correct." : "Not quite."} ${mcq.find((o) => o.correct)?.text ?? ""}. ${rendered.mcqTail !== undefined ? spokenText(rendered.mcqTail) : backOnly(rendered.back)}` : v ? v.text : backOnly(rendered.back);
+        if (!v?.played) await speak(say, v?.lang); if (dead) return;
         for (let tryNo = 0; tryNo < 2; tryNo++) {
           const g = await listen(RATING_WORDS, 12000); if (dead) return;
           if (g) { answer(Number(g) as Rating); return; }
@@ -343,16 +382,10 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     return () => { dead = true; clearTimeout(t); stopSpeaking(); stopListening(); };
   }, [hands, card?.id, showAnswer]);
   const typing = !!card && store.settings.typeAnswers && card.source.startsWith("Languages") && !!nt && nt.kind === "standard";
-  const answerText = useMemo(() => {
-    if (!typing || !nt || !note) return "";
-    const t = nt.templates[Math.min(card!.ord, nt.templates.length - 1)]; const used = (fmt: string) => [...fmt.matchAll(/\{\{([^#/^}][^}]*)\}\}/g)].map((m) => m[1].split(":").pop()!.trim());
-    const front = new Set(used(t.qfmt)); const back = used(t.afmt).filter((f) => !front.has(f) && f !== "FrontSide");
-    const idx = back.map((f) => nt.fields.indexOf(f)).filter((i) => i >= 0);
-    return idx.map((i) => note.fields[i]).join(" ").replace(/\[sound:[^\]]+\]/g, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
-  }, [card?.id, typing]);
-  const norm = (x: string) => latinDigits(x).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const expected = useMemo(() => (typing && nt && note ? expectedAnswer(nt, note, card!.ord) : null), [card?.id, typing]);
+  const answerText = expected?.shown ?? "";
   const hintText = useMemo(() => (card ? hintFor(note ?? undefined, card.ord) : null), [card?.id]);
-  const typedOk = typed && answerText ? norm(typed) === norm(answerText) || norm(answerText).split(/[;,/]|\s-\s/).map((x) => x.trim()).includes(norm(typed)) : null;
+  const verdict = typed && expected ? checkTyped(typed, expected) : null; const typedOk = verdict?.ok ?? null;
 
   async function saveHook() { if (!card) return; await store.setHook(card.nid, hookText); setHookOpen(false); flash(hookText.trim() ? "Hook saved" : "Hook removed"); }
   const busy = useRef(false);
@@ -369,12 +402,12 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     const view = snap();
     try { await store.answer(card.id, g, ms); } finally { busy.current = false; }
     const undoAct: Act = { kind: "grade", cardId: card.id, view }; push(undoAct);
-    if (before < store.settings.dailyGoal && before + 1 >= store.settings.dailyGoal) { setTimeout(() => sfx.goal(), 180); flash("Daily goal reached ★"); }
+    if (before < store.settings.dailyGoal && before + 1 >= store.settings.dailyGoal) { setTimeout(() => sfx.goal(), 180); flash("Daily goal reached ★"); setEvents((e) => ({ ...e, goal: true })); }
     setResults((r) => [...r, { id: card.id, g, ms, sure }]);
-    if (store.lastMatured === card.id) { flash("Matured ★ — next review 3+ weeks away"); setTimeout(() => sfx.goal(), 120); }
+    if (store.lastMatured === card.id) { flash("Matured ★ — next review 3+ weeks away"); setTimeout(() => sfx.goal(), 120); setEvents((e) => ({ ...e, matured: e.matured + 1 })); }
     setDoneCount((d) => d + 1);
     if (store.lastAnswer?.leech && store.lastAnswer.cardId === card.id) {
-      const act = store.settings.leechAction ?? "claude"; const lapses = store.lastAnswer.lapses;
+      const act = store.settings.leechAction ?? "claude"; const lapses = store.lastAnswer.lapses; setEvents((e) => ({ ...e, leeches: [...e.leeches, { lapses, act }] }));
       if (act === "ask") setLeech({ cardId: card.id, lapses });
       else if (act === "pause") { store.bulk([card.id], { suspended: true }); undoAct.unpause = true; flash(`Forgotten ${lapses} times — paused (Library → Leeches)`); }
       else flash(`Forgotten ${lapses} times — sent to Claude to rewrite`); // marked by the store
@@ -460,8 +493,11 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
 
   if (plan === null) {
     const mins = (n: number) => Math.max(1, Math.round((n * secs) / 60));
-    const options = [fullQueue.length, 25, 50].filter((n, i, a) => n <= fullQueue.length && a.indexOf(n) === i);
-    const byMin = (m: number) => Math.min(fullQueue.length, Math.max(5, Math.round((m * 60) / secs)));
+    const all = fullQueue.length; const byMin = (m: number) => Math.min(all, Math.max(5, Math.round((m * 60) / secs)));
+    // Only choices that differ: no slider past the whole queue, no minute button that already means "all", no card count twice.
+    const maxMin = Math.min(180, Math.ceil(mins(all) / 5) * 5); const sliding = maxMin > 10; const val = Math.min(planMin, maxMin);
+    const minuteOpts = [10, 25].filter((m, i, a) => byMin(m) < all && (i === 0 || byMin(m) !== byMin(a[i - 1])));
+    const options = [25, 50].filter((n) => n < all && !minuteOpts.some((m) => byMin(m) === n)).concat(sliding ? [all] : []); // without the slider, Start is "all"
     return (
       <div className="study">
         <div className="study-top"><button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button><div className="grow" /></div>
@@ -471,11 +507,11 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             <div>cards ready · about {mins(fullQueue.length)} min</div>
             <p className="muted small">Based on your usual {secs}s per card. Pick how much to do now:</p>
             <div style={{ textAlign: "left", marginTop: 12 }}>
-              <Slider label="Session length" value={planMin} min={5} max={Math.max(10, Math.min(180, Math.ceil(mins(fullQueue.length) / 5) * 5))} step={5} format={(v) => `${v} min`} onChange={setPlanMin} below={(v) => <div className="small muted">{byMin(v).toLocaleString()} cards</div>} />
-              <button className="btn primary block" onClick={() => { try { localStorage.setItem("yuzu-plan-min", String(planMin)); } catch { /* fine */ } const n = byMin(planMin); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>Start · {byMin(planMin).toLocaleString()} cards</button>
+              {sliding && <Slider label="Session length" value={val} min={5} max={maxMin} step={5} format={(v) => `${v} min`} onChange={setPlanMin} below={(v) => <div className="small muted">{byMin(v).toLocaleString()} cards</div>} />}
+              <button className="btn primary block" onClick={() => { if (sliding) { try { localStorage.setItem("yuzu-plan-min", String(val)); } catch { /* fine */ } } const n = sliding ? byMin(val) : all; setPlan(n); setQueue(fullQueue.slice(0, n)); }}>Start · {(sliding ? byMin(val) : all).toLocaleString()} {(sliding ? byMin(val) : all) === 1 ? "card" : "cards"}</button>
             </div>
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-              {[10, 25].map((m) => <button key={m} className="btn block" onClick={() => { const n = byMin(m); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{m} minutes <span className="muted small">· {byMin(m)} cards</span></button>)}
+              {minuteOpts.map((m) => <button key={m} className="btn block" onClick={() => { const n = byMin(m); setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{m} minutes <span className="muted small">· {byMin(m)} cards</span></button>)}
               {options.map((n) => <button key={n} className="btn block" onClick={() => { setPlan(n); setQueue(fullQueue.slice(0, n)); }}>{n === fullQueue.length ? `All ${n.toLocaleString()} cards` : `${n} cards`} <span className="muted small">· {mins(n)} min</span></button>)}
             </div>
           </div>
@@ -499,7 +535,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <div className="study-body">
           <div className="done">
             <div className="big">{doneCount}</div>
-            <div>cards in {mins} min{results.length ? ` · ${Math.round((ok / results.length) * 100)}% recalled` : ""}</div>
+            <div>{doneCount === 1 ? "card" : "cards"} in {mins} min{results.length ? ` · ${Math.round((ok / results.length) * 100)}% recalled` : ""}</div>
             {acts.current.length > 0 && <p className="small" style={{ margin: "8px 0 0" }}><button className="btn" onClick={undo}><IconUndo /> {{ grade: "Undo the last answer", pause: "Undo the pause", flag: "Undo the flag", delete: "Undo the delete", master: "Undo retiring it" }[acts.current[acts.current.length - 1].kind]}</button></p>}
             <p className="small muted tip">{TIPS[(doneCount + new Date().getDate()) % TIPS.length]}</p>
             {surprises.length > 0 && (
@@ -508,7 +544,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
                 <div className="small muted" style={{ margin: "4px 0 10px" }}>Mature cards you'd normally know. A second look now fixes them best.</div>
                 {surprises.slice(0, 5).map((c) => { const n = store.noteFor(c); return <div key={c.id} className="small" style={{ padding: "4px 0", borderTop: "1px solid var(--line-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n ? noteTitle(n, store.notetypeFor(n)) : ""}</div>; })}
                 <div className="row" style={{ gap: 8, marginTop: 10 }}>
-                  <button className="btn primary grow" onClick={() => { setQueue(surprises); setIdx(0); setPlan(surprises.length); setResults([]); setDoneCount(0); startedAt.current = Date.now(); }}>Look again now</button>
+                  <button className="btn primary grow" onClick={() => { setQueue(surprises); setIdx(0); setPlan(surprises.length); setResults([]); setDoneCount(0); setEvents({ goal: false, matured: 0, leeches: [] }); startedAt.current = Date.now(); }}>Look again now</button>
                   <button className="btn grow" onClick={async () => { await store.markImprove([...new Set(surprises.map((c) => c.nid))], ["unclear"], "I was sure but got it wrong — add a short 'why' and a contrast with what I confused it with."); flash("Sent to Cards to improve"); }}>Ask Claude why</button>
                 </div>
               </div>
@@ -518,25 +554,38 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
                 <b>{missedPlain.length} {surprises.length ? "more " : ""}missed</b>
                 <div className="small muted" style={{ margin: "4px 0 10px" }}>Going through them once more now, while they are fresh, is the cheapest review you will ever do.</div>
                 {missedPlain.slice(0, 5).map((c) => { const n = store.noteFor(c); return <div key={c.id} className="small" style={{ padding: "4px 0", borderTop: "1px solid var(--line-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n ? noteTitle(n) : ""}</div>; })}
-                <button className="btn primary block" style={{ marginTop: 10 }} onClick={() => { setQueue(missed); setIdx(0); setPlan(missed.length); setResults([]); setDoneCount(0); startedAt.current = Date.now(); }}>Redo the missed ones</button>
+                <button className="btn primary block" style={{ marginTop: 10 }} onClick={() => { setQueue(missed); setIdx(0); setPlan(missed.length); setResults([]); setDoneCount(0); setEvents({ goal: false, matured: 0, leeches: [] }); startedAt.current = Date.now(); }}>Redo the missed ones</button>
               </div>
             )}
             {slow.length > 0 && <p className="muted small">Slowest: {slow.map((r) => `${Math.round(r.ms / 1000)} s`).join(", ")} — correct but slow is a card worth reading twice.</p>}
-            {left > 0 && <p className="muted small">{left.toLocaleString()} more ready. <button className="btn" style={{ marginLeft: 6 }} onClick={() => { setQueue(store.queue(path, Date.now(), view, only)); setIdx(0); setPlan(left); setResults([]); setDoneCount(0); startedAt.current = Date.now(); }}>Keep going</button></p>}
+            {left > 0 && <p className="muted small">{left.toLocaleString()} more ready. <button className="btn" style={{ marginLeft: 6 }} onClick={() => { setQueue(store.queue(path, Date.now(), view, only)); setIdx(0); setPlan(left); setResults([]); setDoneCount(0); setEvents({ goal: false, matured: 0, leeches: [] }); startedAt.current = Date.now(); }}>Keep going</button></p>}
             {ahead.length > 0 && <p className="muted small">{ahead.length} learning card{ahead.length > 1 ? "s" : ""} will come back later today.</p>}
+            {(events.goal || events.matured > 0 || events.leeches.length > 0) && (
+              <div className="session-events small">
+                {events.goal && <div>★ Daily goal reached</div>}
+                {events.matured > 0 && <div>★ {events.matured} card{events.matured > 1 ? "s" : ""} matured — next review 3+ weeks away</div>}
+                {(() => { const sent = events.leeches.filter((l) => l.act === "claude").length, paused = events.leeches.filter((l) => l.act === "pause").length, asked = events.leeches.length - sent - paused; return <>
+                  {sent > 0 && <div>{sent} card{sent > 1 ? "s" : ""} sent to Claude to rewrite (forgotten {events.leeches.filter((l) => l.act === "claude").map((l) => l.lapses).join(", ")} times)</div>}
+                  {paused > 0 && <div>{paused} card{paused > 1 ? "s" : ""} kept slipping and {paused > 1 ? "were" : "was"} paused (Library → Leeches)</div>}
+                  {asked > 0 && <div>{asked} card{asked > 1 ? "s" : ""} kept slipping (marked for a look)</div>}
+                </>; })()}
+              </div>
+            )}
             <button className="btn primary" onClick={onExit} style={{ marginTop: 16 }}>Done</button>
           </div>
         </div>
+        {toast && <div className="toast">{toast}</div>}
       </div>
     );
   }
 
   return (
-    <div className="study">
+    <div className="study" data-input={inputMode}>
       <div className="study-top">
         <button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button>
         <div className="progress"><i style={{ width: `${total ? (idx / total) * 100 : 0}%` }} /></div>
         <span className="small muted num" style={{ minWidth: 64, textAlign: "right" }} title="cards left · minutes left">{total - idx} left · {Math.max(1, Math.round(((total - idx) * secs) / 60))}m</span>
+        {grew && <span className="left-grew small" key={grew.at} title="Cards you just missed come back after their short step">+{grew.n} missed card{grew.n > 1 ? "s" : ""} back</span>}
         <button className="icon-btn" onClick={undo} aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!canUndo}><IconUndo /></button>
         <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
       </div>
@@ -568,7 +617,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       <div className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onContextMenu={(e) => { if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; e.preventDefault(); setMenu(true); }} onClick={() => { if (holdPaper.wasHeld()) return; if (!showAnswer) setShowAnswer(true); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         style={flying ? { transform: flyTo[flying] } : { transform: drag ? `translate(${drag.dx * 0.45}px, ${drag.dy * 0.35}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag && showAnswer && (() => { const g = dirOf(drag); const near = g ?? dirOf({ dx: drag.dx * 1.6, dy: drag.dy * 1.6 }); if (!near) return null; const [t, col] = SWIPE_LABEL[near]; return <div className="swipe-label" style={{ color: col, opacity: g ? 1 : 0.55, left: Math.max(8, Math.min(window.innerWidth - 110, drag.x - 50)), top: Math.max(60, drag.y - 120), position: "fixed" }}>{t}</div>; })()}
-        {rendered && <Paper card={card} html={showAnswer ? rendered.back : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>
+        {rendered && <Paper card={card} html={showAnswer ? (mcq && rendered.mcqBack !== undefined ? rendered.mcqBack : rendered.back) : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>
           {mcq && mcq.length > 0 && <div className="mcq" onClick={(e) => e.stopPropagation()}>
             {mcq.map((o, i) => { const done = showAnswer; const cls = "mcq-opt" + (done ? (o.correct ? " right" : picked === i ? " wrong" : " idle") : ""); return <div key={i}>
               <button className={cls} disabled={done} onClick={() => { setPicked(i); setShowAnswer(true); }}><span className="mcq-key">{String.fromCharCode(65 + i)}</span><span>{o.text}</span>{done && o.correct && <b className="mcq-mark">✓</b>}{done && !o.correct && picked === i && <b className="mcq-mark">✗</b>}</button>
@@ -577,6 +626,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             {showAnswer && picked === null && <p className="small muted">You flipped the card without choosing.</p>}
             {showAnswer && picked !== null && <p className="small muted" style={{ margin: "8px 0 0" }}>{mcqRight ? "Correct — Good is suggested." : "Not this one — Again is suggested."}</p>}
           </div>}
+          {mcq && showAnswer && rendered.mcqTail && <CardView html={rendered.mcqTail} css={rendered.css} dark={dark} side="back" quiet />}
           {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={typeof matchMedia === "function" && matchMedia("(pointer: fine)").matches} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
           {!showAnswer && hint && hintText && <div className="hint-line" onClick={(e) => e.stopPropagation()}>{hintText}</div>}
           {showAnswer && (hookOpen || hookText) && (
@@ -589,18 +639,20 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
               ) : <button className="hook-text" onClick={() => setHookOpen(true)}><span className="small muted">my hook</span>{hookText}</button>}
             </div>
           )}
-          {typing && showAnswer && typed && <div style={{ marginTop: 10 }}><span className="chip" style={{ background: typedOk ? "rgba(127,163,74,.2)" : "rgba(214,90,60,.18)", color: typedOk ? "#4e6e2a" : "#a33a22" }}>{typedOk ? "✓ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span></div>}
+          {typing && showAnswer && typed && <div className="typed-res" style={{ marginTop: 10 }}><span className={"chip " + (typedOk ? "ok" : verdict && !verdict.ok && verdict.near ? "near" : "no")}>{typedOk ? "✓ " : verdict && !verdict.ok && verdict.near ? "≈ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span>{verdict && !verdict.ok && verdict.near && <span className="small muted typed-near">{verdict.near}</span>}</div>}
         </Paper>}
       </div>
-      {store.settings.swipe && swipes < 5 && <div className="swipe-tip">{showAnswer ? "Swipe: ← Again · ↓ Hard · → Good · ↑ Easy" : "Tap or swipe the card to see the answer · hold it for more"}</div>}
+      {inputMode === "keys" ? <div className="swipe-tip key-tip">{showAnswer ? "Keys: 1 Again · 2 Hard · 3 Good · 4 Easy · Space = Good · Ctrl+Z undo" : `Space: show the answer${mcq ? ` · 1–${mcq.length} pick an option` : ""}${hintText ? " · H hint" : ""} · M menu`}</div>
+        : inputMode === "pad" ? <div className="swipe-tip key-tip">{showAnswer ? "D-pad: ← Again · ↓ Hard · → Good · ↑ Easy · A = Good · X undo" : "A: show the answer · Y card info · Menu: more"}</div>
+        : store.settings.swipe && swipes < 5 && <div className="swipe-tip">{showAnswer ? "Swipe: ← Again · ↓ Hard · → Good · ↑ Easy" : "Tap or swipe the card to see the answer · hold it for more"}</div>}
       {!showAnswer ? (
         <div className="show-bar row">{hintText && !hint && <button className="btn" onClick={() => setHint(true)} title="First letters (h)">Hint</button>}<button className="btn primary grow" onClick={() => setShowAnswer(true)}>Show answer</button></div>
       ) : (
         <div className="answer-bar">
-          <button className={"again" + (mcq && picked !== null && !mcqRight ? " suggest" : "")} {...holdAgain.bind} data-hint={`Again|Forgot it. Back in ${intervals?.[1] ?? "a minute"}. Swipe ←. Hold: Again and mark it "needs improving". Key 1.`} onClick={() => { if (holdAgain.wasHeld()) return; answer(1); }}>Again<small>{intervals?.[1]}</small></button>
-          <button className="hard" data-hint={`Hard|Recalled with real effort. Next in ${intervals?.[2] ?? "…"}. Swipe ↓. Key 2.`} onClick={() => answer(2)}>Hard<small>{intervals?.[2]}</small></button>
-          <button className={"good" + (mcq && picked !== null && mcqRight ? " suggest" : "")} {...holdGood.bind} data-hint={`Good|Recalled. Next in ${intervals?.[3] ?? "…"}. Swipe →. Hold: Good, and this note's other cards wait for another day. Key 3 or space.`} onClick={() => { if (holdGood.wasHeld()) return; answer(3); }}>Good<small>{intervals?.[3]}</small></button>
-          <button className="easy" data-hint={`Easy|Instant and certain. Next in ${intervals?.[4] ?? "…"}. Swipe ↑. Key 4.`} onClick={() => answer(4)}>Easy<small>{intervals?.[4]}</small></button>
+          <button className={"again" + (mcq && picked !== null && !mcqRight ? " suggest" : "")} {...holdAgain.bind} data-hint={`Again|Forgot it. Back in ${intervals?.[1] ?? "a minute"}. Swipe ←. Hold: Again and mark it "needs improving". Key 1.`} onClick={() => { if (holdAgain.wasHeld()) return; answer(1); }}><KeyBadge k="1" pad="←" />Again<small>{intervals?.[1]}</small></button>
+          <button className="hard" data-hint={`Hard|Recalled with real effort. Next in ${intervals?.[2] ?? "…"}. Swipe ↓. Key 2.`} onClick={() => answer(2)}><KeyBadge k="2" pad="↓" />Hard<small>{intervals?.[2]}</small></button>
+          <button className={"good" + (mcq && picked !== null && mcqRight ? " suggest" : "")} {...holdGood.bind} data-hint={`Good|Recalled. Next in ${intervals?.[3] ?? "…"}. Swipe →. Hold: Good, and this note's other cards wait for another day. Key 3 or space.`} onClick={() => { if (holdGood.wasHeld()) return; answer(3); }}><KeyBadge k="3" pad="→" />Good<small>{intervals?.[3]}</small></button>
+          <button className="easy" data-hint={`Easy|Instant and certain. Next in ${intervals?.[4] ?? "…"}. Swipe ↑. Key 4.`} onClick={() => answer(4)}><KeyBadge k="4" pad="↑" />Easy<small>{intervals?.[4]}</small></button>
         </div>
       )}
       {improveFor && <ImproveSheet nids={[improveFor]} onClose={() => setImproveFor(null)} />}
