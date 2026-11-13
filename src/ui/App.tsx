@@ -16,7 +16,7 @@ type Tab = "today" | "library" | "progress" | "settings";
 const TAB_HINTS: Record<Tab, string> = {
   today: "Today|What's ready to study, your goal, the week ahead and suggestions.",
   library: "Library|Every card by deck, system, specialty, exam or tag. Filters, search, preview, edit.",
-  progress: "Progress|Streak, retention, mastery by system, mastered cards, recaps and how well the scheduler knows you.",
+  progress: "Progress|Your areas side by side, mastery by system, recaps, mastered cards and how well the scheduler knows you.",
   settings: "Settings|Studying, look and sound, media, sync, backups.",
 };
 

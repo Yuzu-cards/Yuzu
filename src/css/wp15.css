@@ -1,0 +1,22 @@
+/* WP15: Progress presentation (two columns on a desktop, readable heatmap and calibration chart), recap. */
+
+/* ---- Heatmap: weekday rows, month labels over the week columns, a legend in review counts */
+.heat-wrap { display: grid; grid-template-columns: auto repeat(12, minmax(0, 1fr)); gap: 3px; align-items: center; }
+.heat-wrap > i { display: block; aspect-ratio: 1; min-width: 0; }
+.heat-month { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: visible; line-height: 1.2; padding-bottom: 2px; }
+.heat-day { font-size: 11px; color: var(--muted); padding-right: 4px; line-height: 1; }
+.heat-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 10px; }
+.heat-legend i { display: inline-block; width: 12px; height: 12px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .heat-wrap > i, :root:is([data-ui="clean"], [data-ui="paper"]) .heat-legend i { border-radius: 3px; }
+
+/* ---- Calibration chart: fills its column, labels never clipped */
+.calib { display: block; width: 100%; max-width: 560px; height: auto; }
+
+/* ---- Desktop: Areas, Recap, Systems and Mastered on the left; the numbers, heatmap and calibration on the right */
+@media (min-width: 1100px) {
+  .progress-cols { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+  .progress-side > .stat-grid:first-child { margin-top: 0; }
+}
+
+/* ---- Recap: the nemesis button sits under its text */
+.recap-card .btn { font-size: 14px; }

@@ -15,12 +15,6 @@
 @media (min-width: 1700px) { .screen { max-width: 1480px; } }
 @media (min-width: 2300px) { .screen { max-width: 1680px; } }
 
-/* Progress in two columns: the overview on the left, calibration, systems and categories on the right */
-@media (min-width: 1500px) {
-  .progress-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 32px; align-items: start; }
-  .progress-cols .pcol > h2:first-child { margin-top: 0; }
-}
-.pcol { min-width: 0; }
 
 /* Library: on a wide screen the preview sits beside the list instead of covering it */
 @media (min-width: 1500px) {

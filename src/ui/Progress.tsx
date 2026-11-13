@@ -3,9 +3,12 @@ import { confirmSheet, Sheet } from "./kit";
 import { fmtDate } from "../lib/dates";
 import { DAY } from "../scheduler/fsrs";
 import { systemColor } from "./theme";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useBack } from "./useBack";
 import { Recap } from "./Recap";
 import { DiagnoseSheet } from "./Diagnose";
+import { heatWeeks } from "../lib/heat";
 
 /** What each mastery label means, with the stability thresholds from Settings. */
 function masteryHint(k: string) {
@@ -17,20 +20,32 @@ const MASTERY: { key: "durable" | "mastered" | "developing" | "learning"; label:
   { key: "developing", label: "developing", color: "var(--orange-dark)" }, { key: "learning", label: "learning", color: "var(--again)" },
 ];
 
+/**
+ * The data version, but changing at most once every `ms`: costly summaries (Areas, "known right now") follow every answer,
+ * sync and Drive pull while Progress is open, without recomputing over 146k cards on each of a burst of changes.
+ */
+export function useSettledVersion(ms = 2000) {
+  const v = store.getVersion(); const [key, setKey] = useState(v); const at = useRef(Date.now());
+  useEffect(() => { if (v === key) return; const t = setTimeout(() => { at.current = Date.now(); setKey(v); }, Math.max(0, at.current + ms - Date.now())); return () => clearTimeout(t); }, [v, key, ms]);
+  return key;
+}
+
 function Calibration() {
   const v = store.getVersion();
   const rows = useMemo(() => store.calibration(), [v]);
   if (!rows.length) return null;
-  const W = 300, H = 120, pad = 30;
-  const x = (p: number) => pad + p * (W - pad - 6), y = (p: number) => H - pad + 6 - p * (H - pad - 6);
+  const W = 320, H = 150, pad = 34, right = 18, top = 20; // room on the right for "100%", and for the axis titles below and left
+  const x = (p: number) => pad + p * (W - pad - right), y = (p: number) => H - pad - p * (H - pad - top);
   return (
     <div className="card-box">
       <div className="small muted" style={{ marginBottom: 6 }}>Predicted recall (horizontal) vs what actually happened (vertical). Dots on the line = the scheduler knows your memory.</div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: 420, display: "block" }}>
+      <svg className="calib" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Calibration: predicted recall against actual recall">
         <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(1)} stroke="var(--line)" strokeDasharray="2 4" strokeWidth={2} shapeRendering="crispEdges" />
         <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(0)} stroke="var(--line)" /><line x1={x(0)} y1={y(0)} x2={x(0)} y2={y(1)} stroke="var(--line)" />
-        {[0, 0.5, 1].map((t) => <text key={t} x={x(t)} y={H - 4} fontSize="10" fill="var(--muted)" textAnchor="middle" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
-        {[0.5, 1].map((t) => <text key={t} x={pad - 2} y={y(t) + 3} fontSize="10" fill="var(--muted)" textAnchor="end" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
+        {[0, 0.5, 1].map((t) => <text key={t} x={x(t)} y={H - pad + 14} fontSize="10" fill="var(--muted)" textAnchor="middle" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
+        <text x={x(0.5)} y={H - 3} fontSize="10" fill="var(--text)" textAnchor="middle">predicted recall</text>
+        <text x={pad + 4} y={11} fontSize="10" fill="var(--text)">actual recall</text>
+        {[0.5, 1].map((t) => <text key={t} x={pad - 3} y={y(t) + 3} fontSize="10" fill="var(--muted)" textAnchor="end" style={{ fontFamily: "var(--px)" }}>{t * 100}%</text>)}
         {rows.map((r) => { const h = 2 + Math.round(Math.min(4, Math.log10(r.n + 1) * 1.6)); return <rect key={r.bucket} data-hint={`Predicted ${r.bucket}|You remembered ${Math.round(r.observed * 100)}% of ${r.n.toLocaleString()} reviews the scheduler expected ${Math.round(r.predicted * 100)}% for. On the dotted line = it knows your memory.`} x={Math.round(x(r.predicted)) - h} y={Math.round(y(r.observed)) - h} width={h * 2} height={h * 2} fill="var(--orange)" shapeRendering="crispEdges"><title>{r.bucket}: predicted {(r.predicted * 100).toFixed(0)}%, observed {(r.observed * 100).toFixed(0)}% ({r.n} reviews)</title></rect>; })}
       </svg>
       <div className="small muted">{store.settings.fit ? `FSRS-6 weights fitted ${fmtDate(store.settings.fit.at)} on ${store.settings.fit.n.toLocaleString()} reviews.` : "Using default FSRS-6 weights; tuning to your history runs automatically once there is enough (Settings → Studying)."}</div>
@@ -49,14 +64,8 @@ function derive() {
   const counts = store.stateCounts();
   const now = Date.now();
   const start = store.dayStart(now);
-  // Last 12 weeks heatmap of reviews per day.
-  const days = 84;
-  const perDay = new Array(days).fill(0);
-  for (const r of store.reviews) {
-    const d = Math.floor((start + DAY - r.ts) / DAY); // 0 = today
-    if (d >= 0 && d < days) perDay[days - 1 - d]++;
-  }
-  const maxD = Math.max(1, ...perDay);
+  // Last 12 weeks heatmap of reviews per study day: one column per week (Sunday to Saturday), this week last.
+  const heat = heatWeeks(start, store.reviews);
   // Retention over last 30 days: share of non-Again ratings on review cards.
   let ok = 0, all = 0;
   for (const r of store.reviews) if (r.ts > now - 30 * DAY && r.state === "review") { all++; if (r.rating > 1) ok++; }
@@ -66,19 +75,45 @@ function derive() {
   const week = wk(start - 6 * DAY, now + 1), lastWeek = wk(start - 13 * DAY, start - 6 * DAY);
   const mastery = store.masteryBySystem(now);
   const systems = [...mastery].map(([name, m]) => ({ name, total: m.total, learned: m.total - m.unseen })).sort((a, b) => b.learned - a.learned || b.total - a.total);
-  const tree = store.tree();
-  const cats = tree.children.map((c) => ({ name: c.name, total: c.total, learned: c.reviewed, pct: c.total ? Math.round((c.reviewed / c.total) * 100) : 0 })).sort((a, b) => b.learned - a.learned);
-  return { stats, counts, perDay, maxD, retention, systems, mastery, cats, now, week, lastWeek };
+  return { stats, counts, heat, retention, systems, mastery, now, week, lastWeek };
 }
 
-function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery, cats, week, lastWeek, onBoss }: ReturnType<typeof derive> & { onBoss?: (path: string, view: "systems", name: string) => void }) {
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const HEAT = ["var(--ink-3)", "color-mix(in srgb, var(--orange) 45%, var(--ink-3))", "var(--orange)", "var(--yuzu)"];
+
+function Heatmap({ heat }: { heat: ReturnType<typeof heatWeeks> }) {
   return (
-    <div className="screen">
+    <div className="card-box heat-box">
+      <div className="heat-wrap">
+        <span />{heat.months.map((m, i) => <span key={i} className="heat-month">{m}</span>)}
+        {WEEKDAYS.map((d, r) => <span key={d} className="heat-day" style={{ gridRow: r + 2, gridColumn: 1 }}>{r % 2 === 0 ? d : ""}</span>)}
+        {heat.days.map((d, i) => d && <i key={i} style={{ gridRow: (i % 7) + 2, gridColumn: Math.floor(i / 7) + 2, background: HEAT[d.level] }} aria-label={`${fmtDate(d.at)}: ${d.n} reviews`} data-hint={`${WEEKDAYS[i % 7]} ${fmtDate(d.at)}|${d.n.toLocaleString()} review${d.n === 1 ? "" : "s"}${d.n ? ` · ${d.mins < 1 ? "under a minute" : d.mins + " min"}` : ""}`} />)}
+      </div>
+      <div className="heat-legend small muted"><span>Reviews a day:</span>{heat.legend.map(([l, t]) => <span key={l} className="row" style={{ gap: 4 }}><i style={{ background: HEAT[l] }} />{t}</span>)}</div>
+    </div>
+  );
+}
+
+function ProgressView({ stats, counts, heat, retention, systems, mastery, week, lastWeek, onBoss }: ReturnType<typeof derive> & { onBoss?: (path: string, view: "systems", name: string) => void }) {
+  return (
+    <div className="screen progress-screen">
       <h1>Progress</h1>
-      <div className="progress-cols"><div className="pcol">
+      <div className="progress-cols">
+      <div className="progress-main">
       <Areas />
       <RecapButton />
+      {systems.length > 0 && (<><h2>Systems</h2>
+        <div className="row small muted" style={{ gap: 10, flexWrap: "wrap", marginBottom: 6 }}>{MASTERY.map((m) => <span key={m.key} className="row" style={{ gap: 4 }} data-hint={masteryHint(m.key)}><i style={{ width: 10, height: 10, borderRadius: 2, background: m.color, display: "inline-block" }} />{m.label}</span>)}<span>(from memory stability, among cards you have seen)</span></div>
+        {systems.map((s) => { const m = mastery.get(s.name); const seen = m ? m.total - m.unseen : 0; return (
+          <div key={s.name} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+            <div className="row sys-head"><i style={{ width: 10, height: 10, borderRadius: 3, background: systemColor(s.name), display: "inline-block" }} /><span className="t">{s.name}</span>{store.settings.bosses[`systems:${s.name}`]?.passed && <span className="chip yuzu" data-hint="Boss beaten|You passed this system's boss fight (85% or more without hints).">Boss beaten</span>}{m?.secs != null && <span className="small muted">{m.secs.toFixed(0)} s/card</span>}<span className="small muted">{seen.toLocaleString()} / {s.total.toLocaleString()} seen</span>{onBoss && (m?.mastered ?? 0) + (m?.durable ?? 0) >= 10 && <button className="chip boss-chip" onClick={() => onBoss(s.name, "systems", s.name)}>Boss</button>}</div>
+            <div className="mastery-bar">{m && MASTERY.map((k) => <i key={k.key} style={{ width: `${(m[k.key] / Math.max(1, seen)) * 100}%`, background: k.color }} />)}</div>
+            {m && seen > 0 && <div className="small muted">{MASTERY.filter((k) => m[k.key]).map((k) => `${m[k.key]} ${k.label}`).join(" · ")}</div>}
+          </div>); })}</>)}
+      <div style={{ height: 14 }} />
       <Mastered />
+      </div>
+      <div className="progress-side">
       <div className="stat-grid">
         {store.settings.showStreak && <div className="stat"><b>{stats.streak}</b><span>day streak</span></div>}
         <div className="stat"><b>{retention === null ? "–" : retention + "%"}</b><span>retention, 30 days</span></div>
@@ -89,11 +124,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
         <div className="small muted" style={{ marginTop: 4 }}>{week.n.toLocaleString()} reviews in {week.mins < 1 && week.n ? "under a minute" : `${week.mins} min`}{week.recall !== null ? `, ${week.recall}% recalled` : ""}. {lastWeek.n ? `The 7 days before: ${lastWeek.n.toLocaleString()} in ${lastWeek.mins} min${lastWeek.recall !== null ? `, ${lastWeek.recall}%` : ""}.` : "No reviews in the 7 days before."}</div>
       </div>
       <h2>Last 12 weeks</h2>
-      <div className="card-box heat-grid" style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gridAutoFlow: "column", gridTemplateRows: "repeat(7, 1fr)", gap: 3 }}>
-        {perDay.map((n, i) => (
-          <div key={i} title={`${n} reviews`} style={{ aspectRatio: "1", background: n === 0 ? "var(--ink-3)" : n / maxD > 0.66 ? "var(--yuzu)" : n / maxD > 0.33 ? "var(--orange)" : "color-mix(in srgb, var(--orange) 45%, var(--ink-3))" }} />
-        ))}
-      </div>
+      <Heatmap heat={heat} />
       <h2>Cards</h2>
       <div className="card-box">
         <div className="row small" style={{ gap: 14, flexWrap: "wrap" }}>
@@ -107,22 +138,8 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
       </div><div className="pcol">
       <h2>Is the scheduler calibrated?</h2>
       <Calibration />
-      {systems.length > 0 && (<><h2>Systems</h2>
-        <div className="row small muted" style={{ gap: 10, flexWrap: "wrap", marginBottom: 6 }}>{MASTERY.map((m) => <span key={m.key} className="row" style={{ gap: 4 }} data-hint={masteryHint(m.key)}><i style={{ width: 10, height: 10, borderRadius: 2, background: m.color, display: "inline-block" }} />{m.label}</span>)}<span>(from memory stability, among cards you have seen)</span></div>
-        {systems.map((s) => { const m = mastery.get(s.name); const seen = m ? m.total - m.unseen : 0; return (
-          <div key={s.name} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-            <div className="row sys-head"><i style={{ width: 10, height: 10, borderRadius: 3, background: systemColor(s.name), display: "inline-block" }} /><span className="t">{s.name}</span>{store.settings.bosses[`systems:${s.name}`]?.passed && <span className="chip yuzu" title="Boss defeated">⚔</span>}{m?.secs != null && <span className="small muted">{m.secs.toFixed(0)} s/card</span>}<span className="small muted">{seen.toLocaleString()} / {s.total.toLocaleString()} seen</span>{onBoss && (m?.mastered ?? 0) + (m?.durable ?? 0) >= 10 && <button className="chip boss-chip" onClick={() => onBoss(s.name, "systems", s.name)}>Boss</button>}</div>
-            <div className="mastery-bar">{m && MASTERY.map((k) => <i key={k.key} style={{ width: `${(m[k.key] / Math.max(1, seen)) * 100}%`, background: k.color }} />)}</div>
-            {m && seen > 0 && <div className="small muted">{MASTERY.filter((k) => m[k.key]).map((k) => `${m[k.key]} ${k.label}`).join(" · ")}</div>}
-          </div>); })}</>)}
-      <h2>By category</h2>
-      {cats.map((c) => (
-        <div key={c.name} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-          <div className="row"><span className="t">{c.name}</span><span className="small muted">{c.learned.toLocaleString()} / {c.total.toLocaleString()}</span></div>
-          <div className="bar" style={{ margin: 0, height: 6 }}><i style={{ width: `${c.pct}%`, background: "var(--orange)" }} /></div>
-        </div>
-      ))}
-      </div></div>
+      </div>
+      </div>
     </div>
   );
 }
@@ -199,7 +216,7 @@ function Mastered() {
 /** Recap entry + "known right now" (the sum of every learned card's recall probability). */
 function RecapButton() {
   const [open, setOpen] = useState(false); const [why, setWhy] = useState(false);
-  const v = store.getVersion(); const k = useMemo(() => store.knowledgeNow(), [Math.floor(v / 20)]);
+  const v = useSettledVersion(); const k = useMemo(() => store.knowledgeNow(), [v]);
   return (<>
     {why && <DiagnoseSheet onClose={() => setWhy(false)} />}
     <div className="card-box row" style={{ gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
@@ -213,7 +230,7 @@ function RecapButton() {
 
 /** Your top-level decks side by side: what's due, what's left to start, how well you recall it and how much is mastered. */
 function Areas() {
-  const v = store.getVersion(); const all = useMemo(() => store.areaStats(), [Math.floor(v / 10), store.cards.size]); const [more, setMore] = useState(false);
+  const v = useSettledVersion(); const all = useMemo(() => store.areaStats(), [v]); const [more, setMore] = useState(false);
   if (all.length < 2) return null; const rows = more ? all : all.slice(0, 8);
   return (<>
     <h2 style={{ marginTop: 0 }}>Areas</h2>
@@ -222,7 +239,7 @@ function Areas() {
       {rows.map((a) => { const pm = a.learned ? Math.round((a.mastered / a.total) * 100) : 0; const pl = Math.round((a.learned / a.total) * 100); return (
         <div className="area-row" role="row" key={a.name}>
           <span role="cell"><b>{a.name}</b><br /><span className="small muted">{a.total.toLocaleString()} cards · {a.minutes30} min in 30 days</span>
-            <span className="area-bar" aria-hidden="true"><i style={{ width: pm + "%" }} className="m" /><i style={{ width: Math.max(0, pl - pm) + "%" }} className="l" /></span></span>
+            <span className="area-bar" data-hint={`${a.name}|${a.learned.toLocaleString()} of ${a.total.toLocaleString()} cards started, ${a.mastered.toLocaleString()} mastered.`}><i style={{ width: pm + "%" }} className="m" /><i style={{ width: Math.max(0, pl - pm) + "%" }} className="l" /></span></span>
           <span role="cell" className="num">{a.due.toLocaleString()}</span>
           <span role="cell" className="num">{a.fresh.toLocaleString()}</span>
           <span role="cell" className="num">{a.recall === null ? "–" : a.recall + "%"}</span>

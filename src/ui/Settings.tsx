@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
-import { ImproveSection } from "./Improve";
+import { ImproveSection, improveRoute } from "./Improve";
 import { Slider, snackbar, DateField, confirmSheet } from "./kit";
 import { retentionTradeoff } from "../scheduler/optimize";
 import { importAnki } from "../import/anki";
@@ -193,7 +193,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.showStreak} onChange={(e) => store.saveSettings({ showStreak: e.target.checked })} /> Show the day streak</label>
         <div className="row small" style={{ margin: "10px 0 4px" }}><span className="grow">A card forgotten {s.leechThreshold} times</span></div>
         <div className="seg" role="radiogroup" aria-label="Leech action">{([["claude", "Send to Claude"], ["pause", "Pause it"], ["ask", "Ask me"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={s.leechAction === k} className={s.leechAction === k ? "on" : ""} onClick={() => store.saveSettings({ leechAction: k })}>{l}</button>)}</div>
-        <p className="small muted" style={{ margin: "-6px 0 8px" }}>{s.leechAction === "claude" ? "It's marked to improve and goes to Claude through the Drive outbox; Claude's rewrite comes back through the Inbox." : s.leechAction === "pause" ? "It's suspended until you look at it (Library → Leeches)." : "A sheet asks what went wrong each time."}</p>
+        <p className="small muted" style={{ margin: "-6px 0 8px" }}>{s.leechAction === "claude" ? `It's marked “Needs improving”. ${improveRoute()}` : s.leechAction === "pause" ? "It's suspended until you look at it (Library → Leeches)." : "A sheet asks what went wrong each time."}</p>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
         <Slider label="Offer to retire as mastered when reviews are more than this apart" value={s.retireAskYears ?? 5} min={1} max={10} format={(v) => `${v} y`} onCommit={(v) => store.saveSettings({ retireAskYears: v, ...((s.retireAutoYears ?? 20) && (s.retireAutoYears ?? 20) <= v ? { retireAutoYears: 0 } : {}) })} sub="Those cards are listed in Progress → Mastered for you to decide." />
         <Slider label="Retire automatically when reviews are more than this apart" value={s.retireAutoYears ?? 20} min={0} max={30} step={5} format={(v) => (v ? `${v} y` : "never")} sub={`Must be above the offer line (${s.retireAskYears ?? 5} y). Retired cards are deleted and kept in the Mastered log.`}
@@ -271,7 +271,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       <details className="section" id="s-improve"><summary>Cards to improve <span className="small muted">send to Claude</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
       <ImproveSection />
       </details>
-      <details className="section" id="s-import"><summary>Import from Anki <span className="small muted">collection, packs, curation</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
+      <details className="section" id="s-import"><summary>Import <span className="small muted">Anki, packs, Claude files</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) with scheduling included; if it includes media, the images and sounds are added right after the cards. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> and <b>curation files</b> (.json) made by Claude: duplicates are skipped or merged, cards move to their categories, similar cards get the tag <i>needs-review::similar</i>. Large collections: import on a PC first, then sync to the phone.</p>
         <label className="row small" style={{ marginBottom: 10 }}><input type="checkbox" checked={skipLanguages} onChange={(e) => setSkipLanguages(e.target.checked)} /> Skip the Languages decks</label>

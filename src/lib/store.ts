@@ -1519,21 +1519,39 @@ export class Store {
       await db.setMeta("nudge", { on: r.on, at: r.at, skipLight: r.skipLight, due: s.due, minutes: s.estimatedMinutes ?? (s.extra as any).minutesNeeded, goalMet: st.goal > 0 && st.today >= st.goal, light, date: today, notifiedOn: prev.notifiedOn ?? "" });
     } catch { /* best effort */ }
   }
-  /** The facts behind cards (a question and its answer as plain text), for the "Practice with Claude" prompt. Image-only cards are left out. */
-  factsOf(cards: Card[]): { q: string; a: string }[] {
-    const out: { q: string; a: string }[] = [];
+  /**
+   * The facts behind cards (a question and its answer as plain text, and the topic), for the "Practice with Claude" prompt.
+   * Source/reference fields are left out, vocabulary is always asked word → meaning (never the reversed card), an MCQ
+   * explanation that only repeats the question and answer is dropped, and the facts come grouped by topic. Image-only cards are left out.
+   */
+  factsOf(cards: Card[]): { q: string; a: string; topic: string }[] {
+    const out: { q: string; a: string; topic: string }[] = []; const seen = new Set<string>();
+    const words = (t: string) => new Set(t.toLowerCase().normalize("NFKD").replace(/[^\p{L}\p{N}]+/gu, " ").split(" ").filter((w) => w.length > 2));
     for (const c of cards) {
-      const note = this.notes.get(c.nid); const nt = note && this.notetypes.get(note.ntid); if (!note || !nt || nt.id === "yuzu-io") continue;
-      const r = renderCard({ note, notetype: nt, ord: c.ord, deck: c.source }); const q = spokenText(r.front).replace(/ blank /g, " … ").replace(/\bblank\b/g, "…"); const a = backOnly(r.back);
-      if (nt.id === MCQ_ID) { const opts = parseOptions(note.fields[1] ?? ""); out.push({ q: spokenText(note.fields[0] ?? ""), a: `${opts.find((o) => o.correct)?.text ?? ""}${note.fields[4] ? ". " + spokenText(note.fields[4]) : ""}` }); }
-      else if (nt.kind === "cloze") out.push({ q: a, a: "" }); else if (q) out.push({ q, a: a === q ? "" : a });
+      const note0 = this.notes.get(c.nid); const nt = note0 && this.notetypes.get(note0.ntid); if (!note0 || !nt || nt.id === "yuzu-io") continue;
+      const isVocab = nt.id === "yuzu-vocab"; const ord = isVocab ? 0 : c.ord; if (seen.has(c.nid + ":" + ord)) continue; seen.add(c.nid + ":" + ord);
+      // a copy of the note with its source / reference fields emptied, so "NICE CG126" isn't glued onto the fact
+      const note = { ...note0, fields: note0.fields.map((f, i) => (/^(source|sources|quelle|ref|refs|reference|references)$/i.test(nt.fields[i] ?? "") ? "" : f)) };
+      const topic = this.topicOf(c);
+      if (nt.id === MCQ_ID) {
+        const opts = parseOptions(note.fields[1] ?? ""); const q = spokenText(note.fields[0] ?? ""); const ans = opts.find((o) => o.correct)?.text ?? ""; const ex = spokenText(note.fields[4] ?? "");
+        const known = words(q + " " + ans); const exNew = [...words(ex)].some((w) => !known.has(w)); // keep an explanation only when it adds something
+        out.push({ q, a: `${ans}${ex && exNew ? ". " + ex : ""}`, topic }); continue;
+      }
+      const r = renderCard({ note, notetype: nt, ord, deck: c.source }); const q = spokenText(r.front).replace(/ blank /g, " … ").replace(/\bblank\b/g, "…"); const a = backOnly(r.back);
+      if (nt.kind === "cloze") out.push({ q: a, a: "", topic }); else if (q) out.push({ q, a: a === q ? "" : a, topic });
     }
-    return out.filter((f) => f.q);
+    const order = new Map<string, number>(); for (const f of out) if (!order.has(f.topic)) order.set(f.topic, order.size);
+    return out.filter((f) => f.q).sort((x, y) => order.get(x.topic)! - order.get(y.topic)!); // grouped by topic, weakest topic first
   }
-  /** The cards you are most likely to have forgotten right now (lowest recall first), or the weakest for an exam. */
-  weakestCards(n = 10, exam?: Deadline, now = Date.now()): Card[] {
+  /** A card's topic for grouping: its system tag, else the deck below the top level. */
+  topicOf(c: Card): string { const n = this.notes.get(c.nid); const sys = n?.tags.find((t) => t.startsWith("auto::System::"))?.slice(14); if (sys) return sys; const p = (c.source || "").split("::"); return p.length > 1 ? p.slice(1, 3).join(" › ") : p[0] || "Other"; }
+  /** German (or another language's) vocabulary rather than a medical fact: a vocab note, or a top-level deck named for a language. */
+  isLanguageCard(c: Card): boolean { const n = this.notes.get(c.nid); return n?.ntid === "yuzu-vocab" || /^(german|deutsch|languages?|sprache)/i.test((c.source || "").split("::")[0]); }
+  /** The cards you are most likely to have forgotten right now (lowest recall first), or the weakest for an exam; `keep` narrows them (an area, a subject). */
+  weakestCards(n = 10, exam?: Deadline, now = Date.now(), keep?: (c: Card) => boolean): Card[] {
     if (exam) return this.examWeakest(exam, n, now);
-    return [...this.cards.values()].filter((c) => !c.suspended && c.state !== "new" && c.lastReview).map((c) => ({ c, r: retrievability((now - c.lastReview) / DAY, c.stability) })).sort((a, b) => a.r - b.r).slice(0, n * 3).map((x) => x.c).filter((c, i, a) => a.findIndex((d) => d.nid === c.nid) === i).slice(0, n);
+    return [...this.cards.values()].filter((c) => !c.suspended && c.state !== "new" && c.lastReview && (!keep || keep(c))).map((c) => ({ c, r: retrievability((now - c.lastReview) / DAY, c.stability) })).sort((a, b) => a.r - b.r).slice(0, n * 3).map((x) => x.c).filter((c, i, a) => a.findIndex((d) => d.nid === c.nid) === i).slice(0, n);
   }
   // ---- "Why so many reviews?" (lib/diagnose.ts): ranked causes from your own data; a fix only on a tap, always with an Undo --------
   diagnose(now = Date.now()) {
@@ -2523,7 +2541,7 @@ export class Store {
   recap(from: number, to: number) {
     const rs = this.reviews.filter((r) => r.ts >= from && r.ts < to);
     const dayOf = (ts: number) => this.dayIndex(ts);
-    const days = new Map<number, number>(); const hours = new Array(24).fill(0); const bySys = new Map<string, { n: number; ok: number }>();
+    const days = new Map<number, number>(); const hours = new Array(24).fill(0); const bySys = new Map<string, { n: number; rv: number; ok: number }>();
     let ms = 0, rv = 0, ok = 0, fresh = 0, matured = 0; const lapsesBy = new Map<string, number>();
     const sysOf = (cid: string) => { const c = this.cards.get(cid); const n = c && this.notes.get(c.nid); return n?.tags.find((t) => t.startsWith("auto::System::"))?.slice(14) ?? (c ? c.source.split("::")[0] : "Other"); };
     for (const r of rs) {
@@ -2531,13 +2549,14 @@ export class Store {
       if (r.state === "new") fresh++;
       if (r.state === "review") { rv++; if (r.rating > 1) ok++; else lapsesBy.set(r.cid, (lapsesBy.get(r.cid) ?? 0) + 1); }
       if (r.state === "review" && r.rating > 1 && r.scheduledDays >= 21 && (r.elapsedDays ?? 0) < 21) matured++;
-      const sy = sysOf(r.cid); const e = bySys.get(sy) ?? bySys.set(sy, { n: 0, ok: 0 }).get(sy)!; e.n++; if (r.rating > 1) e.ok++;
+      const sy = sysOf(r.cid); const e = bySys.get(sy) ?? bySys.set(sy, { n: 0, rv: 0, ok: 0 }).get(sy)!; e.n++; if (r.state === "review") { e.rv++; if (r.rating > 1) e.ok++; } // recall: learned cards only, like the headline figure
     }
-    const spanDays = Math.max(1, Math.round((Math.min(to, Date.now()) - from) / DAY));
+    // Study days so far in the period, today included, counted with the same rollover as daysStudied ("13 of 13", never "13 of 12").
+    const spanDays = Math.max(1, dayOf(Math.min(to, Date.now()) - 1) - dayOf(from) + 1);
     const best = [...days].sort((a, b) => b[1] - a[1])[0];
     let streak = 0, run = 0; const keys = [...days.keys()].sort((a, b) => a - b); for (let i = 0; i < keys.length; i++) { run = i && keys[i] === keys[i - 1] + 1 ? run + 1 : 1; streak = Math.max(streak, run); }
-    const topSys = [...bySys].filter(([k]) => k !== "Other").sort((a, b) => b[1].n - a[1].n).slice(0, 3).map(([name, e]) => ({ name, n: e.n, recall: e.n ? e.ok / e.n : 0 }));
-    const nemesisId = [...lapsesBy].sort((a, b) => b[1] - a[1])[0]; const nem = nemesisId && this.cards.get(nemesisId[0]); const nemNote = nem && this.notes.get(nem.nid);
+    const topSys = [...bySys].filter(([k]) => k !== "Other").sort((a, b) => b[1].n - a[1].n).slice(0, 3).map(([name, e]) => ({ name, n: e.n, recall: e.rv ? e.ok / e.rv : null }));
+    const nemesisId = [...lapsesBy].sort((a, b) => b[1] - a[1])[0]; const nem = nemesisId && this.cards.get(nemesisId[0]); const nemNote = nem && this.notes.get(nem.nid); const nemText = nem ? this.cardText(nem).front : "";
     const night = hours.slice(22).concat(hours.slice(0, 5)).reduce((a, b) => a + b, 0), morning = hours.slice(5, 10).reduce((a, b) => a + b, 0);
     const retired = this.mastery.log.filter((e) => e.at >= from && e.at < to).length;
     const recall = rv ? ok / rv : null; const minutes = Math.round(ms / 60000);
@@ -2546,18 +2565,19 @@ export class Store {
       [rs.length > 0 && night / rs.length > 0.4, "The Night-Shift Scholar", "Most of your reviews happened between 22:00 and 05:00. Cards don't care what time it is — and neither do you."],
       [rs.length > 0 && morning / rs.length > 0.45, "The Dawn Reviewer", "Most of your reviews came before 10:00. Memory loves a fresh morning."],
       [days.size / spanDays >= 0.85 && spanDays >= 7, "The Metronome", `You studied on ${days.size} of ${spanDays} days. Spaced repetition rewards exactly this.`],
-      [recall !== null && recall >= 0.92 && rv >= 100, "The Surgeon", `${Math.round((recall ?? 0) * 100)}% recalled on mature reviews. Precise.`],
+      [recall !== null && recall >= 0.92 && rv >= 100, "The Surgeon", `${Math.round((recall ?? 0) * 100)}% of learned cards recalled when they came back. Precise.`],
       [retired >= 20, "The Graduate", `${retired} cards retired as mastered — known for years.`],
       [fresh >= 300, "The Explorer", `${fresh.toLocaleString()} new cards started. A lot of new ground.`],
       [best && best[1] >= 400, "The Marathoner", `${best?.[1].toLocaleString()} reviews in a single day.`],
       [true, "The Steady Climber", "Review by review, the curve bends your way."],
     ];
     const [, persona, personaWhy] = personas.find((p) => p[0])!;
+    let masteredNow = 0; const tNow = Date.now(); for (const c of this.cards.values()) if (!c.suspended && c.state === "review") { const m = this.masteryOf(c, tNow); if (m === "mastered" || m === "durable") masteredNow++; }
     return {
       reviews: rs.length, minutes, daysStudied: days.size, spanDays, recall, fresh, matured, retired, longestRun: streak,
       bestDay: best ? { day: (best[0] + 0.5) * DAY, n: best[1] } : null, topSys, peakHour: hours.indexOf(Math.max(...hours)),
-      nemesis: nemNote ? { title: nemNote.fields[0].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 80), misses: nemesisId![1] } : null,
-      knowledge: this.knowledgeNow().known, persona, personaWhy,
+      nemesis: nemNote ? { title: nemText.length > 120 ? nemText.slice(0, 119).trimEnd() + "…" : nemText || "(a picture card)", nid: nemNote.id, misses: nemesisId![1] } : null,
+      knowledge: this.knowledgeNow().known, masteredNow, persona, personaWhy,
     };
   }
 
