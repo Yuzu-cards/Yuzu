@@ -15,6 +15,7 @@ import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
 import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, Sheet, useMedia, type SheetItem } from "./kit";
 import { systemColor } from "./theme";
+import { isHousekeepingTag } from "../lib/search";
 
 let overMemo: { ids: string[]; set: Set<string> } | null = null;
 const overSet = () => { const ids = store.overfilled(); if (overMemo?.ids !== ids) overMemo = { ids, set: new Set(ids) }; return overMemo.set; };
@@ -23,14 +24,21 @@ const FILTER_HINT: Record<string, string> = {
   overfilled: "Overfilled|Answers with too much on one card (long text or 6+ list items). One fact per card sticks better (Wozniak's minimum-information rule). Select them → Needs improving → Claude splits them.",
   leech: "Leeches|Cards you keep forgetting after learning them.", suspended: "Paused|Kept with their history but never shown until unpaused.",
 };
-/** Quick filters in the card list. */
-function passes(c: Card, only: "flagged" | "improve" | "suspended" | "leech" | "overfilled"): boolean {
+/** Quick filters in the card list. `over` is the overfilled set, read once per pass over the cards (not once per card). */
+function passes(c: Card, only: "flagged" | "improve" | "suspended" | "leech" | "overfilled", over?: Set<string>): boolean {
   if (only === "flagged") return !!c.flag;
   if (only === "suspended") return c.suspended;
   if (only === "improve") return !!store.improveFor(c.nid);
-  if (only === "overfilled") return overSet().has(c.nid);
+  if (only === "overfilled") return (over ?? overSet()).has(c.nid);
   return !!store.noteFor(c)?.tags.includes("leech");
 }
+
+// Scope cards and their counts, kept across views and visits for the same store version: switching Decks → Systems at the
+// root, or coming back to All, reuses them instead of walking 146k cards again (09-3).
+const scopeMemo = new Map<string, Card[]>();
+const scopeFor = (key: string, make: () => Card[]) => { let c = scopeMemo.get(key); if (!c) { c = make(); scopeMemo.set(key, c); if (scopeMemo.size > 4) scopeMemo.delete(scopeMemo.keys().next().value!); } return c; };
+const derived = new WeakMap<Card[], Record<string, unknown>>();
+function memoOn<T>(cards: Card[], k: string, make: () => T): T { let d = derived.get(cards); if (!d) derived.set(cards, (d = {})); if (!(k in d)) d[k] = make(); return d[k] as T; }
 
 function findNode(root: TreeNode, path: string): TreeNode | null {
   if (!path) return root;
@@ -104,7 +112,13 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [q, setQ] = useState(""); // debounced
   const [only, setOnly] = useState<null | "flagged" | "improve" | "suspended" | "leech" | "overfilled">(null); // quick filters
   useEffect(() => { const t = setTimeout(() => setQ(latinDigits(query).trim().toLowerCase()), 160); return () => clearTimeout(t); }, [query]);
-  const [sort, setSort] = useState<"due" | "new" | "state" | "deck">("due");
+  // Search runs in slices off the keystroke (store.searchNotes); the list shows the last finished result meanwhile.
+  const [hits, setHits] = useState<{ q: string; sv: number; scores: Map<string, number> } | null>(null);
+  const sv = store.structureVersion;
+  useEffect(() => { if (!q) { setHits(null); return; } const cancel = { cancelled: false }; store.searchNotes(q, cancel).then((scores) => { if (scores && !cancel.cancelled) setHits({ q, sv, scores }); }).catch(() => {}); return () => { cancel.cancelled = true; }; }, [q, sv]);
+  useEffect(() => { store.warmLibrary(); }, []);
+  const searching = !!q && hits?.q !== q;
+  const [sort, setSort] = useState<"best" | "due" | "new" | "state" | "deck">("best");
   const [allTags, setAllTags] = useState(false);
   const [preview, setPreview] = useState<Card | null>(null); const wide = useMedia("(min-width: 1500px)");
   const [selecting, setSelecting] = useState(false);
@@ -123,31 +137,40 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const smart = view === "smart" && path ? store.settings.smart.find((s) => s.id === path) : null;
   const pinned = store.settings.pins.some((p) => p.view === view && p.path === path);
 
-  const scopeCards = useMemo(() => (view === "smart" ? (smart ? store.cardsMatching(smart) : []) : store.cardsIn(path, view)), [path, view, v]);
-  const counts = useMemo(() => {
+  const scopeCards = useMemo(() => scopeFor(`${v}|${view === "smart" ? "smart" : path ? view : ""}|${path}`, () => (view === "smart" ? (smart ? store.cardsMatching(smart) : []) : store.cardsIn(path, view))), [path, view, v]);
+  const counts = useMemo(() => memoOn(scopeCards, "counts", () => {
     const now = Date.now(); let due = 0, learning = 0, fresh = 0, susp = 0, studied = 0;
     for (const c of scopeCards) { if (c.suspended) { susp++; continue; } if (c.state === "new") fresh++; else if (c.due <= now) due++; if (c.state === "learning" || c.state === "relearning") learning++; if (c.reps) studied++; }
     return { due, learning, fresh, susp, studied, total: scopeCards.length };
-  }, [scopeCards]);
+  }), [scopeCards]);
 
+  // One row per note; `all` keeps every matching card, so counts, "All", bulk actions and Study act on all of them (03-3).
+  const scores = q ? (hits && (hits.q === q || searching) ? hits.scores : null) : null;
+  const sortBy = sort === "best" && !scores ? "due" : sort;
   const matches = useMemo(() => {
-    if (!showCards && !q && !only) return [] as Card[];
-    const seen = new Set<string>(); const out: Card[] = [];
+    const first = new Map<string, Card>(); const all: Card[] = []; let out: Card[] = [];
+    if (!showCards && !q && !only) return { rows: out, all, cards: 0 };
+    if (q && !scores) return { rows: out, all, cards: 0 };
+    const over = only === "overfilled" ? overSet() : undefined;
     for (const c of scopeCards) {
-      if (only && !passes(c, only)) continue; // checked per card, before siblings are folded together (a flag sits on one card)
-      if (seen.has(c.nid)) continue;
-      if (q) { const n = store.noteFor(c); if (!n || !store.searchText(n).includes(q)) continue; }
-      seen.add(c.nid); out.push(c);
+      if (only && !passes(c, only, over)) continue; // checked per card, before siblings are folded together (a flag sits on one card)
+      if (scores && !scores.has(c.nid)) continue;
+      all.push(c); if (!first.has(c.nid)) { first.set(c.nid, c); out.push(c); }
     }
+    // Sort on precomputed numeric keys (a query like "p" matches most of the collection; comparator lookups would freeze it).
     const order = { learning: 0, relearning: 0, review: 1, new: 2 } as Record<string, number>;
-    if (sort === "due") out.sort((a, b) => (a.state === "new" ? 1 : 0) - (b.state === "new" ? 1 : 0) || a.due - b.due);
-    else if (sort === "new") out.sort((a, b) => b.created - a.created);
-    else if (sort === "state") out.sort((a, b) => (a.suspended ? 3 : order[a.state]) - (b.suspended ? 3 : order[b.state]));
+    const keyed = (k: (c: Card) => number) => { const ks = out.map((c, i) => ({ c, k: k(c), d: (c.state === "new" ? 1e15 : 0) + c.due, i })); ks.sort((a, b) => a.k - b.k || a.d - b.d || a.i - b.i); return ks.map((x) => x.c); };
+    if (sortBy === "best" && scores) out = keyed((c) => -scores.get(c.nid)!);
+    else if (sortBy === "due") out = keyed(() => 0);
+    else if (sortBy === "new") out = keyed((c) => -c.created);
+    else if (sortBy === "state") out = keyed((c) => (c.suspended ? 3 : order[c.state]));
     else out.sort((a, b) => a.source.localeCompare(b.source));
-    return out;
-  }, [scopeCards, showCards, q, sort, only, store.getVersion()]);
-  const filterCounts = useMemo(() => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0, overfilled: 0 }; const over = overSet(); const overN = new Set<string>(); const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); if (over.has(c.nid)) overN.add(c.nid); } k.overfilled = overN.size; k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }, [scopeCards, store.getVersion()]);
-  const list = useMemo(() => matches.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "paused" : c.state }; }), [matches]);
+    return { rows: out, all, cards: all.length };
+  }, [scopeCards, showCards, q, scores, sortBy, only, v]);
+  const groupOf = (c: Card) => { const g = matches.all.filter((x) => x.nid === c.nid); return g.length ? g : [c]; };
+  const matchedCards = () => scores ? matches.all.map((c) => ({ c, k: -scores.get(c.nid)! })).sort((a, b) => a.k - b.k).map((x) => x.c) : matches.all;
+  const filterCounts = useMemo(() => memoOn(scopeCards, "filters", () => { const k = { flagged: 0, improve: 0, suspended: 0, leech: 0, overfilled: 0 }; const over = overSet(); const overN = new Set<string>(); const notes = { improve: new Set<string>(), leech: new Set<string>() }; for (const c of scopeCards) { if (c.flag) k.flagged++; if (c.suspended) k.suspended++; if (store.improveFor(c.nid)) notes.improve.add(c.nid); if (store.noteFor(c)?.tags.includes("leech")) notes.leech.add(c.nid); if (over.has(c.nid)) overN.add(c.nid); } k.overfilled = overN.size; k.improve = notes.improve.size; k.leech = notes.leech.size; return k; }), [scopeCards]);
+  const list = useMemo(() => matches.rows.slice(0, 300).map((c) => { const n = store.noteFor(c)!; return { card: c, title: noteTitle(n, store.notetypeFor(n)), state: c.suspended ? "paused" : c.state }; }), [matches]);
 
   // Hooks first, always in the same order (the empty-library screen below returns early).
   const go = (p: string) => { setPath(p); setShowCards(false); setSelecting(false); setSelected(new Set()); };
@@ -176,7 +199,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     { label: n && store.improveFor(n.id) ? "Change improve mark" : "Needs improving…", onClick: () => n && setImproveFor([n.id]) },
     { label: card.flag ? "Unflag" : "Flag", onClick: () => store.setFlag(card.id, card.flag ? 0 : 1) },
     { label: card.suspended ? "Unpause" : "Pause", onClick: async () => { await store.setSuspended(card.id, !card.suspended); snackbar(card.suspended ? "Unpaused" : "Paused", () => store.setSuspended(card.id, card.suspended)); } },
-    { label: "Select", onClick: () => { setSelecting(true); setSelected(new Set([card.id])); } },
+    { label: "Select", onClick: () => { setSelecting(true); setSelected(new Set(groupOf(card).map((x) => x.id))); } },
     { label: "Delete", danger: true, onClick: async () => { if (!n) return; await store.deleteNotes([n.id]); snackbar("Deleted", () => { store.undoDelete(); }); } },
   ] }); };
 
@@ -235,7 +258,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
                 <span className="muted">{b ? `best ${Math.round(b.best * 100)}%${b.passed ? " · defeated" : ""}` : `${pool} well-learned cards, 20 random, no hints, ${Math.round(BOSS_PASS * 100)}% to pass`}</span>
               </div>) : null; })()}
           </div>
-          <div className="field"><input type="search" aria-label="Search cards and tags" placeholder="Search cards and tags here" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
+          <div className="field"><input type="search" aria-label="Search cards and tags" placeholder="Search cards and tags here" title="Searches every field and the tags. tag:x searches tags only; #… or auto::… also searches housekeeping tags." value={query} onChange={(e) => setQuery(e.target.value)} /></div>
           <div className="row" style={{ flexWrap: "wrap", gap: 6, margin: "-4px 0 10px" }}>
             {([["flagged", "Flagged"], ["improve", "To improve"], ["overfilled", "Overfilled"], ["leech", "Leeches"], ["suspended", "Paused"]] as const).filter(([k]) => filterCounts[k] > 0 || only === k).map(([k, label]) => (
               <button key={k} data-hint={FILTER_HINT[k]} className={"chip" + (only === k ? " orange" : "")} disabled={!filterCounts[k] && only !== k} onClick={() => setOnly(only === k ? null : k)}>{label} · {filterCounts[k].toLocaleString()}</button>))}
@@ -243,8 +266,8 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           {!query && !only && node && node.children.length > 0 && (
             <>
               <h2>{view === "tags" ? "Tags" : "Categories"}</h2>
-              {view === "tags" && !path && <label className="row small muted" style={{ marginBottom: 6 }}><input type="checkbox" checked={allTags} onChange={(e) => setAllTags(e.target.checked)} /> Show deck housekeeping tags (#, !)</label>}
-              {[...node.children].filter((c) => view !== "tags" || allTags || !/^[#!~]/.test(c.name)).sort((a, b) => (["Other", "Unclassified", "No exam", "Untagged"].includes(a.name) ? 1 : 0) - (["Other", "Unclassified", "No exam", "Untagged"].includes(b.name) ? 1 : 0)).map((c) => (
+              {view === "tags" && !path && <label className="row small muted" style={{ marginBottom: 6 }}><input type="checkbox" checked={allTags} onChange={(e) => setAllTags(e.target.checked)} /> Show housekeeping tags (#, !, AnkiHub, numbers)</label>}
+              {[...node.children].filter((c) => view !== "tags" || allTags || path || !isHousekeepingTag(c.name)).sort((a, b) => (["Other", "Unclassified", "No exam", "Untagged"].includes(a.name) ? 1 : 0) - (["Other", "Unclassified", "No exam", "Untagged"].includes(b.name) ? 1 : 0)).map((c) => (
                 <HoldRow key={c.path} className="tree-row" style={{ width: "100%", textAlign: "left" }} onTap={() => go(c.path)} onHold={() => nodeSheet(c)}>
                   <span className="name">{view === "systems" && !path && <i style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: systemColor(c.name), marginRight: 8, verticalAlign: "1px" }} />}{c.name}</span>
                   <span className="counts">{c.due ? <span><b className="c-due">{c.due.toLocaleString()}</b> due</span> : null}{c.learning ? <span><b className="c-learn">{c.learning}</b> learning</span> : null}{c.newCount ? <span><b>{c.newCount.toLocaleString()}</b> new</span> : null}</span>
@@ -263,14 +286,14 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           {(showCards || query || only) && (
             <>
               <div className="row" id="lib-cards" style={{ marginTop: 18 }}>
-                <h2 className="grow list-head" style={{ margin: 0 }}>{matches.length.toLocaleString()} cards{matches.length > 300 ? " · 300 shown" : ""}</h2>
-                {matches.length > 0 && !selecting && <button className="chip orange" onClick={() => { const pool = only ? scopeCards.filter((c) => passes(c, only) && (!q || store.searchText(store.noteFor(c)!).includes(q))) : matches; onStudy(path, view, { preset: pool.filter((c) => only === "suspended" || !c.suspended).slice(0, 500), title: only ? { flagged: "Flagged cards", improve: "Cards to improve", leech: "Leeches", suspended: "Paused cards", overfilled: "Overfilled cards" }[only] : `“${query}”` }); }}><IconPlay /> Study these</button>}
-                <select className="chip" value={sort} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort"><option value="due">by due</option><option value="new">newest</option><option value="state">by state</option><option value="deck">by deck</option></select>
+                <h2 className="grow list-head" style={{ margin: 0 }} aria-live="polite">{q && !scores ? "Searching…" : <>{matches.rows.length === matches.cards ? `${matches.cards.toLocaleString()} card${matches.cards === 1 ? "" : "s"}` : <>{matches.rows.length.toLocaleString()} notes <span className="small muted" style={{ whiteSpace: "nowrap" }}>· {matches.cards.toLocaleString()} cards</span></>}{matches.rows.length > 300 ? ", first 300 shown" : ""}{searching ? " · searching…" : ""}</>}</h2>
+                {matches.rows.length > 0 && !selecting && <button className="chip orange" onClick={() => { const pool = matchedCards(); onStudy(path, view, { preset: pool.filter((c) => only === "suspended" || !c.suspended).slice(0, 500), title: only ? { flagged: "Flagged cards", improve: "Cards to improve", leech: "Leeches", suspended: "Paused cards", overfilled: "Overfilled cards" }[only] : `“${query}”` }); }}><IconPlay /> Study these</button>}
+                <select className="chip" value={sortBy} onChange={(e) => setSort(e.target.value as any)} aria-label="Sort">{scores && <option value="best">best match</option>}<option value="due">by due</option><option value="new">newest</option><option value="state">by state</option><option value="deck">by deck</option></select>
                 <button className="chip" onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}>{selecting ? "Cancel" : "Select"}</button>
-                {selecting && <button className="chip" onClick={() => setSelected(new Set(matches.map((c) => c.id)))}>All {matches.length.toLocaleString()}</button>}
+                {selecting && <button className="chip" onClick={() => setSelected(new Set(matchedCards().map((c) => c.id)))}>All {matches.cards.toLocaleString()} card{matches.cards === 1 ? "" : "s"}</button>}
               </div>
               {list.map((r) => (
-                <HoldRow key={r.card.id} className="list-row" style={{ width: "100%", textAlign: "left" }} onHold={() => cardSheet(r.card, r.title)} onTap={() => { if (selecting) { const s = new Set(selected); s.has(r.card.id) ? s.delete(r.card.id) : s.add(r.card.id); setSelected(s); } else setPreview(r.card); }}>
+                <HoldRow key={r.card.id} className="list-row" style={{ width: "100%", textAlign: "left" }} onHold={() => cardSheet(r.card, r.title)} onTap={() => { if (selecting) { const s = new Set(selected); const on = !s.has(r.card.id); for (const c of groupOf(r.card)) on ? s.add(c.id) : s.delete(c.id); setSelected(s); } else setPreview(r.card); }}>
                   {selecting && <input type="checkbox" readOnly checked={selected.has(r.card.id)} />}
                   <span className="t">{r.title}<div className="small muted" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{r.card.source.split("::").slice(-2).join(" › ")}</div></span><span className={"chip " + (r.state === "new" ? "" : "orange")}>{r.state}</span>
                 </HoldRow>
@@ -281,7 +304,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
       )}
       {selecting && selected.size > 0 && (
         <div className="bulk-bar">
-          <span className="small">{selected.size.toLocaleString()} selected</span>
+          <span className="small">{selected.size.toLocaleString()} card{selected.size === 1 ? "" : "s"} selected</span>
           <button className="btn primary" onClick={() => { const cards = [...selected].map((id) => store.cards.get(id)!).filter(Boolean); setSelecting(false); setSelected(new Set()); onStudy(path, view, { preset: cards, title: `${cards.length} selected` }); }}>Study</button>
           <button className="btn" onClick={() => doBulk({ suspended: true })}>Pause</button>
           <button className="btn" onClick={() => doBulk({ flag: 1 })}>Flag</button>
