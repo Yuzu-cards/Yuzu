@@ -101,7 +101,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
           <span className="c-new">{counts.new.toLocaleString()} new</span>
           <span className="c-learn">{(counts.learning + counts.relearning).toLocaleString()} learning</span>
           <span className="c-due">{counts.review.toLocaleString()} learned</span>
-          <span className="muted">{counts.suspended.toLocaleString()} suspended</span>
+          <span className="muted">{counts.suspended.toLocaleString()} paused</span>
           {store.mastery.log.length > 0 && <span style={{ color: "var(--yuzu)" }}>{store.mastery.log.length.toLocaleString()} mastered &amp; retired</span>}
         </div>
       </div>
@@ -111,7 +111,7 @@ function ProgressView({ stats, counts, perDay, maxD, retention, systems, mastery
         <div className="row small muted" style={{ gap: 10, flexWrap: "wrap", marginBottom: 6 }}>{MASTERY.map((m) => <span key={m.key} className="row" style={{ gap: 4 }} data-hint={masteryHint(m.key)}><i style={{ width: 10, height: 10, borderRadius: 2, background: m.color, display: "inline-block" }} />{m.label}</span>)}<span>(from memory stability, among cards you have seen)</span></div>
         {systems.map((s) => { const m = mastery.get(s.name); const seen = m ? m.total - m.unseen : 0; return (
           <div key={s.name} className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-            <div className="row"><i style={{ width: 10, height: 10, borderRadius: 3, background: systemColor(s.name), display: "inline-block" }} /><span className="t">{s.name}</span>{store.settings.bosses[`systems:${s.name}`]?.passed && <span className="chip yuzu" title="Boss defeated">⚔</span>}{m?.secs != null && <span className="small muted">{m.secs.toFixed(0)} s/card</span>}<span className="small muted">{seen.toLocaleString()} / {s.total.toLocaleString()} seen</span>{onBoss && (m?.mastered ?? 0) + (m?.durable ?? 0) >= 10 && <button className="chip" onClick={() => onBoss(s.name, "systems", s.name)}>Boss</button>}</div>
+            <div className="row sys-head"><i style={{ width: 10, height: 10, borderRadius: 3, background: systemColor(s.name), display: "inline-block" }} /><span className="t">{s.name}</span>{store.settings.bosses[`systems:${s.name}`]?.passed && <span className="chip yuzu" title="Boss defeated">⚔</span>}{m?.secs != null && <span className="small muted">{m.secs.toFixed(0)} s/card</span>}<span className="small muted">{seen.toLocaleString()} / {s.total.toLocaleString()} seen</span>{onBoss && (m?.mastered ?? 0) + (m?.durable ?? 0) >= 10 && <button className="chip boss-chip" onClick={() => onBoss(s.name, "systems", s.name)}>Boss</button>}</div>
             <div className="mastery-bar">{m && MASTERY.map((k) => <i key={k.key} style={{ width: `${(m[k.key] / Math.max(1, seen)) * 100}%`, background: k.color }} />)}</div>
             {m && seen > 0 && <div className="small muted">{MASTERY.filter((k) => m[k.key]).map((k) => `${m[k.key]} ${k.label}`).join(" · ")}</div>}
           </div>); })}</>)}

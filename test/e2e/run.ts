@@ -51,11 +51,11 @@ try {
   // Bulk: show cards, select all, suspend
   await page.click("text=Show cards in Cardio new"); await page.click("text=Select"); await page.getByRole("button", { name: /^All \d/ }).first().click();
   await page.waitForTimeout(200); console.log("bulk bar:", await page.locator(".bulk-bar").innerText().catch(() => "none"));
-  await page.click(".bulk-bar >> text=Suspend"); await page.waitForTimeout(400);
+  await page.click(".bulk-bar >> text=Pause"); await page.waitForTimeout(400);
   console.log("after bulk suspend:", await page.locator(".card-box .small.muted").first().innerText());
   await page.click("button.chip >> text=Select"); await page.waitForTimeout(200);
-  await page.getByRole("button", { name: /^All \d/ }).first().click(); await page.click(".bulk-bar >> text=Unsuspend"); await page.waitForTimeout(400);
-  await page.waitForSelector(".card-box >> text=/ 0 suspended/"); await page.waitForSelector(".bulk-bar", { state: "detached" });
+  await page.getByRole("button", { name: /^All \d/ }).first().click(); await page.click(".bulk-bar >> text=More…"); await page.click(".kit-sheet >> text=Unpause"); await page.waitForTimeout(400);
+  await page.waitForSelector(".card-box >> text=/ 0 paused/"); await page.waitForSelector(".bulk-bar", { state: "detached" });
   for (let i = 0; i < 3 && !(await page.locator("text=Preview").count()); i++) { await page.locator(".list-row").first().click(); await page.waitForTimeout(400); }
   await page.waitForSelector("text=Preview"); await page.screenshot({ path: `${shots}/04d-preview.png` });
   await page.click('[aria-label="Close preview"]');
