@@ -3,7 +3,7 @@
 import { chromium, type Page } from "playwright";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-const port = 4175;
+const port = 4175 + Number(process.env.PORT_OFFSET ?? 0); /* PORT_OFFSET lets several copies run at once */
 const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
 const shots = "test/e2e/shots"; fs.mkdirSync(shots, { recursive: true });

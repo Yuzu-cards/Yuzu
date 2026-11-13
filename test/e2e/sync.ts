@@ -1,7 +1,7 @@
 // Two browser contexts ("devices") sync through an in-process fake GitHub.
 import { chromium } from "playwright"; import { spawn } from "node:child_process";
 import { fakeGitHub } from "../fake-github.ts";
-const port = 8771; const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
+const port = 8771 + Number(process.env.PORT_OFFSET ?? 0); /* PORT_OFFSET lets several copies run at once */ const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
 const gh = fakeGitHub(); const browser = await chromium.launch(); const errors: string[] = [];
 async function device(name: string) {

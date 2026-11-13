@@ -4,7 +4,7 @@
 // light days and coach tips, Citrus's plan.json read back, and Yuzu's status.json written for the scheduler.
 import { chromium } from "playwright"; import { spawn } from "node:child_process"; import fs from "node:fs";
 import { fakeGoogle } from "../fake-google.ts"; import { parseBundleHeader } from "../../src/lib/drive.ts";
-const port = 4181; const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
+const port = 4181 + Number(process.env.PORT_OFFSET ?? 0); /* PORT_OFFSET lets several copies run at once */ const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
 const G = fakeGoogle(); const browser = await chromium.launch(); const errors: string[] = []; const fails: string[] = [];
 const ok = (name: string, cond: boolean, detail = "") => { console.log(`${cond ? "✓" : "✗"} ${name}${detail ? " — " + detail : ""}`); if (!cond) fails.push(name); };

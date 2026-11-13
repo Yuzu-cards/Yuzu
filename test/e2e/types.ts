@@ -1,7 +1,7 @@
 // New card types and study modes in a real browser: multiple-choice cards (tap an option, right/wrong shown with the
 // explanation, Good/Again suggested), and — added as they land — image occlusion, exam countdown, interleaving drills.
 import { chromium } from "playwright"; import { spawn } from "node:child_process";
-const port = 4183; const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
+const port = 4183 + Number(process.env.PORT_OFFSET ?? 0); /* PORT_OFFSET lets several copies run at once */ const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "-d", "docs"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
 const browser = await chromium.launch(); const errors: string[] = []; const fails: string[] = [];
 const ok = (name: string, cond: boolean, detail = "") => { console.log(`${cond ? "✓" : "✗"} ${name}${detail ? " — " + detail : ""}`); if (!cond) fails.push(name); };
