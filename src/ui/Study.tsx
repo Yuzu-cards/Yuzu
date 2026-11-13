@@ -229,6 +229,26 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const total = queue.length;
   useBack(true, onExit);
   const card = queue[idx] ? (store.cards.get(queue[idx].id) ?? queue[idx]) : undefined;
+  // Esc / pad B / Android back close the topmost thing first: the card menu, then an open hook editor, then the session.
+  const cancelHook = () => { setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); };
+  // (Not useBack: opening the hook box or a sheet from the menu in the same tap would race the history entries.)
+  useEffect(() => {
+    if (!menu && !hookOpen) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || document.querySelector(".sheet-backdrop, [role=dialog]")) return;
+      e.preventDefault(); e.stopPropagation(); if (menu) setMenu(false); else cancelHook();
+    };
+    window.addEventListener("keydown", onEsc, true); return () => window.removeEventListener("keydown", onEsc, true);
+  });
+  const menuRef = useRef<HTMLDivElement>(null);
+  // The card menu takes the focus when it opens (so Tab, the arrows and the pad move through it) and gives it back when it closes.
+  useEffect(() => {
+    if (!menu) return; const prev = document.activeElement as HTMLElement | null;
+    menuRef.current?.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
+    return () => { const now = document.activeElement; if (now && now !== document.body && now.isConnected && !menuRef.current?.contains(now)) return; // an item moved the focus on (the hook box)
+      if (prev && prev !== document.body && prev.isConnected) prev.focus({ preventScroll: true }); else (now as HTMLElement | null)?.blur?.(); };
+  }, [menu]);
+  const keysDown = useRef(new Set<string>()); // keys held since their keydown: a held key never flips and then grades
   const dark = store.settings.nightCards;
   const secs = useMemo(estimateSeconds, []);
 
@@ -246,8 +266,29 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!card || info || leech) return;
-      if ((e.target as HTMLElement)?.tagName === "INPUT") { if (e.key === "Enter") { e.preventDefault(); setShowAnswer(true); (e.target as HTMLInputElement).blur(); } return; }
+      const held = keysDown.current.has(e.key); keysDown.current.add(e.key);
+      if (!card || info || leech || improveOpen || improveFor || word) return;
+      // Typing in a text field (typed answer, my hook, a sheet's note) is typing, never a shortcut.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) {
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing && t.classList.contains("typeans")) {
+          e.preventDefault();
+          if (t.tagName === "INPUT") { setShowAnswer(true); t.blur(); }
+          else if (t.closest(".hook")) { t.blur(); void saveHook(); }
+        }
+        return;
+      }
+      if (document.querySelector(".sheet-backdrop, [role=dialog]")) return; // a sheet is over the card (Controls, confirm, …)
+      if (menu) { if (e.key === "m") setMenu(false); return; } // the menu's own keys move and press its items
+      if (hookOpen) return; // finish or cancel the hook first (Esc cancels)
+      if (e.repeat || held) { if (e.key === " " || e.key === "Enter" || /^[1-9]$/.test(e.key)) e.preventDefault(); return; } // auto-repeat: one press, one action
+      if (mcq && !showAnswer && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+        const opts = [...document.querySelectorAll<HTMLElement>(".study .mcq-opt:not([disabled])")]; if (!opts.length) return;
+        e.preventDefault(); const i = opts.indexOf(document.activeElement as HTMLElement);
+        opts[i < 0 ? (e.key === "ArrowDown" ? 0 : opts.length - 1) : (i + (e.key === "ArrowDown" ? 1 : opts.length - 1)) % opts.length].focus();
+        return;
+      }
+      if ((e.key === " " || e.key === "Enter") && t?.classList?.contains("mcq-opt")) return; // the highlighted option is pressed by the browser
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (!showAnswer) setShowAnswer(true); else answer(3); }
       if (showAnswer && ["1", "2", "3", "4"].includes(e.key)) answer(Number(e.key) as Rating);
       if (!showAnswer && mcq && /^[1-9]$/.test(e.key) && Number(e.key) <= mcq.length) { setPicked(Number(e.key) - 1); setShowAnswer(true); return; }
@@ -258,8 +299,10 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       if (e.key === "z" && (e.ctrlKey || e.metaKey)) undo();
       // Escape is handled by useBack (topmost overlay only), so an info sheet on top closes first.
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onUp = (e: KeyboardEvent) => { keysDown.current.delete(e.key); };
+    const onBlur = () => keysDown.current.clear();
+    window.addEventListener("keydown", onKey); window.addEventListener("keyup", onUp); window.addEventListener("blur", onBlur);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("keyup", onUp); window.removeEventListener("blur", onBlur); };
   });
 
   const note = card && store.noteFor(card);
@@ -306,6 +349,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const hintText = useMemo(() => (card ? hintFor(note ?? undefined, card.ord) : null), [card?.id]);
   const typedOk = typed && answerText ? norm(typed) === norm(answerText) || norm(answerText).split(/[;,/]|\s-\s/).map((x) => x.trim()).includes(norm(typed)) : null;
 
+  async function saveHook() { if (!card) return; await store.setHook(card.nid, hookText); setHookOpen(false); flash(hookText.trim() ? "Hook saved" : "Hook removed"); }
   const busy = useRef(false);
   async function answer(g: Rating) {
     if (!card || busy.current) return;
@@ -472,15 +516,21 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       {word && <WordSheet hit={word} deckPath={card.source} noteId={card.nid} onClose={() => setWord(null)} onSearch={onSearch} onMenu={() => setMenu(true)} />}
       {menu && (<>
         <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
-        <div className="menu">
-          <button onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
-          {voiceSupported() && <button onClick={() => { setMenu(false); setHands((h) => !h); flash(hands ? "Hands-free off" : "Hands-free on — say again, hard, good or easy"); }}>{hands ? "Stop hands-free" : "Hands-free (read aloud, answer by voice)"}</button>}
-          <button onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
-          <button onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
-          <button onClick={() => { setMenu(false); setImproveOpen(true); }}><IconEdit /> {store.improveFor(card.nid) ? "Marked to improve — change" : "Needs improving…"}</button>
-          <button className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
-          <button onClick={async () => { setMenu(false); if (!(await confirmSheet({ title: "Retire this card as mastered?", sub: "It is deleted and kept in the Mastered log (Progress).", yes: "I’ve mastered it", danger: false }))) return; await store.masterCards([card.id], "you"); setQueue((q) => q.filter((c, i) => i <= idx || c.id !== card.id)); flash("Retired as mastered"); setIdx((i) => i + 1); }}><IconFlag /> I've mastered this</button>
-          <button className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!(await confirmSheet({ title: sibs > 1 ? `Delete this note and its ${sibs} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([card.nid]); lastDel.current = { card, at: idx + 1, removed: queue.filter((c, i) => i > idx && c.nid === card.nid) }; setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>
+        <div className="menu" role="menu" aria-label="Card menu" ref={menuRef} onKeyDown={(e) => {
+          if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End" && e.key !== "Tab") return;
+          const items = [...e.currentTarget.querySelectorAll<HTMLElement>("button:not([disabled])")]; if (!items.length) return;
+          e.preventDefault(); const i = items.indexOf(document.activeElement as HTMLElement); const n = items.length;
+          const next = e.key === "Home" ? 0 : e.key === "End" ? n - 1 : e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey) ? (i - 1 + n) % n : (i + 1) % n;
+          items[next].focus();
+        }}>
+          <button role="menuitem" onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
+          {voiceSupported() && <button role="menuitem" onClick={() => { setMenu(false); setHands((h) => !h); flash(hands ? "Hands-free off" : "Hands-free on — say again, hard, good or easy"); }}>{hands ? "Stop hands-free" : "Hands-free (read aloud, answer by voice)"}</button>}
+          <button role="menuitem" onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
+          <button role="menuitem" onClick={() => { setMenu(false); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
+          <button role="menuitem" onClick={() => { setMenu(false); setImproveOpen(true); }}><IconEdit /> {store.improveFor(card.nid) ? "Marked to improve — change" : "Needs improving…"}</button>
+          <button role="menuitem" className="danger" onClick={async () => { setMenu(false); await store.setSuspended(card.id, true); flash("Paused — won't be shown again until unsuspended"); setIdx((i) => i + 1); }}><IconPause /> Pause this card</button>
+          <button role="menuitem" onClick={async () => { setMenu(false); if (!(await confirmSheet({ title: "Retire this card as mastered?", sub: "It is deleted and kept in the Mastered log (Progress).", yes: "I’ve mastered it", danger: false }))) return; await store.masterCards([card.id], "you"); setQueue((q) => q.filter((c, i) => i <= idx || c.id !== card.id)); flash("Retired as mastered"); setIdx((i) => i + 1); }}><IconFlag /> I've mastered this</button>
+          <button role="menuitem" className="danger" onClick={async () => { setMenu(false); const sibs = store.cardsOfNote(card.nid).length; if (!(await confirmSheet({ title: sibs > 1 ? `Delete this note and its ${sibs} cards?` : "Delete this card?", sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; await store.deleteNotes([card.nid]); lastDel.current = { card, at: idx + 1, removed: queue.filter((c, i) => i > idx && c.nid === card.nid) }; setQueue((q) => q.filter((c, i) => i <= idx || c.nid !== card.nid)); flash("Deleted — ↶ to undo"); setIdx((i) => i + 1); }}><IconClose /> Delete this card</button>
         </div>
       </>)}
       <div className="study-meta">
@@ -499,14 +549,14 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             {showAnswer && picked === null && <p className="small muted">You flipped the card without choosing.</p>}
             {showAnswer && picked !== null && <p className="small muted" style={{ margin: "8px 0 0" }}>{mcqRight ? "Correct — Good is suggested." : "Not this one — Again is suggested."}</p>}
           </div>}
-          {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={false} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
+          {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={typeof matchMedia === "function" && matchMedia("(pointer: fine)").matches} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
           {!showAnswer && hint && hintText && <div className="hint-line" onClick={(e) => e.stopPropagation()}>{hintText}</div>}
           {showAnswer && (hookOpen || hookText) && (
             <div className="hook" onClick={(e) => e.stopPropagation()}>
               {hookOpen ? (
                 <>
                   <textarea className="typeans" rows={2} placeholder="My hook — an image, a link, a mnemonic that makes this stick" value={hookText} onChange={(e) => setHookText(e.target.value)} autoFocus />
-                  <div className="row" style={{ marginTop: 6 }}><button className="btn grow" onClick={() => { setHookOpen(false); setHookText(store.hookFor(card.nid)); }}>Cancel</button><button className="btn primary grow" onClick={async () => { await store.setHook(card.nid, hookText); setHookOpen(false); flash(hookText.trim() ? "Hook saved" : "Hook removed"); }}>Save</button></div>
+                  <div className="row" style={{ marginTop: 6 }}><button className="btn grow" onClick={cancelHook}>Cancel</button><button className="btn primary grow" onClick={saveHook}>Save</button></div>
                 </>
               ) : <button className="hook-text" onClick={() => setHookOpen(true)}><span className="small muted">my hook</span>{hookText}</button>}
             </div>

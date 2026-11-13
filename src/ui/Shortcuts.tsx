@@ -4,7 +4,7 @@ import { useBack } from "./useBack";
 
 const ROWS: [string, [string, string, string][]][] = [
   ["Anywhere", [["Today · Library · Progress · Settings", "T · L · P · S", "LB / RB"], ["Start studying", "Enter (on Today)", "Menu"], ["Search", "/", "—"], ["Write a card · Capture", "N · C", "—"], ["Why so many reviews?", "W", "—"], ["Move between buttons · press", "Tab · Enter", "D-pad or stick · A"], ["Back / close", "Esc", "B"], ["This list", "?", "View"]]],
-  ["Studying", [["Show the answer", "Space", "A"], ["Again · Hard · Good · Easy", "1 · 2 · 3 · 4", "D-pad ← ↓ → ↑"], ["Good (after the answer)", "Space / Enter", "A"], ["Undo", "Ctrl+Z", "X"], ["Card info", "I", "Y"], ["Card menu", "M · right-click the card", "Menu"], ["First-letter hint", "H", "—"], ["Replay sound", "R", "—"], ["Pick an option (multiple choice)", "1–5", "D-pad"]]],
+  ["Studying", [["Show the answer", "Space", "A"], ["Again · Hard · Good · Easy", "1 · 2 · 3 · 4", "D-pad ← ↓ → ↑"], ["Good (after the answer)", "Space / Enter", "A"], ["Undo", "Ctrl+Z", "X"], ["Card info", "I", "Y"], ["Card menu", "M · right-click the card", "Menu"], ["First-letter hint", "H", "—"], ["Replay sound", "R", "—"], ["Pick an option (multiple choice)", "1–5 · ↑↓ then Enter", "D-pad ↑↓ choose · A confirm"], ["Card menu: move · press · close", "↑↓ · Enter · Esc", "D-pad · A · B"]]],
 ];
 
 export function ShortcutsSheet({ onClose }: { onClose: () => void }) {
