@@ -78,7 +78,8 @@ try {
   ok("fetched bytes intact", (await A.evaluate((n) => (window as any).yuzu.media.get(n)?.size, media["0"])) === fs.statSync(`${apkgDir}/0`).size);
   // ---- Rota from Drive → shifts → light days; Citrus's plan
   const rota = await y(A, "window.yuzu.rota"); ok("rota read from My Apps/Rotas (November 2026, your row)", rota["2026-11"]?.["3"] === "D2" && rota["2026-11"]?.["17"] === "N2", JSON.stringify(rota).slice(0, 80));
-  const w = await A.evaluate(() => { const y = (window as any).yuzu; return [y.dayWeight(new Date("2026-11-17T12:00:00").getTime()), y.dayWeight(new Date("2026-11-18T12:00:00").getTime()), y.dayWeight(new Date("2026-11-03T12:00:00").getTime())]; });
+  // the rota alone: Citrus's test plan below covers the next 10 real days and would win for the 17th/18th whenever the suite runs then
+  const w = await A.evaluate(() => { const y = (window as any).yuzu; const plan = y.plan; y.plan = null; y.rebuildShiftWeights(); const out = [y.dayWeight(new Date("2026-11-17T12:00:00").getTime()), y.dayWeight(new Date("2026-11-18T12:00:00").getTime()), y.dayWeight(new Date("2026-11-03T12:00:00").getTime())]; y.plan = plan; y.rebuildShiftWeights(); return out; });
   ok("night N2 on the 17th makes the 17th and 18th light; a day shift leaves the day normal", w[0] === 0.5 && w[1] === 0.5 && w[2] === 1, JSON.stringify(w));
   ok("rota synced through settings for the other devices", Object.keys(await y(A, "window.yuzu.settings.google.rota")).includes("2026-11"));
   const plan = await y(A, "window.yuzu.planToday()"); ok("Citrus's plan.json read: Yuzu's accepted block for today", plan.length === 1 && plan[0].start === "19:30" && plan[0].minutes === 25 && plan[0].accepted, JSON.stringify(plan));

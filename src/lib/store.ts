@@ -468,7 +468,7 @@ export class Store {
     ];
     return {
       contract: 2, metrics, progress, inbox: inbox.slice(0, 25), actions: actions.slice(0, 6),
-      app: "yuzu", title: "Yuzu", icon: "🍋", color: "#f2d34b", url: typeof location !== "undefined" ? location.origin + location.pathname : "", version: (typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev"), device: this.settings.deviceName || "device", updatedAt: new Date(now).toISOString(), summary,
+      app: "yuzu", title: "Yuzu", icon: "🍋", color: "#f2d34b", url: typeof location !== "undefined" ? location.origin + location.pathname : "", version: (typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev"), device: this.settings.deviceName || "device", updatedAt: new Date(now).toISOString(), drive: { byTag: true }, summary,
       ...(this.settings.citrusPlans ? { estimatedMinutes: needMin } : {}), due, ...(this.settings.showStreak ? { streak } : {}), nextDue: due ? "now" : "",
       today: { date: today, done: todayRevs.length >= Math.min(this.settings.dailyGoal, Math.max(10, due + todayRevs.length)), items: todayRevs.length ? [{ title: "Reviews", minutes, cards: todayRevs.length }] : [] },
       week: { start: (days as any[])[0].date, end: (days as any[])[6].date, done, target, need: Math.max(0, target - done), days: days as any },

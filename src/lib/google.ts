@@ -5,7 +5,7 @@
 // redirect URIs: the client only needs this app's origin among its authorised JavaScript origins. The one-hour token
 // lives in localStorage on this device only.
 //
-// Drive layout — Citrus's own (its code forces the root "My Apps"):
+// Drive layout — Citrus's (claude/drive-layout.md): folders are found by their citrusApp tag first (ANCHORS below), these old paths are the fallback:
 //   My Apps/Rotas/                    the department's schedule files (read; Citrus Maxima/Rotas too, where Orange looks)
 //   My Apps/hub/yuzu/status.json      Yuzu's "where I am" for Citrus (written)
 //   My Apps/hub/citrus/plan.json      Citrus's plan: blocks per app and the shift of each day (read)
@@ -107,8 +107,8 @@ const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 const q = (p: Record<string, string>) => new URLSearchParams(p).toString();
 export async function gjson(url: string, init?: RequestInit) { const r = await gfetch(url, init); return r.status === 404 ? null : r.status === 204 ? null : r.json(); }
 
-export async function listFiles(o: { parent?: string | null; name?: string | null; folders?: boolean; pageSize?: number; all?: boolean }): Promise<DriveFile[]> {
-  const parts = ["trashed = false"]; if (o.parent) parts.push(`'${esc(o.parent)}' in parents`); if (o.name) parts.push(`name = '${esc(o.name)}'`); if (o.folders) parts.push(`mimeType = '${FOLDER}'`);
+export async function listFiles(o: { parent?: string | null; name?: string | null; folders?: boolean; pageSize?: number; all?: boolean; tag?: string }): Promise<DriveFile[]> {
+  const parts = ["trashed = false"]; if (o.tag) parts.push(`appProperties has { key='citrusApp' and value='${esc(o.tag)}' }`); if (o.parent) parts.push(`'${esc(o.parent)}' in parents`); if (o.name) parts.push(`name = '${esc(o.name)}'`); if (o.folders) parts.push(`mimeType = '${FOLDER}'`);
   const out: DriveFile[] = []; let page: string | undefined;
   do {
     const j = await gjson(`${DRIVE}/files?${q({ q: parts.join(" and "), fields: "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,size,md5Checksum,appProperties)", pageSize: String(o.pageSize ?? (o.all ? 1000 : 100)), spaces: "drive", ...(page ? { pageToken: page } : {}) })}`);
@@ -138,9 +138,9 @@ async function createOnce(send: () => Promise<Response>, find: () => Promise<str
   }
 }
 const findMine = async (parent: string | null, name: string, yc: string, folders = false) => (await listFiles({ parent: parent ?? "root", name, folders })).find((f) => f.props?.yc === yc)?.id ?? null;
-export async function createFolder(name: string, parent: string | null): Promise<string> {
-  const yc = clientId();
-  return createOnce(() => gfetch(`${DRIVE}/files?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: FOLDER, appProperties: { yc }, ...(parent ? { parents: [parent] } : {}) }) }, savedToken(), 1), () => findMine(parent, name, yc, true));
+export async function createFolder(name: string, parent: string | null, tag?: string): Promise<string> {
+  const yc = clientId(); const appProperties: Record<string, string> = tag ? { yc, citrusApp: tag } : { yc };
+  return createOnce(() => gfetch(`${DRIVE}/files?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: FOLDER, appProperties, ...(parent ? { parents: [parent] } : {}) }) }, savedToken(), 1), () => findMine(parent, name, yc, true));
 }
 /** The folder at `path` under My Drive, created where missing; ids cached by path and re-checked only when a call about them fails. */
 export async function ensureFolders(path: string[], cache: Record<string, string>): Promise<string> { return (await findFolders(path, cache, true))!; }
@@ -149,18 +149,50 @@ export async function ensureFolders(path: string[], cache: Record<string, string
 // folders above it); until then every refresh spent a request per folder per call just to confirm ids it already had.
 const verified = new Set<string>();
 export function forgetVerified() { verified.clear(); }
+/**
+ * Citrus's Drive layout (claude/drive-layout.md, 17/11/2026): every app folder carries appProperties.citrusApp = "<id>" and
+ * Citrus moves it into Citrus/… once every app that reads it finds it by that tag. So the first folder of each of these old
+ * paths is found by its tag (oldest if several, checked once per app session), and only when nothing carries the tag does
+ * Yuzu fall back to the old path, creating it there (tagged at once) if it is missing too. A tagged folder anywhere means a
+ * path is never created, which is how twins would appear after a move. Yuzu never renames or moves these folders.
+ */
+export const ANCHORS: { path: string[]; tag: string }[] = [
+  { path: [HUB_ROOT, "Yuzu"], tag: "yuzu-data" },        // collection/, media/, backups/, collection/inbox and outbox
+  { path: [HUB_ROOT, "hub", "yuzu"], tag: "yuzu" },      // status.json
+  { path: [HUB_ROOT, "hub", "citrus"], tag: "citrus" },  // plan.json (read)
+  { path: [HUB_ROOT, "Rotas"], tag: "rotas" },           // the rota files (read)
+];
+const tagLooked = new Map<string, Promise<string | null>>(); // tag → its folder id this session (null: nothing carries it)
+export function forgetTags() { tagLooked.clear(); }
+/** The folder Citrus tagged `tag`: the oldest when there are several; null when none is tagged (yet). Errors are thrown, never read as "none". */
+export function folderByTag(tag: string): Promise<string | null> {
+  let p = tagLooked.get(tag);
+  if (!p) { p = listFiles({ folders: true, tag }).then((f) => (f.length ? [...f].sort(byAge)[0].id : null)); p.catch(() => tagLooked.delete(tag)); tagLooked.set(tag, p); }
+  return p;
+}
 export async function findFolders(path: string[], cache: Record<string, string>, create = false): Promise<string | null> {
   const full = path.join("/");
+  const anchor = ANCHORS.find((a) => a.path.length <= path.length && a.path.every((n, i) => path[i] === n));
+  let tagged: string | null = null;
+  if (anchor) {
+    const key = anchor.path.join("/"); tagged = await folderByTag(anchor.tag);
+    if (tagged) {
+      if (cache[key] !== tagged) { for (const k of Object.keys(cache)) if (k === key || k.startsWith(key + "/") || k.startsWith("?" + key)) delete cache[k]; cache[key] = tagged; } // found somewhere else (moved, or tagged after we cached the old path)
+      verified.add(tagged); delete cache["?" + key];
+    }
+  }
   if (cache[full] && verified.has(cache[full])) return cache[full];
   if (cache[full]) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(cache[full])}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (ok) { verified.add(cache[full]); return cache[full]; } }
-  let parent: string | null = null; let key = "";
-  for (const name of path) {
+  // under a tagged folder the walk starts there: the old path above it (My Apps…) may be gone after Citrus's move
+  let parent: string | null = tagged; let key = tagged ? anchor!.path.join("/") : "";
+  for (const name of tagged ? path.slice(anchor!.path.length) : path) {
     key = key ? `${key}/${name}` : name; let id: string | null = cache[key] ?? null;
     if (id && !verified.has(id)) { const ok = await gjson(`${DRIVE}/files/${encodeURIComponent(id)}?fields=id,trashed`).then((f: any) => f && !f.trashed, () => false); if (!ok) { id = null; delete cache[key]; } else verified.add(id); }
     if (!id) {
       const miss = cache["?" + key]; // "not there" (looked up within the day, and the changes feed showed nothing made there since)
       if (!create && miss && Date.now() - Number(miss.split("|")[0]) < MISSING_MS) return null;
-      id = await lookupFolder(parent, name, create); if (!id) { cache["?" + key] = `${Date.now()}|${parent ?? "root"}|${name}`; return null; }
+      const tagNow = anchor && key === anchor.path.join("/") ? anchor.tag : undefined; // the old path's own folder is made tagged at once
+      id = await lookupFolder(parent, name, create, tagNow); if (!id) { cache["?" + key] = `${Date.now()}|${parent ?? "root"}|${name}`; return null; }
       delete cache["?" + key]; cache[key] = id; verified.add(id);
     }
     parent = id;
@@ -177,12 +209,12 @@ export function folderAppeared(cache: Record<string, string>, parent: string | u
 // One lookup-or-create per folder at a time: the sync and the refresh both make "My Apps" on a fresh Drive, and without
 // this each made its own (two "My Apps" folders, the apps' files split between them).
 const inFlight = new Map<string, Promise<string | null>>();
-function lookupFolder(parent: string | null, name: string, create: boolean): Promise<string | null> {
+function lookupFolder(parent: string | null, name: string, create: boolean, tag?: string): Promise<string | null> {
   const k = `${parent ?? "root"}/${name}/${create ? 1 : 0}`; const cur = inFlight.get(k); if (cur) return cur;
   const p = (async () => {
     const made = inFlight.get(`${parent ?? "root"}/${name}/1`); if (!create && made) return made; // a create in progress answers a lookup too
     let found = await listFiles({ parent: parent ?? "root", name, folders: true });
-    if (!found.length && create) { await createFolder(name, parent); found = await listFiles({ parent: parent ?? "root", name, folders: true }); } // listed again: another device may have made one at the same moment
+    if (!found.length && create) { await createFolder(name, parent, tag); found = await listFiles({ parent: parent ?? "root", name, folders: true }); } // listed again: another device may have made one at the same moment
     if (!found.length) return null;
     return found.length > 1 ? mergeTwins(found) : found[0].id;
   })().finally(() => inFlight.delete(k));

@@ -75,7 +75,9 @@ test("04-10 finishOn counts today's remaining budget, and the exam today or tomo
 
 test("04-10 hub status texts: dd/mm/yyyy, today/tomorrow, the real share", () => {
   const s = crowd(); s.settings.deadlines = [exam(30) as any, { ...exam(1), id: "e2", name: "Oral" } as any];
-  let st: any; try { st = s.hubStatus(); } catch (err) { console.log("hubStatus not runnable in node:", (err as Error).message); return; }
+  // the fixture is built at 13/11/2026: ask for that day's status, not today's (Date.now and new Date() both pinned)
+  const RealDate = Date; (globalThis as any).Date = class extends RealDate { constructor(...a: any[]) { super(...((a.length ? a : [NOW]) as [])); } static now() { return NOW; } };
+  let st: any; try { st = s.hubStatus(); } catch (err) { console.log("hubStatus not runnable in node:", (err as Error).message); return; } finally { (globalThis as any).Date = RealDate; }
   const texts = JSON.stringify(st);
   assert.doesNotMatch(texts, /in [01] days/); assert.match(texts, /Oral tomorrow: too late/);
   const task = st.inbox.find((x: any) => x.id.startsWith("exam-e1")); assert.ok(task, "the German exam is not on track");
