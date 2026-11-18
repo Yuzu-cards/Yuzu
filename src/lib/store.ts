@@ -17,7 +17,7 @@ import { spokenText, backOnly } from "./voice";
 import { SIMILAR_TAG, mergeInto, similarPairs } from "./dupes";
 import { importMedia, mediaRefs, IMG, AUDIO, YUZU_MEDIA_MARK, shrinkImage, mimeFor, forgiving, type MediaEnv, type FolderHandles } from "../import/media";
 import { writeZip, streamZip, ZipParts } from "./zipwrite";
-import { savedToken, tokenValid, signIn, signOut, inTap, loadGis, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError, folderAppeared } from "./google";
+import { savedToken, tokenValid, signIn, signOut, inTap, prepareSignIn, onLateToken, signInMode, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError, folderAppeared } from "./google";
 import { DriveMedia, DriveSync, writeStatus, readStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
 import { mergeSettings, stampChanges, sanitizeSettings, shareable, withoutDeviceFields } from "./settingsync";
@@ -263,6 +263,8 @@ export class Store {
   private driveFetching = new Set<string>(); private driveTimer: ReturnType<typeof setTimeout> | null = null; private driveBusy = false; private driveAgain = false;
   private lastStatusFp = ""; private lastStatusAt = 0; private lastStatusLook = 0; private statusMark = ""; private statusWroteAt = ""; private statusTimer: ReturnType<typeof setTimeout> | null = null; private syncedThisSession = false;
   googleConnected(): boolean { return tokenValid(); }
+  /** What Google sent back to this page at start-up (main.tsx reads it before the first screen). */
+  signInReturn: null | { ok: boolean; message?: string } = null;
   googleSignedIn(): boolean { return !!savedToken(); }
   googleEmail(): string { return savedToken()?.email ?? ""; }
   private setGoogle(state: typeof this.googleStatus.state, message: string) { this.googleStatus = { state, message, at: Date.now() }; this.uiBump(); }
@@ -272,6 +274,10 @@ export class Store {
   async googleConnect(): Promise<void> {
     const renew = !!savedToken()?.email;
     await signIn(this.clientId(), { renew });
+    await this.afterSignIn();
+  }
+  /** After a token arrived (from the window, a late answer, or back from Google's page): Drive becomes this device's home. */
+  private async afterSignIn(): Promise<void> {
     const email = await whoAmI(); this.setGoogle("ok", `Connected as ${email || "you"}`);
     if (this.settings.sync.backend !== "drive") { await this.saveSettings({ sync: { ...this.settings.sync, backend: "drive" } }); this.log(true, "Sync now goes through Google Drive (My Apps/Yuzu)", 0); }
     this.googleRefresh("connect").catch(() => {}); this.scheduleSync(500);
@@ -283,14 +289,22 @@ export class Store {
    */
   async renewOnTap(): Promise<boolean> {
     if (tokenValid()) return true; if (!savedToken()?.email || !inTap()) return false;
+    // signing in through the page leaves Yuzu: only Settings → Google → Reconnect does that, never a sync or a pull-down
+    if (signInMode() === "page") { this.setGoogle("error", "Google's hour is up: Settings › Google › Reconnect (Google opens in this page and comes back)"); return false; }
     try { await signIn(this.clientId(), { renew: true }); this.setGoogle("ok", `Connected as ${this.googleEmail() || "you"}`); return true; }
     catch (e: any) { this.setGoogle("error", e?.message ?? String(e)); return false; }
   }
   /** At start-up: who is signed in (also from the short-lived bridge build of 02/11), and Google's script preloaded. */
   async googleBoot(): Promise<void> {
     try { const old = JSON.parse(localStorage.getItem("yuzu_hub") || "null"); if (old?.email && !savedToken()) localStorage.setItem("yuzu-google", JSON.stringify({ access: "", expires: 0, email: old.email, scope: "" })); localStorage.removeItem("yuzu_hub"); localStorage.removeItem("yuzu-gauth"); localStorage.removeItem("yuzu-gsilent"); } catch { /* fine */ }
+    // the token client is built now, signed in or not, so the first tap on Connect opens Google's window inside the tap
+    // (awaiting Google's script inside the tap made the browser block the window: the Steam Deck, 18/11/2026)
+    prepareSignIn(this.clientId()).catch(() => {});
+    onLateToken(() => { this.afterSignIn().catch(() => {}); });
+    const back = this.signInReturn; this.signInReturn = null;
+    if (back?.ok) { this.afterSignIn().catch((e) => this.setGoogle("error", e?.message ?? String(e))); return; }
+    if (back && !back.ok) { this.setGoogle("error", back.message ?? "Google sign-in didn't finish. Tap Connect again."); if (!savedToken()) return; }
     if (!savedToken()) return;
-    loadGis().catch(() => {}); // so the first tap can open Google's window at once
     if (tokenValid()) this.googleStatus = { state: "ok", message: `Connected as ${this.googleEmail() || "you"}`, at: 0 };
     else this.googleStatus = { state: "error", message: "Google needs a tap: press Sync now (or pull down on Today)", at: 0 };
   }

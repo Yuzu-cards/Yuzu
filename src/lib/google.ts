@@ -46,24 +46,114 @@ export function loadGis(): Promise<void> {
 }
 /** Whether this moment is inside a tap (only then may Google's window open on a phone). */
 export const inTap = () => (typeof navigator !== "undefined" && (navigator as any).userActivation ? !!(navigator as any).userActivation.isActive : true);
+
+// ---- what happened last, for Settings → Google and Diagnostics (a sign-in that fails on one device is otherwise a mystery)
+const EVENT_KEY = "yuzu-google-event";
+export function lastSignInEvent(): { at: number; what: string } | null { try { return JSON.parse(localStorage.getItem(EVENT_KEY) || "null"); } catch { return null; } }
+function noteEvent(what: string) { try { localStorage.setItem(EVENT_KEY, JSON.stringify({ at: Date.now(), what })); } catch { /* fine */ } }
+
+// ---- two ways to sign in (Sudachi 1.4 / Mephisto 13.11, claude/cloud-model.md "Sign-in")
+// "window": Google's own small window (the token client). It must open inside the tap, so the client is built at start-up
+//   and the tap calls it straight away; awaiting Google's script inside the tap is what made the browser block the window
+//   on a device that had never signed in (the Steam Deck, 18/11/2026).
+// "page": this page goes to Google and comes back with the token in the address. For browsers that block or lose the
+//   window (the Steam Deck's, some installed apps). Chosen by the owner in Settings, or automatically once the window
+//   failed on this device. Needs https://yuzu-cards.github.io/Yuzu/ under "Authorized redirect URIs" of the shared client.
+const MODE_KEY = "yuzu-google-mode"; const BACK_KEY = "yuzu-google-back";
+export type SignInMode = "window" | "page";
+export function signInMode(): SignInMode { try { return localStorage.getItem(MODE_KEY) === "page" ? "page" : "window"; } catch { return "window"; } }
+export function setSignInMode(m: SignInMode) { try { localStorage.setItem(MODE_KEY, m); } catch { /* fine */ } }
+export const returnAddress = () => location.origin + location.pathname.replace(/index\.html$/, "");
+
+type Pending = { resolve: (t: GoogleToken) => void; reject: (e: GoogleError) => void };
+let client: any = null; let clientFor = ""; let pending: Pending | null = null; let closeGrace: ReturnType<typeof setTimeout> | undefined;
+const late: ((t: GoogleToken) => void)[] = [];
+/** A token that arrived after the caller had given up (Google said "window closed" first): the store hears about it here. */
+export function onLateToken(fn: (t: GoogleToken) => void) { late.push(fn); }
+function keepToken(r: any): GoogleToken {
+  const prev = savedToken();
+  const t: GoogleToken = { access: r.access_token, expires: Date.now() + (Number(r.expires_in) || 3600) * 1000, scope: r.scope || SCOPE, email: prev?.email };
+  saveToken(t); return t;
+}
+const driveAllowed = (r: any) => String(r.scope || "").split(/\s+/).includes("https://www.googleapis.com/auth/drive");
+const NO_DRIVE = "Google signed you in but did not allow Drive. Tap Connect again and tick the box for Google Drive.";
+/** Load Google's script and build the token client once, so a later tap opens the window at once (call at start-up). */
+export async function prepareSignIn(clientId: string): Promise<boolean> {
+  if (!clientId) return false;
+  await loadGis();
+  if (client && clientFor === clientId) return true;
+  client = window.google.accounts.oauth2.initTokenClient({
+    client_id: clientId, scope: SCOPE, include_granted_scopes: true,
+    callback: (r: any) => {
+      // kept even when Google reported "window closed" first: on phones and installed apps the closing can be seen before
+      // the answer arrives (Sudachi's sign-in loop of 18/11/2026)
+      const p = pending; pending = null; clearTimeout(closeGrace);
+      noteEvent(r?.error ? `window: ${r.error}` : "window: token");
+      if (r?.error) { p?.reject(new GoogleError(/interaction|login_required|consent/.test(r.error) ? "Google needs you to sign in again." : `Google sign-in: ${r.error_description || r.error}`, 401, true)); return; }
+      if (!r?.access_token) { p?.reject(new GoogleError("Google sent no sign-in. Tap Connect again.", 0, true)); return; }
+      if (r.scope && !driveAllowed(r)) { p?.reject(new GoogleError(NO_DRIVE, 403, true)); return; }
+      const t = keepToken(r);
+      if (p) p.resolve(t); else for (const fn of late) { try { fn(t); } catch { /* fine */ } }
+    },
+    error_callback: (e: any) => {
+      const type = e?.type || "error"; noteEvent(`window: ${type}`);
+      if (!pending) return;
+      if (type === "popup_closed") { // wait a little for an answer that is still on its way; never open a second window
+        const p = pending; clearTimeout(closeGrace);
+        closeGrace = setTimeout(() => { if (pending !== p) return; pending = null; setSignInMode("page");
+          p.reject(new GoogleError("Google's window closed without its answer. Tap Connect once more: this time Google opens in this page and comes back here.", 0, true)); }, 8000);
+        return;
+      }
+      const p = pending; pending = null;
+      if (type === "popup_failed_to_open") setSignInMode("page"); // this browser blocks the window: use the page from now on
+      p.reject(new GoogleError(type === "popup_failed_to_open" ? "This browser blocked Google's window. Tap Connect again: Google will open in this page and come back here." : `Google sign-in: ${e?.message || type}`, 0, true));
+    },
+  });
+  clientFor = clientId; return true;
+}
 /**
  * Get a token. Call from a tap. `renew`: the account already agreed, so Google answers without asking (a window flashes
- * and closes); otherwise it shows the account chooser and the consent screen.
+ * and closes); otherwise it shows the account chooser and the consent screen. In "page" mode the page leaves for Google.
  */
-export async function signIn(clientId: string, { renew = false } = {}): Promise<GoogleToken> {
-  if (!clientId) throw new GoogleError("No Google client ID (Settings → Google → advanced).");
-  await loadGis();
+export function signIn(clientId: string, { renew = false } = {}): Promise<GoogleToken> {
+  if (!clientId) return Promise.reject(new GoogleError("No Google client ID (Settings → Google → advanced)."));
+  if (signInMode() === "page") return signInPage(clientId, { renew });
   const prev = savedToken();
-  const tok = await new Promise<any>((resolve, reject) => {
-    const client = window.google.accounts.oauth2.initTokenClient({
-      client_id: clientId, scope: SCOPE, include_granted_scopes: true, ...(prev?.email ? { hint: prev.email } : {}),
-      callback: (r: any) => (r?.error ? reject(new GoogleError(/interaction|login_required|consent/.test(r.error) ? "Google needs you to sign in again." : `Google sign-in: ${r.error_description || r.error}`, 401, true)) : resolve(r)),
-      error_callback: (e: any) => reject(new GoogleError(e?.type === "popup_closed" ? "Sign-in window closed." : e?.type === "popup_failed_to_open" ? "The browser blocked Google's window. Tap again." : `Google sign-in: ${e?.message || e?.type || "failed"}`)),
-    });
-    client.requestAccessToken({ prompt: renew ? "" : "consent" });
+  const ask = () => new Promise<GoogleToken>((resolve, reject) => {
+    if (pending) pending.reject(new GoogleError("Sign-in started again.", 0, true));
+    pending = { resolve, reject }; clearTimeout(closeGrace); noteEvent("window: opening");
+    client.requestAccessToken({ prompt: renew ? "" : "consent", ...(prev?.email ? { hint: prev.email, login_hint: prev.email } : {}) }); // synchronous: keeps the tap's permission to open a window
   });
-  const t: GoogleToken = { access: tok.access_token, expires: Date.now() + (Number(tok.expires_in) || 3600) * 1000, scope: tok.scope || SCOPE, email: prev?.email };
-  saveToken(t); return t;
+  if (client && clientFor === clientId) return ask();
+  return prepareSignIn(clientId).then(ask); // not ready yet (offline at start, or a new client id): may be blocked; then the page is used next time
+}
+
+/** Leave for Google's sign-in page; Yuzu opens again with the token in the address (`takeSignInReturn`). */
+export function signInPage(clientId: string, { renew = false } = {}): Promise<GoogleToken> {
+  const state = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
+  try { localStorage.setItem(BACK_KEY, JSON.stringify({ state, at: Date.now(), search: location.search })); } catch { /* fine */ }
+  const q = new URLSearchParams({ client_id: clientId, redirect_uri: returnAddress(), response_type: "token", scope: SCOPE, include_granted_scopes: "true", state });
+  if (!renew) q.set("prompt", "consent");
+  const prev = savedToken(); if (prev?.email) q.set("login_hint", prev.email);
+  noteEvent("page: away to Google");
+  location.assign("https://accounts.google.com/o/oauth2/v2/auth?" + q);
+  return new Promise(() => { /* the page is leaving */ });
+}
+/**
+ * At start-up, before the first screen: if Google just sent us back, keep the token and wipe it from the address.
+ * → null (nothing came back) | { ok: true } | { ok: false, message }. An answer this device didn't ask for is ignored.
+ */
+export function takeSignInReturn(): null | { ok: boolean; message?: string } {
+  if (typeof location === "undefined") return null;
+  const h = location.hash || ""; if (!/[#&](access_token|error)=/.test(h)) return null;
+  const r = Object.fromEntries(new URLSearchParams(h.slice(1)));
+  let back: { state: string; at: number; search?: string } | null = null;
+  try { back = JSON.parse(localStorage.getItem(BACK_KEY) || "null"); localStorage.removeItem(BACK_KEY); } catch { /* fine */ }
+  try { history.replaceState(null, "", location.pathname + (back?.search ?? "")); } catch { /* fine */ }
+  if (!back || back.state !== r.state || Date.now() - back.at > 30 * 60000) { noteEvent("page: answer not asked for (ignored)"); return { ok: false, message: "That Google answer wasn't for this sign-in. Tap Connect again." }; }
+  if (r.error) { noteEvent(`page: ${r.error}`); return { ok: false, message: r.error === "access_denied" ? "Google sign-in was cancelled." : `Google sign-in: ${r.error}` }; }
+  if (!driveAllowed(r)) { noteEvent("page: Drive not allowed"); return { ok: false, message: NO_DRIVE }; }
+  keepToken(r); noteEvent("page: token"); return { ok: true };
 }
 export function signOut() { const t = savedToken(); try { if (t?.access && window.google?.accounts?.oauth2) window.google.accounts.oauth2.revoke(t.access, () => {}); } catch { /* fine */ } forgetToken(); }
 /** The account's email, for the Settings row and the hint on the next sign-in. */

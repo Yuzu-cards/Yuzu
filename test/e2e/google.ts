@@ -89,7 +89,9 @@ try {
   ok("the stale hub/yuzu/state.json was binned", ![...G.files.values()].some((f) => f.name === "state.json" && !f.trashed));
   await A.click("nav.tabs >> text=Today"); await A.waitForTimeout(500);
   ok("coach shows Citrus's block", /Citrus planned 25 min at 19:30/.test(await A.evaluate(() => document.body.innerText)));
-  ok("coach: night shift tomorrow (from Citrus)", /Night shift tomorrow/.test(await A.evaluate(() => document.body.innerText)));
+  // one shift tip shows; on a day that follows a night in the test rota (it holds real dates) "off the night shift" comes first
+  const postNight = await A.evaluate(() => { const y = (window as any).yuzu; const s = y.shiftOn(y.isoToday()); return !!s?.afterNight && s.kind !== "night"; });
+  ok("coach: night shift tomorrow (from Citrus)", (postNight ? /Off the night shift/ : /Night shift tomorrow/).test(await A.evaluate(() => document.body.innerText)), postNight ? "today follows a night in the test rota" : "");
   // ---- status.json for the scheduler
   const st = G.at(["My Apps", "hub", "yuzu"]); const status = st.has("status.json") ? JSON.parse(st.get("status.json")!) : null;
   ok("status.json written in the hub shape", !!status && status.app === "yuzu" && typeof status.summary === "string" && Array.isArray(status.asks) && status.week?.days?.length === 7 && status.today?.date === today, JSON.stringify(status)?.slice(0, 160));

@@ -7,6 +7,9 @@ import * as fsrs from "./scheduler/fsrs";
 
 import { applyTheme } from "./ui/sfx";
 import { claimTab } from "./lib/tabs";
+import { takeSignInReturn } from "./lib/google";
+// Back from Google's sign-in page: keep the token and wipe it from the address before anything is drawn or logged.
+store.signInReturn = takeSignInReturn();
 // Another tab took over: this copy stops (it reloads into the "open elsewhere" screen, so nothing stale can be written).
 const lost = () => { store.handedOff(); };
 const start = () => store.load().then(() => { applyTheme(store.settings.theme); setHiddenFields(store.settings.hiddenFields ?? []); }).catch(() => { /* shown by the recovery screen */ });

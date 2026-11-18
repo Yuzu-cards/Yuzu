@@ -1,3 +1,4 @@
+import { lastSignInEvent, setSignInMode, signInMode, type SignInMode } from "../lib/google";
 import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
@@ -551,6 +552,7 @@ function GoogleSection() {
           {on && <button className="btn" disabled={busy || st.state === "working"} onClick={() => act(() => store.googleRefresh("manual"))}>Refresh now</button>}
           <span className={"small " + (st.state === "error" ? "" : "muted")} style={st.state === "error" ? { color: "var(--again)" } : undefined}>{st.message}</span>
         </div>
+        <SignInWay />
         {signed && !on && <p className="small muted" style={{ margin: "6px 0 0" }}>Google's sign-in lasts an hour; phones only let it renew from a tap. <b>Sync now</b> or a pull-down on Today renews it without asking again.</p>}
         {msg && <p className="small" style={{ marginBottom: 0 }}>{msg}</p>}
         {signed && <p className="small muted" style={{ margin: "8px 0 0" }}>Cards sync through <b>{store.syncBackend() === "drive" ? "Google Drive" : "GitHub"}</b>. {store.syncBackend() === "drive" ? (ghReady && <button className="chip" onClick={async () => { if (!(await confirmSheet({ title: "Sync through GitHub instead of Drive?", sub: `Cards will sync with ${s.sync.owner}/${s.sync.repo} from now on. Drive keeps its copy but stops getting new changes from this device.`, yes: "Use GitHub", danger: false }))) return; await store.saveSettings({ sync: { ...s.sync, backend: "github" } }); snackbar("Cards now sync through GitHub", async () => { await store.saveSettings({ sync: { ...store.settings.sync, backend: "drive" } }); }); }}>Use GitHub instead</button>) : <button className="chip orange" onClick={() => { store.saveSettings({ sync: { ...s.sync, backend: "drive" } }); store.scheduleSync(500); }}>Use Drive</button>}</p>}
@@ -713,4 +715,21 @@ function FullBackupButton() {
     catch (e: any) { snackbar("Backup failed: " + (e?.message ?? e)); }
     finally { setPct(null); }
   }}>{pct === null ? "Full backup" : `Backing up… ${pct}%`}</button>;
+}
+
+/** How Google's sign-in opens on this device: its own small window, or this page going to Google and coming back (for the
+ * Steam Deck's browser and others that block or lose the window). Plus the last step, so a failed sign-in can be explained. */
+function SignInWay() {
+  const [, redraw] = useState(0); const mode = signInMode(); const ev = lastSignInEvent(); // read each time: Yuzu may switch by itself
+  const pick = (m: SignInMode) => { setSignInMode(m); redraw((n) => n + 1); };
+  const when = ev ? new Date(ev.at) : null;
+  return <div style={{ margin: "10px 0 0" }}>
+    <div className="row small" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}><span>Google opens</span>
+      <div className="seg" role="group" aria-label="How Google's sign-in opens on this device">
+        <button aria-pressed={mode === "window"} className={mode === "window" ? "on" : ""} onClick={() => pick("window")}>In a small window</button>
+        <button aria-pressed={mode === "page"} className={mode === "page" ? "on" : ""} onClick={() => pick("page")}>In this page</button>
+      </div></div>
+    <p className="small muted" style={{ margin: "4px 0 0" }}>{mode === "page" ? "Yuzu goes to Google and comes back signed in. Use this when the small window never opens or closes without signing in (the Steam Deck's browser, some installed apps). This device only." : "If the window never opens, or closes without signing you in, switch to \u201cIn this page\u201d. Yuzu also switches by itself after a failed window. This device only."}
+      {ev && when ? <> Last step: <b>{ev.what}</b> at {String(when.getDate()).padStart(2, "0")}/{String(when.getMonth() + 1).padStart(2, "0")}/{when.getFullYear()} {String(when.getHours()).padStart(2, "0")}:{String(when.getMinutes()).padStart(2, "0")}.</> : null}</p>
+  </div>;
 }
