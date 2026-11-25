@@ -2,13 +2,15 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
-import { renderCard, noteTitle } from "../lib/render";
+import { renderCard, noteTitle, rewriteCssUrls } from "../lib/render";
+import { lineText } from "../lib/line";
+import type { Entry } from "../lib/lexicon";
 import { sanitizeFragment, sanitizeCss } from "../lib/sanitize";
 import { MCQ_ID, parseOptions, shuffled } from "../lib/mcq";
 import { expectedAnswer, checkTyped, plainField, VOCAB_NT } from "../lib/typed";
-import { voiceSupported, speak, stopSpeaking, listen, stopListening, spokenText, backOnly, RATING_WORDS, LETTER_WORDS } from "../lib/voice";
+import { voiceSupported, canSpeak, speaking, speak, stopSpeaking, listen, stopListening, spokenText, backOnly, RATING_WORDS, LETTER_WORDS } from "../lib/voice";
 import { previewIntervals, humanInterval, retrievability, DAY } from "../scheduler/fsrs";
-import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit } from "./icons";
+import { IconClose, IconUndo, IconFlag, IconPause, IconInfo, IconMore, IconEdit, IconSound } from "./icons";
 import { systemColor, stamp, tilt } from "./theme";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
@@ -45,22 +47,25 @@ hr#answer { border: 0; border-top: 2px dashed rgba(0,0,0,.18); margin: 16px -4px
 .night_mode .card, .card.night_mode { color: #f2f2f0; background: transparent; }
 `;
 
-export function CardView({ html, css, dark, side = "front", autoplay = false, quiet = false }: { html: string; css: string; dark: boolean; side?: "front" | "back"; autoplay?: boolean; /** a second piece of the same card (MCQ explanation): wires its buttons but never starts or stops sounds */ quiet?: boolean }) {
+export function CardView({ html, css, dark, side = "front", autoplay = false, quiet = false, deck }: { html: string; css: string; dark: boolean; side?: "front" | "back"; autoplay?: boolean; /** a second piece of the same card (MCQ explanation): wires its buttons but never starts or stops sounds */ quiet?: boolean; /** the card's deck: its look (Deck options) decides the style */ deck?: string }) {
   const ref = useRef<HTMLDivElement>(null);
+  // The deck's look: its own (the note type's CSS plus the deck's shared CSS and fonts) or the Yuzu reading style on top.
+  const look = deck !== undefined ? store.lookFor(deck) : { own: store.settings.cardStyle === "deck", css: "" };
+  const deckCss = look.css ? rewriteCssUrls(look.css, store.mediaUrl) : "";
   useEffect(() => {
     const host = ref.current!;
     const root = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const cls = dark ? "night_mode nightMode" : "";
-    const skin = store.settings.cardStyle !== "deck";
+    const skin = !look.own; host.dataset.look = skin ? "yuzu" : "own";
     root.innerHTML = `<style></style><style></style>${skin ? "<style></style>" : ""}<div class="${cls}"><div class="card ${cls}${skin && isShortCard(html) ? " yz-short" : ""}"></div></div>`;
     // Deck CSS and HTML are set as text / cleaned nodes, never spliced into markup (no </style> breakout, no handlers).
-    const sheets = root.querySelectorAll("style"); sheets[0].textContent = BASE_CSS; sheets[1].textContent = sanitizeCss(css); if (skin) sheets[2].textContent = SKIN_CSS;
+    const sheets = root.querySelectorAll("style"); sheets[0].textContent = BASE_CSS; sheets[1].textContent = sanitizeCss(deckCss ? css + "\n" + deckCss : css); if (skin) sheets[2].textContent = SKIN_CSS;
     root.querySelector(".card")!.append(sanitizeFragment(html));
     host.scrollTop = 0;
     const own = wireSounds(root, side);
     if (quiet) return;
     if (autoplay && own.length) playSounds(own); else stopSounds();
-  }, [html, css, dark]);
+  }, [html, css, dark, look.own, deckCss]);
   useEffect(() => () => { if (!quiet) stopSounds(); }, []);
   return <div ref={ref} className={"card-host" + (dark ? " dark" : "") + (quiet ? " card-tail" : "")} />;
 }
@@ -154,7 +159,7 @@ export function Paper({ card, html, css, dark, side, children }: { card: Card; h
       <div className={"paper" + (dark ? " slate" : "")}>
         <span className="stamp" data-hint={`Card state|${STAMP_HINT[card.suspended ? "suspended" : card.state] ?? ""}`}>{stamp(card)}</span>
         <span className="spine-hit" data-hint={`${system ?? "Unclassified"}|The coloured spine shows the body system this card belongs to.`} />
-        <CardView html={html} css={css} dark={dark} side={side} autoplay={store.settings.autoplay} />
+        <CardView html={html} css={css} dark={dark} side={side} autoplay={store.settings.autoplay} deck={card.source} />
         {children}
       </div>
     </div>
@@ -266,6 +271,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [menu, setMenu] = useState(false); const [hands, setHands] = useState(false);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null); useEffect(() => { if (!menu) setMenuAt(null); }, [menu]); // a right-click opens it at the pointer
   const [word, setWord] = useState<WordHit | null>(null);
+  // Tap a word on the back: its meaning from your own vocab cards, in a small bubble by the word.
+  const [bubble, setBubble] = useState<{ hit: WordHit; entries: Entry[]; x: number; y: number; up: boolean } | null>(null);
   const holdMode = (() => { try { return localStorage.getItem("yuzu-hold") === "system" ? "system" : "yuzu"; } catch { return "yuzu"; } })();
   const total = queue.length;
   useBack(true, onExit);
@@ -303,7 +310,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
     setQueue((q) => { const seen = new Set(q.slice(idx).map((c) => c.id)); const add = back.filter((c) => !seen.has(c.id)); if (!add.length) return q; const at = Math.min(q.length, idx + 1); setGrew({ n: add.length, at: now }); if (preset) return insertApart(q, at, add, (c) => store.drillSystem(c)); return [...q.slice(0, at), ...add, ...q.slice(at)]; }); // a drill keeps systems apart
   }, [idx]);
 
-  useEffect(() => { shownAt.current = Date.now(); setShowAnswer(false); setPicked(null); setInfo(false); setTyped(""); setHint(false); setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); }, [card?.id]);
+  useEffect(() => { shownAt.current = Date.now(); setBubble(null); lastRead.current = 0; setShowAnswer(false); setPicked(null); setInfo(false); setTyped(""); setHint(false); setHookOpen(false); setHookText(card ? store.hookFor(card.nid) : ""); }, [card?.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -337,6 +344,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       if (e.key === "i") setInfo(true);
       if (e.key === "m") setMenu((m) => !m);
       if (e.key === "h" && !showAnswer) setHint(true);
+      if (e.key === "l" && showAnswer && canRead) readLine();
       if (e.key === "r") playSounds(cardSounds(document.querySelector(".study .card-host")?.shadowRoot));
       if (e.key === "z" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
       // Escape is handled by useBack (topmost overlay only), so an info sheet on top closes first.
@@ -389,6 +397,42 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const verdict = typed && expected ? checkTyped(typed, expected) : null; const typedOk = verdict?.ok ?? null;
 
   async function saveHook() { if (!card) return; await store.setHook(card.nid, hookText); setHookOpen(false); flash(hookText.trim() ? "Hook saved" : "Hook removed"); }
+  // Per-deck: the line's place in an ordered deck and the line before it; reading the line aloud; tapping words.
+  const deckOpts = store.settings.deckOpts;
+  const lineInfo = useMemo(() => (card ? store.lineOf(card) : null), [card?.id, rev, deckOpts]);
+  const lang = card ? store.langFor(card.source) : null;
+  const dOpts = card ? store.optsFor(card.source).opts : {};
+  const readMode = dOpts.readAloud ?? "button";
+  const canRead = !!lang && readMode !== "off" && canSpeak();
+  const tapWords = !!lang && dOpts.tapWord !== false;
+  const lineToSay = useMemo(() => (note && nt && lang ? lineText(note, nt, { lang, example: true }) : ""), [card?.id, rev, lang]);
+  const prevTexts = useMemo(() => (lineInfo?.prevs ?? []).map((p) => lineText(p, store.notetypeFor(p), { lang })).filter(Boolean), [lineInfo, lang]);
+  const lastRead = useRef(0);
+  useEffect(() => { if (tapWords) store.warmLexicon(); }, [tapWords]); // the first tap shouldn't wait for the dictionary
+  /** Read the line in the deck's language; again within a few seconds (or while it is still being read): slower. */
+  function readLine() { if (!lineToSay || !lang) return; const slow = dOpts.readPace === "slow" || speaking() || Date.now() - lastRead.current < 6000; lastRead.current = Date.now(); stopSounds(); void speak(lineToSay, lang, slow); }
+  // "Read on every flip": after the card's own sound, and never when the back already plays its own recording.
+  useEffect(() => {
+    if (!showAnswer || readMode !== "auto" || !canRead || hands || !rendered) return; let dead = false;
+    const back = rendered.back.slice(Math.max(0, rendered.back.search(/<hr[^>]*id=["']?answer/i)));
+    if (store.settings.autoplay && /class="yz-sound[ "][^>]*data-src/.test(back)) return;
+    const t = setTimeout(() => { void whenSoundsDone().then(() => { if (!dead) { lastRead.current = Date.now(); void speak(lineToSay, lang!, dOpts.readPace === "slow"); } }); }, 120);
+    return () => { dead = true; clearTimeout(t); stopSpeaking(); };
+  }, [showAnswer, card?.id]);
+  useEffect(() => { // any key closes the word bubble (Escape only closes it); the key still does its job
+    if (!bubble) return; const k = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); } setBubble(null); };
+    window.addEventListener("keydown", k, true); return () => window.removeEventListener("keydown", k, true);
+  }, [bubble]);
+  function tapWord(e: React.MouseEvent) {
+    const path = (e.nativeEvent.composedPath?.() ?? []) as Element[];
+    if (path.some((el) => el && /^(A|BUTTON|INPUT|TEXTAREA|SELECT|SUMMARY|AUDIO|VIDEO|LABEL)$/.test(el.tagName ?? ""))) return; // a link or a sound button does its own thing
+    const host = path.find((el) => el?.classList?.contains("card-host")); const root = host?.shadowRoot; if (!root || !card) return;
+    const hit = wordAt(root, e.clientX, e.clientY); if (!hit) return;
+    const entries = store.meaningOf(hit.word, card.source, card.nid);
+    const r = hit.range.getBoundingClientRect(); const W = Math.min(300, innerWidth - 16);
+    const up = r.bottom + 150 > innerHeight;
+    setBubble({ hit, entries, x: Math.max(8, Math.min(innerWidth - W - 8, r.left + r.width / 2 - W / 2)), y: up ? r.top - 8 : r.bottom + 8, up });
+  }
   const busy = useRef(false);
   async function answer(g: Rating) {
     if (!card || busy.current) return;
@@ -596,6 +640,18 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
       </div>
       {improveOpen && <ImproveSheet nids={[card.nid]} onClose={() => setImproveOpen(false)} />}
+      {bubble && (() => { const top = bubble.entries[0]; const sl = (lang ?? "de").slice(0, 2); return (
+        <div className={"word-bubble" + (bubble.up ? " up" : "")} style={{ left: bubble.x, top: bubble.y, width: Math.min(300, innerWidth - 16) }} aria-live="polite" data-testid="word-bubble" onClick={(e) => e.stopPropagation()}>
+          {top ? <>
+            <div className="wb-word">{top.word}</div>
+            <div className="wb-meaning">{top.meaning}</div>
+            <div className="wb-from small muted">{top.deck.split("::").slice(-2).join(" › ")}{bubble.entries.length > 1 ? ` · ${bubble.entries.length - 1} more in your cards` : ""}</div>
+          </> : <div className="wb-none">“{bubble.hit.word}” isn't in your vocab cards</div>}
+          <div className="wb-acts">
+            <button className="btn" onClick={() => { window.open(`https://translate.google.com/?sl=${sl}&tl=en&text=${encodeURIComponent(bubble.hit.word)}&op=translate`, "_blank", "noopener"); setBubble(null); }}>Translate</button>
+            <button className="btn" onClick={() => { setWord(bubble.hit); setBubble(null); }}>More…</button>
+          </div>
+        </div>); })()}
       {word && <WordSheet hit={word} deckPath={card.source} noteId={card.nid} onClose={() => setWord(null)} onSearch={onSearch} onMenu={() => setMenu(true)} />}
       {menu && (<>
         <div style={{ position: "fixed", inset: 0, zIndex: 34 }} onClick={() => setMenu(false)} />
@@ -619,10 +675,13 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       <div className="study-meta">
         <span className="where">{title ?? card.source.split("::").slice(-2).join(" › ")}</span>
         {card.flag ? <span className="chip orange" style={{ minHeight: 24, padding: "2px 8px" }}>flagged</span> : null}
+        {lineInfo?.showNo && <span className="line-no small muted num" title="This line's place in its deck" data-testid="line-no">line {lineInfo.n.toLocaleString()} of {lineInfo.total.toLocaleString()}</span>}
+        {showAnswer && canRead && lineToSay && <button className="btn read-line" onClick={readLine} aria-label="Read the line aloud" title="Read the line aloud (L). Again: slower"><IconSound size={18} /> Read</button>}
       </div>
-      <div className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onContextMenu={(e) => { if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; e.preventDefault(); setMenuAt(e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : null); setMenu(true); }} onClick={() => { if (holdPaper.wasHeld()) return; if (!showAnswer) setShowAnswer(true); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+      <div className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onContextMenu={(e) => { if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; e.preventDefault(); setMenuAt(e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : null); setMenu(true); }} onClick={(e) => { if (holdPaper.wasHeld()) return; if (bubble) { setBubble(null); return; } if (!showAnswer) { setShowAnswer(true); return; } if (tapWords) tapWord(e); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         style={flying ? { transform: flyTo[flying] } : { transform: drag ? `translate(${drag.dx * 0.45}px, ${drag.dy * 0.35}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag && showAnswer && (() => { const g = dirOf(drag); const near = g ?? dirOf({ dx: drag.dx * 1.6, dy: drag.dy * 1.6 }); if (!near) return null; const [t, col] = SWIPE_LABEL[near]; return <div className="swipe-label" style={{ color: col, opacity: g ? 1 : 0.55, left: Math.max(8, Math.min(window.innerWidth - 110, drag.x - 50)), top: Math.max(60, drag.y - 120), position: "fixed" }}>{t}</div>; })()}
+        {prevTexts.length > 0 && <div className="prev-line" data-testid="prev-line" title={prevTexts.length > 1 ? `The ${prevTexts.length} lines before this one` : "The line before this one"}><span className="pl-tag">before</span><span className="pl-text" lang={lang ?? undefined}>{prevTexts.map((t, i) => <span key={i} className="pl-one">{t}</span>)}</span></div>}
         {rendered && <Paper card={card} html={showAnswer ? (mcq && rendered.mcqBack !== undefined ? rendered.mcqBack : rendered.back) : rendered.front} side={showAnswer ? "back" : "front"} css={rendered.css} dark={dark}>
           {mcq && mcq.length > 0 && <div className="mcq" onClick={(e) => e.stopPropagation()}>
             {mcq.map((o, i) => { const done = showAnswer; const cls = "mcq-opt" + (done ? (o.correct ? " right" : picked === i ? " wrong" : " idle") : ""); return <div key={i}>
@@ -632,7 +691,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
             {showAnswer && picked === null && <p className="small muted">You flipped the card without choosing.</p>}
             {showAnswer && picked !== null && <p className="small muted" style={{ margin: "8px 0 0" }}>{mcqRight ? "Correct — Good is suggested." : "Not this one — Again is suggested."}</p>}
           </div>}
-          {mcq && showAnswer && rendered.mcqTail && <CardView html={rendered.mcqTail} css={rendered.css} dark={dark} side="back" quiet />}
+          {mcq && showAnswer && rendered.mcqTail && <CardView html={rendered.mcqTail} css={rendered.css} dark={dark} side="back" quiet deck={card.source} />}
           {typing && !showAnswer && <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}><input className="typeans" autoFocus={typeof matchMedia === "function" && matchMedia("(pointer: fine)").matches} placeholder="Type the answer, then Enter" value={typed} onChange={(e) => setTyped(e.target.value)} autoCapitalize="none" autoCorrect="off" /></div>}
           {!showAnswer && hint && hintText && <div className="hint-line" onClick={(e) => e.stopPropagation()}>{hintText}</div>}
           {showAnswer && (hookOpen || hookText) && (
@@ -648,7 +707,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
           {typing && showAnswer && typed && <div className="typed-res" style={{ marginTop: 10 }}><span className={"chip " + (typedOk ? "ok" : verdict && !verdict.ok && verdict.near ? "near" : "no")}>{typedOk ? "✓ " : verdict && !verdict.ok && verdict.near ? "≈ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span>{verdict && !verdict.ok && verdict.near && <span className="small muted typed-near">{verdict.near}</span>}</div>}
         </Paper>}
       </div>
-      {inputMode === "keys" ? <div className="swipe-tip key-tip">{showAnswer ? "Keys: 1 Again · 2 Hard · 3 Good · 4 Easy · Space = Good · Ctrl+Z undo" : `Space: show the answer${mcq ? ` · 1–${mcq.length} pick an option` : ""}${hintText ? " · H hint" : ""} · M menu`}</div>
+      {inputMode === "keys" ? <div className="swipe-tip key-tip">{showAnswer ? `Keys: 1 Again · 2 Hard · 3 Good · 4 Easy · Space = Good${canRead ? " · L read aloud" : ""} · Ctrl+Z undo` : `Space: show the answer${mcq ? ` · 1–${mcq.length} pick an option` : ""}${hintText ? " · H hint" : ""} · M menu`}</div>
         : inputMode === "pad" ? <div className="swipe-tip key-tip">{showAnswer ? "D-pad: ← Again · ↓ Hard · → Good · ↑ Easy · A = Good · X undo" : "A: show the answer · Y card info · Menu: more"}</div>
         : store.settings.swipe && swipes < 5 && <div className="swipe-tip">{showAnswer ? "Swipe: ← Again · ↓ Hard · → Good · ↑ Easy" : "Tap or swipe the card to see the answer · hold it for more"}</div>}
       {!showAnswer ? (

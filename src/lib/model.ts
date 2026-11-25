@@ -29,6 +29,9 @@ export interface Note {
   ankiMod?: number;
   /** Last time the user edited the fields in Yuzu (ms). */
   edited?: number;
+  /** Its line number in a deck built in sequence (a pack's "seq", or its position in an ordered pack): new cards of an
+   *  ordered deck come in this order, whatever order the notes were imported or merged in. */
+  seq?: number;
   /** Part stamps for sync (lib/sync.ts mergeNotes): per field [time, hash of the text it stamps], and per user tag
    *  +time (added) / −time (removed). A stamp whose hash no longer matches was overtaken by a change made elsewhere. */
   pm?: { f?: PartStamp[]; t?: Record<string, number> };

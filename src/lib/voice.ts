@@ -2,6 +2,8 @@
 export const RATING_WORDS: Record<string, string[]> = { "1": ["again", "forgot", "wrong", "no", "miss"], "2": ["hard", "difficult"], "3": ["good", "okay", "ok", "right", "yes", "correct", "got it", "next"], "4": ["easy", "perfect"] };
 export const LETTER_WORDS: Record<string, string[]> = { "0": ["a", "alpha", "option a", "first"], "1": ["b", "bravo", "option b", "second"], "2": ["c", "charlie", "option c", "third"], "3": ["d", "delta", "option d", "fourth"], "4": ["e", "echo", "option e", "fifth"] };
 const w = (): any => (typeof window !== "undefined" ? window : {});
+/** The device can read aloud (hands-free also needs it to listen). */
+export const canSpeak = () => typeof speechSynthesis !== "undefined" && typeof (w().SpeechSynthesisUtterance) === "function";
 export const voiceSupported = () => typeof speechSynthesis !== "undefined" && !!(w().SpeechRecognition || w().webkitSpeechRecognition);
 
 /** What is said for a card side: tags and styles dropped, cloze gaps spoken as "blank". */
@@ -14,12 +16,14 @@ export function spokenText(html: string): string {
 export function backOnly(back: string): string { const m = /<hr[^>]*id=["']?answer["']?[^>]*>/i.exec(back); const part = m ? back.slice(m.index + m[0].length) : back; return spokenText(part) || spokenText(back); }
 
 let current: SpeechSynthesisUtterance | null = null;
-export function speak(text: string, lang = "en-US"): Promise<void> {
+export function speaking(): boolean { try { return typeof speechSynthesis !== "undefined" && !!current && (speechSynthesis.speaking || speechSynthesis.pending); } catch { return false; } }
+/** Say `text` in `lang` (the device's voice for it); `slow` reads it at a learner's pace. */
+export function speak(text: string, lang = "en-US", slow = false): Promise<void> {
   return new Promise((resolve) => {
     if (!text || typeof speechSynthesis === "undefined") return resolve();
-    try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = lang; u.rate = lang.startsWith("en") ? 1.02 : 0.95;
+    try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = lang; u.rate = slow ? 0.7 : lang.startsWith("en") ? 1.02 : 0.95;
       // the device's voice for that language (German read with the English voice is wrong practice)
-      const v = speechSynthesis.getVoices?.().find((x) => x.lang.toLowerCase().replace("_", "-").startsWith(lang.slice(0, 2).toLowerCase())); if (v) u.voice = v; current = u; u.onend = () => resolve(); u.onerror = () => resolve(); speechSynthesis.speak(u); } catch { resolve(); }
+      const v = speechSynthesis.getVoices?.().find((x) => x.lang.toLowerCase().replace("_", "-").startsWith(lang.slice(0, 2).toLowerCase())); if (v) u.voice = v; current = u; u.onend = () => { if (current === u) current = null; resolve(); }; u.onerror = () => { if (current === u) current = null; resolve(); }; speechSynthesis.speak(u); } catch { resolve(); }
   });
 }
 export function stopSpeaking() { try { current = null; if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); } catch { /* fine */ } }

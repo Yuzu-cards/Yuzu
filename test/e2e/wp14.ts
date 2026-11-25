@@ -35,7 +35,7 @@ try {
   }
   // the exam tomorrow: too late, no Set button
   const ctx = await browser.newContext({ viewport: { width: 412, height: 915 } }); const p = await ctx.newPage(); await setup(p);
-  await p.evaluate(async () => { const y = (window as any).yuzu; const d = new Date(Date.now() + 86400000 + 3 * 3600e3); const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; await y.saveSettings({ deadlines: [{ id: "g", name: "Goethe B2", date: iso, path: "German", view: "decks" }] }); });
+  await p.evaluate(async () => { const y = (window as any).yuzu; const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() + 1); /* noon tomorrow: Date.now()+27 h was the day after, after 21:00 */ const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; await y.saveSettings({ deadlines: [{ id: "g", name: "Goethe B2", date: iso, path: "German", view: "decks" }] }); });
   const box = p.locator(".card-box", { hasText: "Goethe B2" }).first(); await box.waitFor({ timeout: 15000 }); const t2 = await box.innerText();
   ok("exam tomorrow: too late for new cards, and no Set button", /Too late for the 107 new cards: review the weakest 30/.test(t2) && !/Set \d+ a day/.test(t2), t2.replace(/\n/g, " | ").slice(0, 200));
   if (SHOTS) await box.screenshot({ path: `${SHOTS}/wp14-today-toolate.png` });

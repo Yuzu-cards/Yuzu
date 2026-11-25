@@ -18,7 +18,7 @@ function NoteCard({ note, label, onKeep, full, onToggle }: { note: Note; label: 
       <div style={{ margin: "6px 0", fontSize: 15 }}>{noteTitle(note, nt)}</div>
       {!full && extra && <div className="small muted" style={{ overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{extra}</div>}
       {full && cards[0] && nt && (() => { const r = renderCard({ note, notetype: nt, ord: cards[0].ord, deck: cards[0].source, resolveMedia: store.mediaUrl }); return (
-        <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)), margin: "8px 0" } as any}><CardView html={r.back} css={r.css} dark side="back" autoplay={false} /></div>); })()}
+        <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)), margin: "8px 0" } as any}><CardView html={r.back} css={r.css} dark side="back" autoplay={false} deck={cards[0].source} /></div>); })()}
       {full && <div className="small muted">{note.tags.filter((t) => !t.startsWith("auto::") && !t.startsWith("needs-review::")).join(", ")}</div>}
       <div className="row small" style={{ marginTop: 8, flexWrap: "wrap", gap: 6 }}>
         <span className="chip">{cards.length} card{cards.length === 1 ? "" : "s"}</span><span className="chip">{reps} reviews</span>

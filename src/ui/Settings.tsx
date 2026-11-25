@@ -180,7 +180,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <div className="themes">{THEMES.map((t) => <button key={t.id} className={s.theme === t.id ? "on" : ""} aria-pressed={s.theme === t.id} onClick={() => { store.saveSettings({ theme: t.id }); sfx.tap(); }}><span className="sw">{t.sw.map((c) => <i key={c} style={{ background: c }} />)}</span>{t.name}</button>)}</div>
           <div className="row" style={{ gap: 8, margin: "12px 0 4px" }}><span className="small grow">Card look</span></div>
           <div className="seg card-seg" role="radiogroup" aria-label="Card look">{(["yuzu", "deck"] as const).map((v) => <button key={v} role="radio" aria-checked={s.cardStyle === v} className={s.cardStyle === v ? "on" : ""} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div>
-          <p className="small muted" style={{ margin: "6px 0 0" }}>Yuzu gives every deck the same calm type, orange cloze answers and tidy extras; the deck's own look shows each Anki deck as it was designed.</p>
+          <p className="small muted" style={{ margin: "6px 0 0" }}>Yuzu gives every deck the same calm type, orange cloze answers and tidy extras; the deck's own look shows each Anki deck as it was designed. One deck can differ: Library → ⚙ Deck options → Look.</p>
         </fieldset>
         <fieldset className="set-group"><legend>Sound and feel</legend>
           <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={s.sfx} onChange={(e) => { store.saveSettings({ sfx: e.target.checked }); if (e.target.checked) setTimeout(() => sfx.answer(3), 50); }} /> Sound effects (short 8-bit blips on answers, goal and boss fights)</label>

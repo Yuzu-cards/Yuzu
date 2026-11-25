@@ -10,6 +10,17 @@
 //     { "type": "basic", "front": "Antidote for hyperkalemia-induced membrane instability?", "back": "IV calcium gluconate 10%, 10–30 mL", "image": "data:image/png;base64,..." }
 //   ]
 // }
+//
+// Decks built in sequence (a story, a course; 1.9.0):
+//   "ordered": true            the cards are lines in order: each gets its line number (its position, from 1), new cards of
+//                              the deck then come strictly in that order (suggested for the deck, once: Deck options decide)
+//   "seqStart": 201            line numbers start here (part 2 of a story continues after part 1); a card's own "seq" wins
+//   "prevLine": true           suggest showing the previous line above each card
+//   "lang": "de-DE"            the deck's language (reading aloud, word meanings)
+//   "style": { "css": "...", "fonts": { "story.woff2": "data:font/woff2;base64,..." } }
+//                              the deck's own look, kept once for the whole deck instead of in every card; the CSS names the
+//                              fonts by these names (url("story.woff2")). Shown when the deck's look is set to its own.
+// A card with an "id" in an ordered pack is never left out as a duplicate: a story may repeat a line ("Ja.").
 import type { Card, Note, Notetype } from "../lib/model";
 import { noteTitle } from "../lib/render";
 import { IO_ID, parseMasks, formatMasks, type Mask } from "../lib/occlusion";
@@ -58,8 +69,21 @@ export const PACK_VOCAB: Notetype = {
 // Revisions: give a card a stable "id" (unique within the pack) and re-importing a later version updates
 // that note in place, keeping its review history. "replaces" names an existing note id to update instead
 // (used to revise cards imported before they had ids).
-export interface PackCard { id?: string; replaces?: string; source?: string; type?: "cloze" | "basic" | "mcq" | "occlusion" | "vocab"; masks?: Mask[]; word?: string; meaning?: string; article?: string; plural?: string; example?: string; audio?: string; lang?: string; question?: string; options?: unknown; answer?: number | string; explanation?: string; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
-export interface Pack { yuzu_pack: 1; id?: string; name?: string; source?: string; category?: string; tags?: string[]; cards: PackCard[] }
+export interface PackCard { id?: string; seq?: number; replaces?: string; source?: string; type?: "cloze" | "basic" | "mcq" | "occlusion" | "vocab"; masks?: Mask[]; word?: string; meaning?: string; article?: string; plural?: string; example?: string; audio?: string; lang?: string; question?: string; options?: unknown; answer?: number | string; explanation?: string; text?: string; extra?: string; front?: string; back?: string; image?: string; tags?: string[]; category?: string }
+export interface Pack { yuzu_pack: 1; id?: string; name?: string; source?: string; category?: string; tags?: string[]; cards: PackCard[];
+  ordered?: boolean; seqStart?: number; prevLine?: boolean; lang?: string; style?: { css?: string; fonts?: Record<string, string> } }
+/** What a pack says about its deck as a whole: its look, and options it suggests (applied only where the deck has none). */
+export interface PackDeck { path: string; style?: { css: string }; hints: { ordered?: boolean; prevLine?: boolean; lang?: string } }
+const FONT_EXT: Record<string, string> = { "font/woff2": "woff2", "font/woff": "woff", "application/font-woff": "woff", "application/font-woff2": "woff2", "font/ttf": "ttf", "font/otf": "otf", "application/x-font-ttf": "ttf", "font/sfnt": "ttf" };
+export const PACK_FONT_MAX = 2 * 1024 * 1024; const PACK_FONTS_MAX = 8; const PACK_CSS_MAX = 64 * 1024;
+/** A pack font's stored name ("_" first: kept by media clean-up even though no card names it), or null when unusable. */
+export function packFontName(dataUrl: unknown): string | null {
+  if (typeof dataUrl !== "string") return null;
+  const m = /^data:([a-z]+\/[a-z0-9.+-]+)(;[^,]*)?,/i.exec(dataUrl.slice(0, 200)); if (!m) return null;
+  const ext = FONT_EXT[m[1].toLowerCase()]; if (!ext) return null;
+  const body = dataUrl.length - m[0].length; if ((/;base64$/i.test(m[2] ?? "") ? body * 0.75 : body) > PACK_FONT_MAX) return null;
+  return `_font-${hash(dataUrl)}.${ext}`;
+}
 
 
 export function hash(s: string): string {
@@ -119,6 +143,8 @@ export interface PackResult {
   /** Notes already in the collection that had no cards (an interrupted import): their cards are made again. */ repaired: string[];
   /** Things dropped from cards that were still added ("1 picture could not be read"). */ warnings: string[];
   similar: number; updated: string[]; unchanged: number; mediaRejected?: number;
+  /** Notes already here whose line number changed (a line was put in before them): moved, nothing else touched. */ reordered: string[];
+  /** The deck's look and suggested options, when the pack has any. */ deck?: PackDeck;
 }
 export interface PackOptions {
   /** The collection's tombstones: notes the user deleted stay deleted. */ tombstones?: Record<string, number>;
@@ -149,6 +175,11 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
   const base = normCategory(p.category, "Medicine::Inbox");
   const packTags = strTags(p.tags); const packLang = str((p as any).lang);
   const isDeleted = (id: string) => tomb["n:" + id] !== undefined && !byId.has(id) && !opts.restoreDeleted;
+  // Ids this pack gives its own cards: a card with an id is never a "duplicate" or "similar" to another line of the same pack.
+  const packIds = new Set<string>(); for (const c of p.cards) { const x = c && typeof c === "object" ? str((c as PackCard).id).trim() : ""; if (x) packIds.add("p" + hash(packKey + "#" + x)); }
+  const ordered = p.ordered === true; const seqStart = typeof p.seqStart === "number" && Number.isFinite(p.seqStart) ? p.seqStart : null;
+  const seqOf = (c: PackCard, i: number): number | undefined => (typeof c.seq === "number" && Number.isFinite(c.seq) ? c.seq : seqStart !== null ? seqStart + i : ordered ? i + 1 : undefined);
+  const reordered: string[] = [];
   p.cards.forEach((raw, i) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) { invalid.push({ index: i, reason: "notCard" }); return; }
     const c = raw as PackCard;
@@ -191,39 +222,43 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
       target = replaces;
     }
     const prev = target ? byId.get(target) : undefined;
-    const cat = normCategory(c.category, base);
+    const cat = normCategory(c.category, base); const seq = seqOf(c, i); const withSeq = seq !== undefined ? { seq } : {};
     if (prev) {
       // Revision of a card already in the collection: update in place, keep scheduling.
       const tags = [...new Set([...prev.tags.filter((t) => t !== "needs-review::similar"), ...packTags, ...strTags(c.tags)])];
       if (normOf.get(prev.id) === norm && fields.every((f, i) => (prev.fields[i] ?? "") === (f ?? "")) && tags.length === prev.tags.length) {
-        if (!hasCards(prev.id) && !madeHere.has(prev.id)) { repaired.push(prev.id); madeHere.add(prev.id); pushCards(prev.id, type, text, masks.length, cat, now + i); warn(); return; }
+        if (!hasCards(prev.id) && !madeHere.has(prev.id)) { repaired.push(prev.id); madeHere.add(prev.id); if (seq !== undefined && prev.seq !== seq) notes.push({ ...prev, seq, modified: Math.max(now + i, prev.modified + 1) }); pushCards(prev.id, type, text, masks.length, cat, now + i); warn(); return; }
+        if (seq !== undefined && prev.seq !== seq) { notes.push({ ...prev, seq, modified: Math.max(now + i, prev.modified + 1) }); reordered.push(prev.id); madeHere.add(prev.id); return; }
         unchanged++; return;
       }
-      notes.push({ ...prev, ntid: nt.id, fields, tags, modified: Math.max(now + i, prev.modified + 1) });
+      notes.push({ ...prev, ntid: nt.id, fields, tags, modified: Math.max(now + i, prev.modified + 1), ...withSeq });
       updated.push(prev.id); madeHere.add(prev.id); warn();
       pushCards(prev.id, type, text, masks.length, cat, now + i);
       return;
     }
     if (target && isDeleted(target)) { deleted++; deletedIds.push(target); return; }
-    const same = exact.get(norm);
-    if (same !== undefined) {
+    const own = (x: string) => !!cid && (madeHere.has(x) || packIds.has(x)); // another line of this same pack
+    const lineOfStory = !!cid && seq !== undefined; // an ordered pack's line: kept even when its words repeat elsewhere
+    const same = lineOfStory ? undefined : exact.get(norm);
+    if (same !== undefined && !own(same)) {
       // Already here. A note left without cards by an interrupted import gets its cards back.
       if (byId.has(same) && !madeHere.has(same) && !hasCards(same)) { repaired.push(same); madeHere.add(same); pushCards(same, type, text, masks.length, cat, now + i); warn(); return; }
       duplicates++; return;
     }
-    const id = target ?? "p" + hash(norm + "|" + nt.id);
+    let id = target ?? "p" + hash(norm + "|" + nt.id);
+    if (!target && madeHere.has(id)) id = "p" + hash(norm + "|" + nt.id + "|" + i); // (unreachable without an id; kept safe)
     if (isDeleted(id)) { deleted++; deletedIds.push(id); return; }
     // near-duplicate check against existing notes
     const sh = shingles(norm); const cand = new Map<string, number>();
-    for (const x of sh) { const ids = index.get(x); if (ids && ids.size < 2000) for (const id of ids) cand.set(id, (cand.get(id) ?? 0) + 1); }
+    if (!lineOfStory) for (const x of sh) { const ids = index.get(x); if (ids && ids.size < 2000) for (const id of ids) if (!own(id)) cand.set(id, (cand.get(id) ?? 0) + 1); }
     let isSimilar = false; let similarTo: string | undefined; // the note it resembles, so the pair can be shown side by side
     for (const [id, k] of cand) {
       const other = texts.get(id)!; const j = k / (sh.size + other.size - k); const containment = k / Math.max(1, Math.min(sh.size, other.size));
       if (j >= 0.6 || (containment >= 0.8 && Math.min(sh.size, other.size) >= 4)) { isSimilar = true; similarTo = id; break; }
     }
     const tags = [...new Set([...packTags, ...strTags(c.tags), ...(isSimilar ? ["needs-review::similar"] : [])])];
-    const note: Note = { id, ntid: nt.id, guid: id, fields, tags, created: now + i, modified: now + i, ...(similarTo && similarTo !== id ? { similarTo } : {}) };
-    notes.push(note); exact.set(norm, id); madeHere.add(id); warn();
+    const note: Note = { id, ntid: nt.id, guid: id, fields, tags, created: now + i, modified: now + i, ...withSeq, ...(similarTo && similarTo !== id ? { similarTo } : {}) };
+    notes.push(note); if (!exact.has(norm)) exact.set(norm, id); madeHere.add(id); warn();
     texts.set(id, sh); for (const x of sh) (index.get(x) ?? index.set(x, new Set()).get(x)!).add(id);
     if (isSimilar) similar++;
     pushCards(id, type, text, masks.length, cat, now + i);
@@ -233,11 +268,31 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
       cards.push({ id: `${id}-${ord}`, nid: id, ord, state: "new", suspended: false, flag: 0, due: t, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: t, mod: t, source });
     }
   }
+  // The deck's own look and the options it suggests
+  let deck: PackDeck | undefined;
+  const st = p.style && typeof p.style === "object" && !Array.isArray(p.style) ? p.style : null;
+  let css = st && typeof st.css === "string" ? st.css : ""; let fontsBad = 0;
+  if (css.length > PACK_CSS_MAX) { css = ""; fontsBad = -1; }
+  if (css && st?.fonts && typeof st.fonts === "object") {
+    for (const [name, url] of Object.entries(st.fonts).slice(0, PACK_FONTS_MAX)) {
+      const stored = dataUrlOk(String(url)) ? packFontName(url) : null; if (!stored) { fontsBad++; continue; }
+      media.push({ name: stored, dataUrl: String(url) });
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      css = css.replace(new RegExp(`url\\(\\s*(["']?)${esc}\\1\\s*\\)`, "g"), `url("${stored}")`);
+    }
+  }
+  const hints: PackDeck["hints"] = {};
+  if (p.ordered === true || seqStart !== null) hints.ordered = true;
+  if (typeof p.prevLine === "boolean") hints.prevLine = p.prevLine;
+  if (packLang && /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(packLang)) hints.lang = packLang;
+  if (css || Object.keys(hints).length) deck = { path: base, ...(css ? { style: { css } } : {}), hints };
   const warnings: string[] = [];
+  if (fontsBad > 0) warnings.push(`${plural(fontsBad, "font")} could not be read (not woff2, woff, ttf or otf, or over 2 MB)`);
+  if (fontsBad < 0) warnings.push("the deck's look was left out (its CSS is over 64 KB)");
   if (badImages) warnings.push(`${plural(badImages, "picture")} could not be read and ${badImages === 1 ? "was" : "were"} left out`);
   if (badAudio) warnings.push(`${plural(badAudio, "recording")} could not be read (the device voice is used instead)`);
   if (mediaRejected) warnings.push(`${mediaRejected} picture${mediaRejected === 1 ? "" : "s"} or sound${mediaRejected === 1 ? "" : "s"} left out (not a known image or sound type, or over ${PACK_MEDIA_MAX / 1048576} MB)`);
-  return { notetypes: [PACK_CLOZE, PACK_BASIC, PACK_MCQ, PACK_IO, PACK_VOCAB], notes, cards, media, skipped: duplicates + deleted + invalid.length, duplicates, deleted, deletedIds, invalid, repaired, warnings, similar, updated, unchanged, mediaRejected };
+  return { notetypes: [PACK_CLOZE, PACK_BASIC, PACK_MCQ, PACK_IO, PACK_VOCAB], notes, cards, media, skipped: duplicates + deleted + invalid.length, duplicates, deleted, deletedIds, invalid, repaired, warnings, similar, updated, unchanged, mediaRejected, reordered, ...(deck ? { deck } : {}) };
 }
 
 export function packOrds(type: string, text?: string, masks?: number): number[] {
@@ -257,15 +312,15 @@ export function describeInvalid(invalid: { reason: InvalidReason }[]): string {
 /** What an import did, counted for callers (the quick-add editor keeps its form when nothing was saved). */
 export interface PackSummary {
   /** New notes and the cards they made. */ added: number; addedCards: number;
-  updated: number; unchanged: number; repaired: number; repairedCards: number;
+  updated: number; unchanged: number; repaired: number; repairedCards: number; reordered: number;
   skippedDuplicate: number; skippedDeleted: number; skippedInvalid: number; invalid: { index: number; reason: InvalidReason }[];
   similar: number; warnings: string[]; noteIds: string[]; message: string;
 }
 export function summarizePack(r: PackResult): PackSummary {
-  const upd = new Set(r.updated); const rep = new Set(r.repaired);
-  const fresh = r.notes.filter((n) => !upd.has(n.id)); const freshIds = new Set(fresh.map((n) => n.id));
+  const upd = new Set(r.updated); const rep = new Set(r.repaired); const moved = new Set(r.reordered ?? []);
+  const fresh = r.notes.filter((n) => !upd.has(n.id) && !moved.has(n.id) && !rep.has(n.id)); const freshIds = new Set(fresh.map((n) => n.id));
   const addedCards = r.cards.filter((c) => freshIds.has(c.nid)).length; const repairedCards = r.cards.filter((c) => rep.has(c.nid)).length;
-  const s: PackSummary = { added: fresh.length, addedCards, updated: r.updated.length, unchanged: r.unchanged, repaired: r.repaired.length, repairedCards, skippedDuplicate: r.duplicates, skippedDeleted: r.deleted, skippedInvalid: r.invalid.length, invalid: r.invalid, similar: r.similar, warnings: r.warnings, noteIds: [...fresh.map((n) => n.id), ...r.updated, ...r.repaired], message: "" };
+  const s: PackSummary = { added: fresh.length, addedCards, updated: r.updated.length, unchanged: r.unchanged, repaired: r.repaired.length, repairedCards, reordered: (r.reordered ?? []).length, skippedDuplicate: r.duplicates, skippedDeleted: r.deleted, skippedInvalid: r.invalid.length, invalid: r.invalid, similar: r.similar, warnings: r.warnings, noteIds: [...fresh.map((n) => n.id), ...r.updated, ...r.repaired], message: "" };
   s.message = describeSummary(s, fresh.slice(0, 3).map((n) => noteTitle(n)).join(" · "));
   return s;
 }
@@ -275,6 +330,7 @@ function describeSummary(s: PackSummary, titles: string): string {
   if (s.added) parts.push(`${notesCards(s.added, s.addedCards)} added`);
   if (s.updated) parts.push(`${s.updated.toLocaleString("en-US")} updated (review history kept)`);
   if (s.repaired) parts.push(`${s.repaired.toLocaleString("en-US")} repaired (${plural(s.repairedCards, "missing card")} made again)`);
+  if (s.reordered) parts.push(`${s.reordered.toLocaleString("en-US")} moved to ${s.reordered === 1 ? "its" : "their"} new place in the order`);
   const done = parts.length;
   if (s.unchanged) parts.push(`${s.unchanged.toLocaleString("en-US")} unchanged`);
   if (s.skippedDuplicate) parts.push(`${plural(s.skippedDuplicate, "card")} already in your collection`);

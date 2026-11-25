@@ -38,12 +38,15 @@ export function WordSheet({ hit, deckPath, noteId, onClose, onSearch, onMenu }: 
   const w = hit.word; const lower = w.toLowerCase();
   const n = useMemo(() => { let c = 0; for (const note of store.notes.values()) if (note.id !== noteId && store.searchText(note).includes(lower)) c++; return c; }, [lower, noteId]);
   const german = /^Language|German|Deutsch/i.test(deckPath) || looksGerman(hit.sentence);
+  // What your own vocab cards say it means (any language deck; German-looking text elsewhere too)
+  const mean = useMemo(() => (german || store.langFor(deckPath) ? store.meaningOf(w, deckPath, noteId)[0] : undefined), [w, deckPath, noteId]);
+  const quote = hit.sentence !== w ? `“${hit.sentence.length > 140 ? hit.sentence.slice(0, 140) + "…" : hit.sentence}”` : "";
   const open = (url: string) => { window.open(url, "_blank", "noopener"); };
   const select = () => {
     try { const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(hit.range); snackbar("Selected — the phone's own menu can take it from here"); } catch { snackbar("Couldn't select it here"); }
   };
   return (
-    <ActionSheet title={w} sub={hit.sentence !== w ? `“${hit.sentence.length > 140 ? hit.sentence.slice(0, 140) + "…" : hit.sentence}”` : undefined} onClose={onClose} items={[
+    <ActionSheet title={mean ? `${mean.word} — ${mean.meaning}` : w} sub={[mean ? `from your card in ${mean.deck.split("::").slice(-2).join(" › ")}` : "", quote].filter(Boolean).join(" · ") || undefined} onClose={onClose} items={[
       { label: n ? `In ${n.toLocaleString()} other card${n === 1 ? "" : "s"}` : "Not in any other card", hint: n ? "Library" : undefined, disabled: !n || !onSearch, onClick: () => onSearch?.(w) },
       german ? { label: "Translate", hint: "Google Translate", onClick: () => open(`https://translate.google.com/?sl=de&tl=en&text=${encodeURIComponent(w)}&op=translate`) }
              : { label: "Define", hint: "Google", onClick: () => open(`https://www.google.com/search?q=define+${encodeURIComponent(w)}`) },

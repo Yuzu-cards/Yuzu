@@ -5,7 +5,8 @@ import { noteTitle, renderCard } from "../lib/render";
 import { CardView, CardInfo, type StudyScope } from "./Study";
 import { SYSTEM_NAMES } from "../lib/classify";
 import type { Card, CardState } from "../lib/model";
-import { IconChevron, IconPlay, IconClose, IconPin, IconEdit } from "./icons";
+import { IconChevron, IconPlay, IconClose, IconPin, IconEdit, IconSettings } from "./icons";
+import { DeckOptions } from "./DeckOptions";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Duplicates } from "./Duplicates";
 import { OcclusionEditor } from "./Occlusion";
@@ -63,7 +64,7 @@ function Preview({ card: card0, onClose, onStudy, onTag, docked }: { card: Card;
     ? <aside className="lib-dock" aria-label="Preview"><div className="row" style={{ marginBottom: 8 }}><b className="grow">Preview</b>{head}<button className="icon-btn" aria-label="Close preview" onClick={onClose}><IconClose /></button></div>{children}</aside>
     : <Sheet title="Preview" closeLabel="Close preview" onClose={onClose} head={head}>{children}</Sheet>;
   return wrap(<>
-      <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any}><CardView html={r.back} css={r.css} dark side="back" /></div>
+      <div className="paper slate" style={{ "--tilt": "0deg", "--spine": systemColor(note.tags.find((t) => t.startsWith("auto::System::"))?.slice(14)) } as any}><CardView html={r.back} css={r.css} dark side="back" deck={card.source} /></div>
       <p className="small muted">{card.source}{mark ? ` · to improve: ${mark.r.join(", ")}${mark.t ? ` — “${mark.t}”` : ""}` : ""}</p>
       {note.tags.some((t) => !t.startsWith("manual::")) && <div className="row small" style={{ flexWrap: "wrap", gap: 6, margin: "-4px 0 10px" }}>{note.tags.filter((t) => !t.startsWith("manual::")).map((t) => <button key={t} className={"chip" + (t.startsWith("auto::") ? " orange" : "")} title="Show the cards with this tag" onClick={() => onTag(t)}>{t.replace(/^auto::(System|Specialty|Exam|Level)::/, "$1: ")}</button>)}</div>}
       <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
@@ -140,6 +141,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [tagTo, setTagTo] = useState<string | null>(null);
   const [tool, setTool] = useState<"dupes" | "occlusion" | "card" | null>(null);
   const [rename, setRename] = useState<string | null>(null);
+  const [deckOpts, setDeckOpts] = useState<string | null>(null);
   const [classify, setClassify] = useState<"System" | "Specialty" | null>(null);
   const v = store.getVersion();
   const similarCount = useMemo(() => store.similarPairs().length, [store.getDataVersion()]);
@@ -207,6 +209,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     { label: "New only", onClick: () => onStudy(c.path, view, { only: "new" }), disabled: !c.newCount },
     ...(view === "systems" ? [{ label: "Boss fight", onClick: () => onBoss(c.path, view, c.name) }] : []),
     isPinned(c.path, view) ? { label: "Unpin from Today", onClick: () => store.saveSettings({ pins: store.settings.pins.filter((x) => !(x.path === c.path && x.view === view)) }) } : { label: "Pin to Today", onClick: () => store.saveSettings({ pins: [...store.settings.pins, { path: c.path, view }] }) },
+    ...(view === "decks" ? [{ label: "Deck options…", hint: store.settings.deckOpts?.[c.path] ? "set" : undefined, onClick: () => setDeckOpts(c.path) }] : []),
     { label: "Show its cards", onClick: () => { go(c.path); setShowCards(true); } },
     { label: "Select all its cards", onClick: () => { go(c.path); setShowCards(true); setSelecting(true); setTimeout(() => setSelected(new Set(store.cardsIn(c.path, view).map((x) => x.id))), 0); } },
   ] });
@@ -263,6 +266,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
                 <div style={{ fontWeight: 700, fontSize: 18 }}>{title}</div>
                 <div className="small muted">{counts.total.toLocaleString()} cards · {counts.susp.toLocaleString()} paused · {counts.studied.toLocaleString()} studied</div>
               </div>
+              {view === "decks" && path && <button className={"icon-btn" + (store.settings.deckOpts?.[path] ? " on" : "")} aria-label="Deck options" title="Deck options: order, new cards a day, look, language" onClick={() => setDeckOpts(path)}><IconSettings /></button>}
               {view === "decks" && path && <button className="icon-btn" aria-label="Rename or move" title="Rename or move this category" onClick={() => setRename(path)}><IconEdit /></button>}
               <button className={"icon-btn" + (pinned ? " on" : "")} aria-label="Pin" onClick={() => store.saveSettings({ pins: pinned ? store.settings.pins.filter((p) => !(p.view === view && p.path === path)) : [...store.settings.pins, { view, path }] })}><IconPin /></button>
               <button className="btn primary" onClick={() => onStudy(path, view)} disabled={counts.due + counts.fresh + counts.learning === 0}><IconPlay /> Study</button>
@@ -356,6 +360,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn primary block" disabled={!moveTo.trim()} onClick={async () => { await doBulk({ source: moveTo.trim() }); setMoveTo(null); }}>Move</button>
         </Sheet>
       )}
+      {deckOpts !== null && <DeckOptions path={deckOpts} onClose={() => setDeckOpts(null)} />}
       {rename !== null && (
         <Sheet title={`Rename or move “${path.split("::").pop()}”`} onClose={() => setRename(null)}>
           <p className="small muted" style={{ marginTop: 4 }}>Edit the full path. Change the last part to rename; change the part before it to move the category (and everything inside it) somewhere else.</p>

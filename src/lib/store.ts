@@ -20,6 +20,8 @@ import { writeZip, streamZip, ZipParts } from "./zipwrite";
 import { savedToken, tokenValid, signIn, signOut, inTap, prepareSignIn, onLateToken, signInMode, whoAmI, downloadBytes, changesSince, startToken, DEFAULT_CLIENT_ID, GoogleError, folderAppeared } from "./google";
 import { DriveMedia, DriveSync, writeStatus, readStatus, statusFingerprint, readPlan, newRotaFiles, trashStale, applyMediaChanges, type HubMetric, type HubProgress, type HubProposal, type HubAction, listBackups, pruneBackups, readBackup, todayName, type BackupInfo, PATHS, BUNDLE_BYTES, BUNDLE_FILES, LOOSE_ABOVE, type DriveIndex, type HubStatus, type CitrusPlan } from "./drive";
 import { rotaFromXlsx, shiftInfo } from "./rota.js";
+import { buildLexicon, addToLexicon, lookup, type Lexicon, type Entry } from "./lexicon";
+import { resolveOpts, resolveStyle, compareLines, comparePaths, deckLang, renameKeys, ancestors, type DeckOpts, type DeckOptsMap, type DeckStylesMap, type Resolved } from "./deckopts";
 import { mergeSettings, stampChanges, sanitizeSettings, shareable, withoutDeviceFields } from "./settingsync";
 import { buildSearchDoc, housekeepingText, parseQuery, scoreDoc } from "./search";
 declare const __VERSION__: string;
@@ -80,6 +82,10 @@ export interface Settings {
   hiddenFields: string[];
   /** Anki deck path → Yuzu category, learned from curation files; applied to new cards on every later Anki import (synced). */
   deckMap: Record<string, string>;
+  /** Per-deck options (lib/deckopts.ts): strict order, a new-card cap, the look, the previous line, the language (synced deck by deck). */
+  deckOpts: DeckOptsMap;
+  /** A deck's own look, shared by its cards (from a pack), synced deck by deck. */
+  deckStyles: DeckStylesMap;
   smart: SmartDeck[];
   /** Exam countdowns (synced): a date and the part of the collection it covers. */
   deadlines: Deadline[];
@@ -91,7 +97,7 @@ export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [], deadlines: [],
   google: { clientId: "", shiftDays: true, driveMedia: true, rotaName: "Amro", rota: {} },
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", planScreen: false, showStreak: false, leechAction: "claude", citrusPlans: false, applied: [], retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {},
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", planScreen: false, showStreak: false, leechAction: "claude", citrusPlans: false, applied: [], retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {}, deckOpts: {}, deckStyles: {},
 };
 /** Settings that belong to one device (its name, look, sounds, gestures): never uploaded, never taken from another device. */
 export const DEVICE_ONLY_SETTINGS = ["sync", "deviceName", "nightCards", "swipe", "typeAnswers", "mediaDownload", "theme", "sfx", "autoplay", "cardStyle"] as const;
@@ -1237,7 +1243,22 @@ export class Store {
     for (const b of blobs) this.media.set(b.name, b.blob);
     this.lastSimilar = r.notes.filter((n) => n.similarTo && n.tags.includes(SIMILAR_TAG) && !updated.has(n.id)).map((n) => n.id);
     this.bump(); this.touch();
+    if (r.deck) await this.applyPackDeck(r.deck, String((json as any)?.id ?? (json as any)?.name ?? "pack"), summary);
     return summary;
+  }
+  /** A pack's deck-wide part: its look (stored for the deck; shown once the deck's look is its own) and the options it
+   *  suggests, each taken only when the deck (or a deck above it) hasn't set that option: the person's choice always stands. */
+  private async applyPackDeck(d: import("../import/pack").PackDeck, from: string, summary: PackSummary): Promise<void> {
+    const s = this.settings; const patch: Partial<Settings> = {}; const said: string[] = [];
+    const have = this.optsFor(d.path).opts; const mine = { ...(s.deckOpts?.[d.path] ?? {}) } as DeckOpts; let set = false;
+    for (const k of ["ordered", "prevLine", "lang"] as const) if (d.hints[k] !== undefined && have[k] === undefined) { (mine as any)[k] = d.hints[k]; set = true; }
+    if (set) { patch.deckOpts = { ...(s.deckOpts ?? {}), [d.path]: mine }; if (mine.ordered && have.ordered === undefined) said.push("its new cards now come in the pack's order"); }
+    if (d.style) {
+      const old = s.deckStyles?.[d.path];
+      if (!old || old.css !== d.style.css) { patch.deckStyles = { ...(s.deckStyles ?? {}), [d.path]: { css: d.style.css, from, at: Date.now() } }; said.push(this.lookFor(d.path).own || have.look === "own" ? "its own look was updated" : "it has its own look (Deck options → Look to show it)"); }
+    }
+    if (Object.keys(patch).length) await this.saveSettings(patch);
+    if (said.length) summary.message += ` — ${d.path.split("::").pop()}: ${said.join("; ")}`;
   }
   /** Notes the last pack import tagged as looking like an existing card (read once, by the card editor). */
   lastSimilar: string[] = [];
@@ -2342,9 +2363,12 @@ export class Store {
     // One pass over the scope (the whole collection for "", without copying it): due learning, due reviews, new cards by category.
     const budget = only === "due" ? 0 : Math.max(0, this.settings.newPerDay - this.reviewedToday(now).newCards);
     const learning: Card[] = []; let review: Card[] = []; const byCat = new Map<string, Card[]>();
+    // A deck set to strict order is one stream of its own (its subdecks don't take turns); a deck's new-card cap holds
+    // for it and everything under it, inside the overall budget.
+    const caps = budget > 0 ? this.capsLeft(now) : null;
     for (const c of path || view === "smart" ? this.cardsIn(path, view) : this.cards.values()) {
       if (c.suspended) continue;
-      if (c.state === "new") { if (budget > 0) { const k = this.catOf(c.source); (byCat.get(k) ?? byCat.set(k, []).get(k)!).push(c); } }
+      if (c.state === "new") { if (budget > 0) { const o = this.optsFor(c.source); const k = o.opts.ordered ? "§" + o.at.ordered : this.catOf(c.source); (byCat.get(k) ?? byCat.set(k, []).get(k)!).push(c); } }
       else if (only === "new" || c.due > now) continue;
       else if (c.state === "review") review.push(c);
       else learning.push(c);
@@ -2359,7 +2383,11 @@ export class Store {
     review = interleaveBySystem(review, (c) => this.notes.get(c.nid)?.tags.find((t) => t.startsWith("auto::System::")) ?? this.catOf(c.source));
     // New cards: oldest first within each category, categories taken in turns so one deck can't hog the daily budget.
     // Only the first few of each category are ever taken, so they are picked in order rather than sorting 100k new cards.
-    const lists = [...byCat.values()].map((l) => Store.orderedTaker(l, (a, b) => a.due - b.due || a.created - b.created));
+    const lineCmp = (a: Card, b: Card) => compareLines(this.notes.get(a.nid), this.notes.get(b.nid)) || a.ord - b.ord || a.created - b.created;
+    const deckCmp = (a: Card, b: Card) => comparePaths(a.source, b.source) || lineCmp(a, b); // subdeck by subdeck, then line by line
+    const lists = [...byCat].map(([k, l]) => { const root = k.startsWith("§") ? k.slice(1) : null;
+      const cmp = root === null ? (a: Card, b: Card) => a.due - b.due || a.created - b.created : this.optsFor(root).opts.orderBy === "subdeck" ? deckCmp : lineCmp;
+      return Object.assign(Store.orderedTaker(l, cmp), { key: root ?? k, dead: false }); });
     // Bury siblings: one card per note a day (notes seen today and learning cards count). Reviews are filtered; new cards are
     // picked around it, so a buried sibling's place goes to the next new card and the day's new-card count stays full.
     const seenNotes = new Set<string>(); const bury = this.settings.burySiblings;
@@ -2370,9 +2398,14 @@ export class Store {
       review = review.filter((c) => { if (seenNotes.has(c.nid)) return false; seenNotes.add(c.nid); return true; });
     }
     const fresh: Card[] = [];
-    for (let i = 0; fresh.length < budget && lists.some((l) => l.left() > 0); i++) {
-      const l = lists[i % lists.length]; if (!l.left()) continue;
-      const c = l.take(); if (bury) { if (seenNotes.has(c.nid)) continue; seenNotes.add(c.nid); } fresh.push(c);
+    for (let i = 0; fresh.length < budget && lists.some((l) => !l.dead && l.left() > 0); i++) {
+      const l = lists[i % lists.length]; if (l.dead || !l.left()) continue;
+      const c = l.take();
+      const capped = caps && caps.size ? this.capPaths(c.source).find((p) => (caps.get(p) ?? 1) <= 0) : undefined;
+      if (capped !== undefined) { if (l.key === capped || l.key.startsWith(capped + "::")) l.dead = true; continue; } // this deck's day is full (the whole list, when the cap covers it)
+      if (bury) { if (seenNotes.has(c.nid)) continue; seenNotes.add(c.nid); }
+      if (caps) for (const p of this.capPaths(c.source)) caps.set(p, (caps.get(p) ?? 0) - 1);
+      fresh.push(c);
     }
     // Interleave new cards among reviews so a session isn't all-new at the end.
     const out: Card[] = [...learning];
@@ -2389,6 +2422,103 @@ export class Store {
   /** Top-three-level category of a deck path (cached: the same few hundred paths repeat across 146k cards). */
   private catCache = new Map<string, string>();
   private catOf(source: string): string { let k = this.catCache.get(source); if (k === undefined) { k = source.split("::").slice(0, 3).join("::"); this.catCache.set(source, k); } return k; }
+
+  // ---- Per-deck options (lib/deckopts.ts) ----
+  private optCache: { map: DeckOptsMap | null; by: Map<string, Resolved> } = { map: null, by: new Map() };
+  /** The options in force for a deck path (cached per path until the options change). */
+  optsFor(source: string): Resolved {
+    const map = this.settings.deckOpts ?? {};
+    if (this.optCache.map !== map) this.optCache = { map, by: new Map() };
+    let r = this.optCache.by.get(source); if (!r) { r = resolveOpts(map, source); this.optCache.by.set(source, r); } return r;
+  }
+  /** The decks above (and at) a path that cap their new cards a day. */
+  capPaths(source: string): string[] { const map = this.settings.deckOpts ?? {}; return ancestors(source).filter((p) => typeof map[p]?.newPerDay === "number"); }
+  /** Each capped deck's new cards left today (cap minus new cards from it seen today). */
+  capsLeft(now = Date.now()): Map<string, number> {
+    const map = this.settings.deckOpts ?? {}; const out = new Map<string, number>();
+    for (const [p, o] of Object.entries(map)) if (o && typeof o.newPerDay === "number") out.set(p, o.newPerDay);
+    if (!out.size) return out;
+    const start = this.dayStart(now); const seen = new Set<string>();
+    for (let i = this.reviews.length - 1; i >= 0 && this.reviews[i].ts >= start; i--) {
+      const r = this.reviews[i]; if (r.state !== "new" || seen.has(r.cid)) continue; seen.add(r.cid);
+      const c = this.cards.get(r.cid); if (!c) continue;
+      for (const p of this.capPaths(c.source)) out.set(p, (out.get(p) ?? 0) - 1);
+    }
+    return out;
+  }
+  /** Change one deck's own options (only that deck: decks under it inherit). An empty set clears the deck's entry. */
+  async setDeckOpts(path: string, patch: Partial<Record<keyof DeckOpts, unknown>>): Promise<void> {
+    const cur = { ...(this.settings.deckOpts?.[path] ?? {}) } as Record<string, unknown>;
+    for (const [k, v] of Object.entries(patch)) { if (v === undefined || v === null) delete cur[k]; else cur[k] = v; }
+    const next = { ...(this.settings.deckOpts ?? {}), [path]: Object.keys(cur).length ? (cur as DeckOpts) : null };
+    await this.saveSettings({ deckOpts: next });
+  }
+  /** The deck's language for reading aloud and word meanings (null: not a language deck). */
+  langFor(source: string): string | null {
+    const map = this.settings.deckOpts ?? {}; if (this.langCache.map !== map) this.langCache = { map, by: new Map() };
+    let l = this.langCache.by.get(source); if (l === undefined) { l = deckLang(map, source); this.langCache.by.set(source, l); } return l;
+  }
+  private langCache: { map: DeckOptsMap | null; by: Map<string, string | null> } = { map: null, by: new Map() };
+  /** Build the dictionary ahead of the first tap, in slices of ~8 ms so a phone never stutters (a language deck's session asks). */
+  warmLexicon(): void {
+    const key = `${this.notesRev()}|${this.structureVersion}`; const opts = this.settings.deckOpts;
+    if ((this.lex && this.lex.key === key && this.lex.opts === opts) || this.lexWarming === key) return; this.lexWarming = key;
+    void (async () => {
+      const deck = new Map<string, string>(); let t = performance.now(), i = 0;
+      for (const c of this.cards.values()) { if (!deck.has(c.nid)) deck.set(c.nid, c.source); if ((++i & 1023) === 0 && performance.now() - t > 8) { await new Promise((r) => setTimeout(r, 0)); t = performance.now(); } }
+      const lex: Lexicon = new Map();
+      for (const n of this.notes.values()) {
+        addToLexicon(lex, n, (id) => this.notetypes.get(id), (nid) => { const d = deck.get(nid); return d ? this.langFor(d) : null; }, (nid) => deck.get(nid) ?? "");
+        if ((++i & 127) === 0 && performance.now() - t > 8) { await new Promise((r) => setTimeout(r, 0)); t = performance.now(); if (this.lexWarming !== key || `${this.notesRev()}|${this.structureVersion}` !== key || this.settings.deckOpts !== opts) { if (this.lexWarming === key) this.lexWarming = ""; return; } }
+      }
+      if (!(this.lex && this.lex.key === key && this.lex.opts === opts)) this.lex = { key, opts, lex };
+      this.lexWarming = "";
+    })();
+  }
+  private lexWarming = "";
+  /** How a deck's cards look: their own look (and the deck's shared CSS) or the Yuzu reading style. */
+  lookFor(source: string): { own: boolean; css: string; at?: string } {
+    const look = this.optsFor(source).opts.look; const own = look === "own" ? true : look === "yuzu" ? false : this.settings.cardStyle === "deck";
+    const st = own ? resolveStyle(this.settings.deckStyles ?? {}, source) : null;
+    return { own, css: st?.style.css ?? "", at: st?.at };
+  }
+  /** The decks with a shared look of their own (for the Deck options sheet). */
+  styleFor(path: string) { return resolveStyle(this.settings.deckStyles ?? {}, path); }
+  private lex: { key: string; opts: unknown; lex: Lexicon } | null = null;
+  /** Your own dictionary from your vocab cards (lib/lexicon.ts), built on first use and kept until a note or deck option changes. */
+  lexicon(): Lexicon {
+    const key = `${this.notesRev()}|${this.structureVersion}`; const opts = this.settings.deckOpts;
+    if (this.lex && this.lex.key === key && this.lex.opts === opts) return this.lex.lex;
+    const deck = new Map<string, string>(); for (const c of this.cards.values()) if (!deck.has(c.nid)) deck.set(c.nid, c.source);
+    const lex = buildLexicon(this.notes.values(), (id) => this.notetypes.get(id), (nid) => { const d = deck.get(nid); return d ? this.langFor(d) : null; }, (nid) => deck.get(nid) ?? "");
+    this.lex = { key, opts, lex }; return lex;
+  }
+  /** What your own cards say a word means (best first). */
+  meaningOf(word: string, near?: string, not?: string): Entry[] { return lookup(this.lexicon(), word, { near, not }); }
+  private lineCache = new Map<string, { sv: number; by: unknown; nids: string[]; pos: Map<string, number> }>();
+  /** The notes of an ordered deck in line order (cached per structure version). */
+  lineOrder(root: string): { nids: string[]; pos: Map<string, number> } {
+    const by = this.optsFor(root).opts.orderBy ?? "line";
+    const hit = this.lineCache.get(root); if (hit && hit.sv === this.structureVersion && hit.by === by) return hit;
+    const deck = new Map<string, string>(); for (const c of this.cardsIn(root, "decks")) { const d = deck.get(c.nid); if (d === undefined || comparePaths(c.source, d) < 0) deck.set(c.nid, c.source); }
+    const nids = [...deck.keys()].sort((a, b) => (by === "subdeck" ? comparePaths(deck.get(a)!, deck.get(b)!) : 0) || compareLines(this.notes.get(a), this.notes.get(b)));
+    const pos = new Map<string, number>(); nids.forEach((id, i) => pos.set(id, i));
+    const out = { sv: this.structureVersion, by, nids, pos }; if (this.lineCache.size > 12) this.lineCache.clear(); this.lineCache.set(root, out); return out;
+  }
+  /** Where a card's note sits in its ordered deck ("line 12 of 340") and the line before it (when the deck shows it). */
+  lineOf(card: Card): { n: number; total: number; root: string; prev: Note | null; prevs: Note[]; showNo: boolean } | null {
+    const r = this.optsFor(card.source); if (!r.opts.ordered && !r.opts.prevLine) return null;
+    const root = r.at.ordered ?? r.at.prevLine!; const o = this.lineOrder(root); const i = o.pos.get(card.nid); if (i === undefined) return null;
+    const prevs: Note[] = []; if (r.opts.prevLine) for (let k = Math.max(0, i - (r.opts.prevLines ?? 1)); k < i; k++) { const n = this.notes.get(o.nids[k]); if (n) prevs.push(n); }
+    return { n: i + 1, total: o.nids.length, root, prev: prevs[prevs.length - 1] ?? null, prevs, showNo: r.opts.lineNo !== false };
+  }
+  /** Where a deck is in its order: lines started (any card of the note seen) and the next new line. */
+  lineProgress(root: string): { started: number; total: number; next: number | null } {
+    const o = this.lineOrder(root); const started = new Set<string>(); const fresh = new Set<string>();
+    for (const c of this.cardsIn(root, "decks")) { if (c.state !== "new") started.add(c.nid); else if (!c.suspended) fresh.add(c.nid); }
+    let next: number | null = null; for (let i = 0; i < o.nids.length; i++) if (fresh.has(o.nids[i]) && !started.has(o.nids[i])) { next = i + 1; break; }
+    return { started: started.size, total: o.nids.length, next };
+  }
   /** Hands out a list's items in sorted order (stable, like Array.sort) without sorting all of it while only a few are taken. */
   static orderedTaker<T>(list: T[], cmp: (a: T, b: T) => number, first = 32): { left: () => number; take: () => T } {
     // One pass keeps the `first` smallest (ties in list order, as a stable sort would); the rest is sorted only if ever reached.
@@ -2568,7 +2698,7 @@ export class Store {
     const now = stamp(); const out: Card[] = []; const was: [string, string][] = [];
     for (const c of this.cards.values()) if (c.source === from || c.source.startsWith(from + "::")) { out.push({ ...c, source: re(c.source), mod: now }); was.push([c.id, c.source]); }
     for (const c of out) this.cards.set(c.id, c);
-    const s = this.settings; const before = { pins: s.pins, smart: s.smart, deadlines: s.deadlines, bosses: s.bosses };
+    const s = this.settings; const before = { pins: s.pins, smart: s.smart, deadlines: s.deadlines, bosses: s.bosses, deckOpts: s.deckOpts, deckStyles: s.deckStyles };
     const pins = s.pins.map((p) => (p.view === "decks" && re(p.path) !== p.path ? { ...p, path: re(p.path) } : p));
     const smart = s.smart.map((sd) => (sd.decks.some((d) => re(d) !== d) ? { ...sd, decks: [...new Set(sd.decks.map(re))] } : sd));
     const deadlines = (s.deadlines ?? []).map((d) => (d.view === "decks" && re(d.path) !== d.path ? { ...d, path: re(d.path) } : d));
@@ -2579,8 +2709,10 @@ export class Store {
     let editDeck: string | null = null; try { editDeck = localStorage.getItem("yuzu-edit-deck"); if (editDeck && re(editDeck) !== editDeck) localStorage.setItem("yuzu-edit-deck", re(editDeck)); } catch { /* storage unavailable */ }
     this.lastRename = { from, to, was, settings: before, editDeck };
     await this.persist("renaming the category", db.putMany("cards", out));
-    const changed = pins.some((p, i) => p !== s.pins[i]) || smart.some((x, i) => x !== s.smart[i]) || deadlines.some((d, i) => d !== (s.deadlines ?? [])[i]) || bosses !== s.bosses;
-    if (changed) await this.saveSettings({ pins, smart, deadlines, bosses });
+    // deck options and a deck's own look follow the deck (the old place is cleared, so the move syncs too)
+    const deckOpts = renameKeys(s.deckOpts ?? {}, from, to), deckStyles = renameKeys(s.deckStyles ?? {}, from, to);
+    const changed = pins.some((p, i) => p !== s.pins[i]) || smart.some((x, i) => x !== s.smart[i]) || deadlines.some((d, i) => d !== (s.deadlines ?? [])[i]) || bosses !== s.bosses || !!deckOpts || !!deckStyles;
+    if (changed) await this.saveSettings({ pins, smart, deadlines, bosses, ...(deckOpts ? { deckOpts } : {}), ...(deckStyles ? { deckStyles } : {}) });
     this.bump(); this.touch();
     return out.length;
   }
@@ -2590,7 +2722,7 @@ export class Store {
     for (const c of this.cards.values()) { const mine = c.source === from || c.source.startsWith(from + "::"); if (mine) moving++; else if (c.source === to || c.source.startsWith(to + "::")) existing++; }
     return { existing, moving };
   }
-  lastRename: { from: string; to: string; was: [string, string][]; settings: Pick<Settings, "pins" | "smart" | "deadlines" | "bosses">; editDeck: string | null } | null = null;
+  lastRename: { from: string; to: string; was: [string, string][]; settings: Pick<Settings, "pins" | "smart" | "deadlines" | "bosses" | "deckOpts" | "deckStyles">; editDeck: string | null } | null = null;
   /** Undo the last rename or move: every moved card goes back to its own old path (so a merge comes apart again). */
   async undoRename(): Promise<number> {
     const r = this.lastRename; if (!r) return 0; this.lastRename = null;
@@ -2598,7 +2730,8 @@ export class Store {
     for (const [id, src] of r.was) { const c = this.cards.get(id); if (c) out.push({ ...c, source: src, mod: now }); }
     for (const c of out) this.cards.set(c.id, c);
     await this.persist("undoing the rename", db.putMany("cards", out));
-    await this.saveSettings(r.settings);
+    const gone = <T,>(old: Record<string, T | null> | undefined, cur: Record<string, T | null> | undefined) => { const o: Record<string, T | null> = { ...(old ?? {}) }; for (const k of Object.keys(cur ?? {})) if (!(k in o)) o[k] = null; return o; }; // keys the rename made are cleared, so the undo syncs too
+    await this.saveSettings({ ...r.settings, deckOpts: gone(r.settings.deckOpts, this.settings.deckOpts), deckStyles: gone(r.settings.deckStyles, this.settings.deckStyles) });
     try { if (r.editDeck !== null) localStorage.setItem("yuzu-edit-deck", r.editDeck); } catch { /* storage unavailable */ }
     this.bump(); this.touch();
     return out.length;

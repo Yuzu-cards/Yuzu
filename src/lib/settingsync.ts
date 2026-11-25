@@ -3,12 +3,14 @@
 // where it syncs) never travel. Settings written by older Yuzu versions carry only one `updatedAt` for the whole object:
 // they still merge, as if every field had changed at that time (which is what those versions meant).
 
+import { cleanDeckOpts, cleanDeckStyles } from "./deckopts";
+
 /** Settings that belong to this phone, tablet or computer: never sent, never taken from another device or from a backup file. */
 export const DEVICE_ONLY = ["sync", "deviceName", "nightCards", "swipe", "typeAnswers", "mediaDownload", "theme", "sfx", "autoplay", "cardStyle"] as const;
 const DEVICE = new Set<string>(DEVICE_ONLY);
 const META = new Set(["updatedAt", "stamps"]);
 /** Objects whose fields are stamped one by one (the rota read on one device, Drive-is-master toggled on another). */
-const NESTED = new Set(["google"]);
+const NESTED = new Set(["google", "deckOpts", "deckStyles"]);
 /** The fallback stamp for fields never stamped individually (settings saved before per-field stamps). */
 const BASE = "*";
 
@@ -100,6 +102,7 @@ export function sanitizeSettings<T extends Obj>(s: T, d: Obj): T {
   const ed = arr(o.easyDays, d.easyDays); o.easyDays = ed.length === 7 ? ed.map((x: unknown, i: number) => num(x, 0, 1, d.easyDays[i] ?? 1, false)) : d.easyDays.slice();
   for (const k of ["pins", "smart", "deadlines", "hiddenFields", "applied"]) o[k] = arr(o[k], d[k]);
   for (const k of ["bosses", "deckMap"]) o[k] = obj(o[k], d[k]);
+  o.deckOpts = cleanDeckOpts(o.deckOpts); o.deckStyles = cleanDeckStyles(o.deckStyles);
   const m = obj(o.mastery, d.mastery); o.mastery = { developing: num(m.developing, 1, 36500, d.mastery.developing, false), mastered: num(m.mastered, 1, 36500, d.mastery.mastered, false), durable: num(m.durable, 1, 36500, d.mastery.durable, false) };
   const sc = obj(o.scheduler, d.scheduler); const w = Array.isArray(sc.w) && sc.w.every((x: unknown) => typeof x === "number" && Number.isFinite(x)) ? sc.w : d.scheduler.w;
   const steps = (v: unknown, dflt: number[]) => (Array.isArray(v) && v.every((x) => typeof x === "number" && Number.isFinite(x) && x > 0) ? v : dflt);
