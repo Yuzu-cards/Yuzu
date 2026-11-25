@@ -303,7 +303,8 @@ function MoreForToday({ onStudy }: { onStudy: OnStudy }) {
   useEffect(() => { if (store.takePendingOpen("practice")) setPractice(true); });
   const [open, setOpen] = useState(() => { try { return localStorage.getItem("yuzu-more-today") === "open"; } catch { return false; } });
   const drill = useMemo(() => store.drillQueue(30), [store.cards.size, store.reviews.length, today]); const systems = store.drillSystems(drill);
-  if (systems < 2 && drill.length < 5) return null;
+  // the fold hides when there is little to drill, but a sheet asked for (Citrus's do=practice) still opens
+  if (systems < 2 && drill.length < 5) return practice ? <PracticeSheet onClose={() => setPractice(false)} /> : null;
   return (<>
     {practice && <PracticeSheet onClose={() => setPractice(false)} />}
     <details className="more-today" open={open} onToggle={(e) => { const o = (e.target as HTMLDetailsElement).open; setOpen(o); try { localStorage.setItem("yuzu-more-today", o ? "open" : "closed"); } catch { /* fine */ } }}>

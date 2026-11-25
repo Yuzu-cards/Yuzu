@@ -4,9 +4,9 @@
 // ("German", "Deutsch", "Satz"…), else its first field.
 import type { Note, Notetype } from "./model";
 import { plainField, VOCAB_NT } from "./typed";
+import { fillClozes } from "./cloze";
 
-/** A cloze text with every gap filled in by its answer ("{{c1::Hund::animal}}" → "Hund"). */
-export function fillClozes(s: string): string { return (s ?? "").replace(/\{\{c\d+::([\s\S]*?)(?:::[^}]*)?\}\}/g, "$1"); }
+export { fillClozes }; // ("{{c1::Hund::animal}}" → "Hund"; lib/cloze.ts)
 
 const LANG_FIELD: Record<string, RegExp> = {
   de: /^(german|deutsch|de|wort|satz|sentence|beispiel|example|word|expression|ausdruck)$/i,

@@ -8,6 +8,7 @@ import type { Card, CardState } from "../lib/model";
 import { IconChevron, IconPlay, IconClose, IconPin, IconEdit, IconSettings } from "./icons";
 import { DeckOptions } from "./DeckOptions";
 import { MoveDeck } from "./MoveDeck";
+import { ReadMake } from "./ReadMake";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Duplicates } from "./Duplicates";
 import { OcclusionEditor } from "./Occlusion";
@@ -15,7 +16,7 @@ import { CardEditor, NoteEditor } from "./CardEditor";
 import { bossPool, BOSS_PASS } from "./Boss";
 import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
-import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, Sheet, useMedia, type SheetItem } from "./kit";
+import { ActionSheet, HoldRow, snackbar, DragHandle, useDragReorder, confirmSheet, Sheet, useMedia, pickSheet, type SheetItem } from "./kit";
 import { systemColor } from "./theme";
 import { isHousekeepingTag } from "../lib/search";
 
@@ -140,11 +141,19 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [editSmart, setEditSmart] = useState<SmartDeck | null | "new">(null);
   const [moveTo, setMoveTo] = useState<string | null>(null);
   const [tagTo, setTagTo] = useState<string | null>(null);
-  const [tool, setTool] = useState<"dupes" | "occlusion" | "card" | null>(null);
+  const [tool, setTool] = useState<"dupes" | "occlusion" | "card" | "read" | null>(null);
   const [rename, setRename] = useState<string | null>(null); const [renameFrom, setRenameFrom] = useState("");
   const openRename = (p: string) => { setRenameFrom(p); setRename(p.split("::").pop() ?? p); };
   const [moving, setMoving] = useState<string | null>(null); // the Move to… picker
   const [cut, setCut] = useState<string | null>(null); // a deck cut, waiting for "Paste here"
+  /** Practise a deck without touching its schedule: pick what to go through. */
+  async function practise(p: string, name: string) {
+    const kinds = [["weakest", "The 30 shakiest cards"], ["new", "Preview 30 new cards"], ["random", "30 at random"], ["all", "The whole deck"]] as const;
+    const counts = kinds.map(([k]) => store.practiceCards(p, k, 30, view).length);
+    const i = await pickSheet(`Practise “${name}” — nothing gets rescheduled`, kinds.map(([, l], j) => ({ label: `${l} (${counts[j].toLocaleString()})`, disabled: !counts[j] })));
+    if (i === null || i < 0) return; const cards = store.practiceCards(p, kinds[i][0], 30, view); if (!cards.length) return;
+    onStudy(p, view, { preset: cards, practice: true, title: `Practice · ${name}` });
+  }
   /** Move or rename a deck (and everything in it): asks before merging into a deck that exists, then offers Undo. */
   async function moveDeck(from: string, to: string): Promise<boolean> {
     to = to.trim().replace(/\s*::\s*/g, "::").replace(/^::|::$/g, ""); if (!to || to === from) return false;
@@ -156,6 +165,8 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     return true;
   }
   const [deckOpts, setDeckOpts] = useState<string | null>(null);
+  const [fr, setFr] = useState<{ find: string; repl: string; field: string; regex: boolean; cs: boolean } | null>(null); // Find and replace
+  const [dueSheet, setDueSheet] = useState<{ from: string; to: string } | null>(null); // Set due date
   const [classify, setClassify] = useState<"System" | "Specialty" | null>(null);
   const v = store.getVersion();
   const similarCount = useMemo(() => store.similarPairs().length, [store.getDataVersion()]);
@@ -224,6 +235,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     ...(view === "systems" ? [{ label: "Boss fight", onClick: () => onBoss(c.path, view, c.name) }] : []),
     isPinned(c.path, view) ? { label: "Unpin from Today", onClick: () => store.saveSettings({ pins: store.settings.pins.filter((x) => !(x.path === c.path && x.view === view)) }) } : { label: "Pin to Today", onClick: () => store.saveSettings({ pins: [...store.settings.pins, { path: c.path, view }] }) },
     ...(view === "decks" ? [
+      { label: "Practice…", hint: "doesn't change the schedule", onClick: () => practise(c.path, c.name) },
       { label: "Move to…", hint: "pick where", onClick: () => setMoving(c.path) },
       { label: "Cut", hint: "then Paste here in another deck", onClick: () => { setCut(c.path); snackbar(`Cut “${c.name}” — open the deck it goes into and press Paste here`); } },
       { label: "Rename…", onClick: () => openRename(c.path) },
@@ -245,7 +257,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   ] }); };
 
   if (store.cards.size === 0) {
-    return (<div className="screen"><div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1><button className="chip" onClick={() => setTool("card")}>＋ Card</button><button className="chip" onClick={() => setTool("occlusion")}>＋ Image</button></div><div className="empty">No cards yet. Import your Anki collection from Settings.</div>{tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}{tool === "card" && <CardEditor full onClose={() => setTool(null)} />}</div>);
+    return (<div className="screen"><div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1><button className="chip" onClick={() => setTool("card")}>＋ Card</button><button className="chip" onClick={() => setTool("occlusion")}>＋ Image</button><button className="chip" onClick={() => setTool("read")}>＋ Text</button></div><div className="empty">No cards yet. Import your Anki collection from Settings.</div>{tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}{tool === "card" && <CardEditor full onClose={() => setTool(null)} />}{tool === "read" && <ReadMake onClose={() => setTool(null)} />}</div>);
   }
   const doBulk = async (action: Parameters<typeof store.bulk>[1]) => { await store.bulk([...selected], action); setSelected(new Set()); setSelecting(false); };
   const title = view === "smart" ? (smart?.name ?? "Smart decks") : node!.name;
@@ -253,8 +265,9 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
 
   return (
     <div className={"screen" + (wide && preview ? " lib-docked" : "")}>
-      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pair{similarCount === 1 ? "" : "s"}</button>}<button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("card")}>＋ Card</button><button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("occlusion")}>＋ Image</button></div>
+      <div className="row"><h1 className="grow" style={{ margin: 0 }}>Library</h1>{similarCount > 0 && <button className="chip orange" onClick={() => setTool("dupes")}>{similarCount} similar pair{similarCount === 1 ? "" : "s"}</button>}<button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("card")}>＋ Card</button><button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("occlusion")}>＋ Image</button><button className="chip" style={{ marginLeft: 6 }} onClick={() => setTool("read")} title="Paste a text, tap the words to learn">＋ Text</button></div>
       {tool === "occlusion" && <OcclusionEditor onClose={() => setTool(null)} />}
+      {tool === "read" && <ReadMake onClose={() => setTool(null)} initialDeck={view === "decks" && path ? path : ""} />}
       {tool === "card" && <CardEditor full onClose={() => setTool(null)} onSimilar={() => setTool("dupes")} />}
       <div className="seg">
         {[...VIEWS, { id: "smart" as View, label: "Smart" }].map((x) => <button key={x.id} className={view === x.id ? "on" : ""} aria-pressed={view === x.id} onClick={() => { setView(x.id); go(""); }}>{x.label}</button>)}
@@ -358,6 +371,9 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
             { label: "Move to a category…", onClick: () => setMoveTo("") },
             { label: "Set system…", onClick: () => setClassify("System") },
             { label: "Set specialty…", onClick: () => setClassify("Specialty") },
+            { label: "Find and replace…", hint: "in their text", onClick: () => setFr({ find: "", repl: "", field: "", regex: false, cs: false }) },
+            { label: "Set due date…", hint: "when they come back", onClick: () => setDueSheet({ from: "1", to: "" }) },
+            { label: "Reset to new…", hint: "start them over", onClick: async () => { const ids = [...selected]; const seen = ids.filter((id) => { const c = store.cards.get(id); return c && c.state !== "new"; }).length; if (!seen) { snackbar("They're all new already"); return; } if (!(await confirmSheet({ title: `Reset ${seen.toLocaleString()} card${seen === 1 ? "" : "s"} to new?`, sub: "They start over as new cards. Their review history stays (Progress counts it). You can undo right after.", yes: "Reset" }))) return; const n = await store.resetCards(ids); snackbar(`${n.toLocaleString()} card${n === 1 ? "" : "s"} reset to new`, async () => { await store.undoBulkEdit(); }); } },
             { label: "Needs improving…", onClick: () => setImproveFor([...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]) },
             { label: "Delete…", danger: true, onClick: async () => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])]; if (!(await confirmSheet({ title: `Delete ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"} and all their cards?`, sub: "Review history goes too. You can undo right after.", yes: "Delete" }))) return; const n = await store.deleteNotes(nids); setSelected(new Set()); setSelecting(false); setDeleted({ n, token: store.lastDeleted }); } },
           ] })}>More…</button>
@@ -379,6 +395,26 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
           <button className="btn primary block" disabled={!moveTo.trim()} onClick={async () => { await doBulk({ source: moveTo.trim() }); setMoveTo(null); }}>Move</button>
         </Sheet>
       )}
+      {fr && (() => { const nids = [...new Set([...selected].map((id) => store.cards.get(id)?.nid).filter(Boolean) as string[])];
+        const fields = [...new Set(nids.slice(0, 2000).flatMap((id) => { const n = store.notes.get(id); return (n && store.notetypeFor(n)?.fields) ?? []; }))];
+        const o = { field: fr.field || undefined, regex: fr.regex, caseSensitive: fr.cs }; const m = store.findMatches(nids, fr.find, o);
+        let bad = false; if (fr.regex && fr.find) { try { new RegExp(fr.find); } catch { bad = true; } }
+        return <Sheet title={`Find and replace in ${nids.length.toLocaleString()} note${nids.length === 1 ? "" : "s"}`} onClose={() => setFr(null)} dirty={!!fr.find}>
+          <div className="field"><label>Find</label><input value={fr.find} autoFocus onChange={(e) => setFr({ ...fr, find: e.target.value })} data-testid="fr-find" /></div>
+          <div className="field"><label>Replace with</label><input value={fr.repl} onChange={(e) => setFr({ ...fr, repl: e.target.value })} placeholder="(nothing: delete it)" data-testid="fr-repl" /></div>
+          <div className="field"><label>In</label><select value={fr.field} onChange={(e) => setFr({ ...fr, field: e.target.value })}><option value="">Every field</option>{fields.map((f) => <option key={f} value={f}>{f}</option>)}</select></div>
+          <label className="row small" style={{ margin: "6px 0" }}><input type="checkbox" checked={fr.cs} onChange={(e) => setFr({ ...fr, cs: e.target.checked })} /> Match capitals</label>
+          <label className="row small" style={{ margin: "6px 0" }}><input type="checkbox" checked={fr.regex} onChange={(e) => setFr({ ...fr, regex: e.target.checked })} /> Pattern (regular expression; $1 in the replacement)</label>
+          <p className="small muted" data-testid="fr-count">{bad ? "That pattern isn't valid." : !fr.find ? "Only the text changes: pictures, sounds, formatting and gap markers are never touched." : m.places ? `${m.places.toLocaleString()} place${m.places === 1 ? "" : "s"} in ${m.notes.toLocaleString()} note${m.notes === 1 ? "" : "s"}.` : "Not found in these notes."}</p>
+          <button className="btn primary block" disabled={bad || !m.places} onClick={async () => { const n = await store.findReplace(nids, fr.find, fr.repl, o); setFr(null); snackbar(`Replaced in ${n.toLocaleString()} note${n === 1 ? "" : "s"}`, async () => { await store.undoBulkEdit(); }); }}>Replace {m.places ? `${m.places.toLocaleString()}` : ""}</button>
+        </Sheet>; })()}
+      {dueSheet && (() => { const ids = [...selected]; const fresh = ids.filter((id) => store.cards.get(id)?.state === "new").length; const a = Math.round(Number(dueSheet.from)), b = dueSheet.to.trim() ? Math.round(Number(dueSheet.to)) : a; const ok = Number.isFinite(a) && Number.isFinite(b) && a >= 0 && b >= 0 && a <= 36500 && b <= 36500 && dueSheet.from.trim() !== "";
+        return <Sheet title={`When should ${ids.length - fresh === 1 ? "it" : "they"} come back?`} onClose={() => setDueSheet(null)}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", margin: "4px 0 10px" }}>{([["Today", "0", ""], ["Tomorrow", "1", ""], ["In 3–7 days", "3", "7"], ["In a month", "30", ""]] as const).map(([l, f, t]) => <button key={l} className={"chip" + (dueSheet.from === f && dueSheet.to === t ? " orange" : "")} onClick={() => setDueSheet({ from: f, to: t })}>{l}</button>)}</div>
+          <div className="row" style={{ gap: 8 }}><div className="field grow"><label>In (days)</label><input type="number" min={0} inputMode="numeric" value={dueSheet.from} onChange={(e) => setDueSheet({ ...dueSheet, from: e.target.value })} data-testid="due-from" /></div><div className="field grow"><label>to (optional, spreads them)</label><input type="number" min={0} inputMode="numeric" value={dueSheet.to} onChange={(e) => setDueSheet({ ...dueSheet, to: e.target.value })} /></div></div>
+          <p className="small muted">{fresh ? `${fresh.toLocaleString()} new card${fresh === 1 ? " stays" : "s stay"} new (study them, or Reset decides). ` : ""}Their memory isn't changed — only the day they come back.</p>
+          <button className="btn primary block" disabled={!ok || ids.length === fresh} onClick={async () => { const r = await store.setDueDays(ids, a, b); setDueSheet(null); snackbar(`${r.changed.toLocaleString()} card${r.changed === 1 ? "" : "s"} now due ${a === b ? (a === 0 ? "today" : a === 1 ? "tomorrow" : `in ${a} days`) : `in ${Math.min(a, b)}–${Math.max(a, b)} days`}`, async () => { await store.undoBulkEdit(); }); }} data-testid="due-apply">Set</button>
+        </Sheet>; })()}
       {deckOpts !== null && <DeckOptions path={deckOpts} onClose={() => setDeckOpts(null)} />}
       {moving !== null && <MoveDeck from={moving} onClose={() => setMoving(null)} onMove={async (to) => { const from = moving; if (await moveDeck(from, to)) { setMoving(null); if (cut === from) setCut(null); } }} />}
       {cut !== null && view === "decks" && (() => { const name = cut.split("::").pop(); const into = path; const bad = into === cut || into.startsWith(cut + "::") || into === cut.split("::").slice(0, -1).join("::");

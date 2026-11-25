@@ -8,8 +8,9 @@ import { IconClose } from "./icons";
 import { useBack } from "./useBack";
 import { parsePack, describeInvalid, countOf } from "../import/pack";
 import { str, strTags } from "../lib/coerce";
+import { mapClozes } from "../lib/cloze";
 
-const clean = (s: unknown) => str(s).replace(/\{\{c\d+::(.*?)(?:::[^}]*)?\}\}/g, "[$1]").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+const clean = (s: unknown) => mapClozes(str(s), (a) => `[${a}]`).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
 function Review({ sha, onDone }: { sha: string; onDone: () => void }) {
   const e = store.inbox.find((x) => x.sha === sha);

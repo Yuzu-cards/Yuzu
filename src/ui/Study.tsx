@@ -4,6 +4,7 @@ import { store, type View } from "../lib/store";
 import type { Card, Rating } from "../lib/model";
 import { renderCard, noteTitle, rewriteCssUrls } from "../lib/render";
 import { lineText } from "../lib/line";
+import { mapClozes } from "../lib/cloze";
 import type { Entry } from "../lib/lexicon";
 import { sanitizeFragment, sanitizeCss } from "../lib/sanitize";
 import { MCQ_ID, parseOptions, shuffled } from "../lib/mcq";
@@ -16,8 +17,11 @@ import { useBack } from "./useBack";
 import { ImproveSheet } from "./Improve";
 import { useHold, Slider, buzz, confirmSheet, Sheet } from "./kit";
 import { WordSheet, wordAt, type WordHit } from "./Word";
+import { Whiteboard } from "./Whiteboard";
+import { SayIt, canRecord } from "./SayIt";
 import { sfx } from "./sfx";
 import { SKIN_CSS, isShortCard } from "./cardskin";
+import { artFor, deckTheme, THEME_COLORS, THEME_CSS } from "./subjectart";
 import { wireSounds, playSounds, stopSounds, cardSounds, whenSoundsDone } from "./sound";
 import { insertApart } from "../lib/drill";
 
@@ -47,7 +51,7 @@ hr#answer { border: 0; border-top: 2px dashed rgba(0,0,0,.18); margin: 16px -4px
 .night_mode .card, .card.night_mode { color: #f2f2f0; background: transparent; }
 `;
 
-export function CardView({ html, css, dark, side = "front", autoplay = false, quiet = false, deck }: { html: string; css: string; dark: boolean; side?: "front" | "back"; autoplay?: boolean; /** a second piece of the same card (MCQ explanation): wires its buttons but never starts or stops sounds */ quiet?: boolean; /** the card's deck: its look (Deck options) decides the style */ deck?: string }) {
+export function CardView({ html, css, dark, side = "front", autoplay = false, quiet = false, deck, theme }: { html: string; css: string; dark: boolean; side?: "front" | "back"; autoplay?: boolean; /** a second piece of the same card (MCQ explanation): wires its buttons but never starts or stops sounds */ quiet?: boolean; /** the card's deck: its look (Deck options) decides the style */ deck?: string; /** a deck design's type and colours (German, Mephisto: ui/subjectart.ts) on top of the Yuzu style */ theme?: string | null }) {
   const ref = useRef<HTMLDivElement>(null);
   // The deck's look: its own (the note type's CSS plus the deck's shared CSS and fonts) or the Yuzu reading style on top.
   const look = deck !== undefined ? store.lookFor(deck) : { own: store.settings.cardStyle === "deck", css: "" };
@@ -57,15 +61,16 @@ export function CardView({ html, css, dark, side = "front", autoplay = false, qu
     const root = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const cls = dark ? "night_mode nightMode" : "";
     const skin = !look.own; host.dataset.look = skin ? "yuzu" : "own";
-    root.innerHTML = `<style></style><style></style>${skin ? "<style></style>" : ""}<div class="${cls}"><div class="card ${cls}${skin && isShortCard(html) ? " yz-short" : ""}"></div></div>`;
+    const themed = skin && theme && THEME_CSS[theme] ? THEME_CSS[theme] : "";
+    root.innerHTML = `<style></style><style></style>${skin ? "<style></style>" : ""}${themed ? "<style></style>" : ""}<div class="${cls}"><div dir="auto" class="card ${cls}${skin && isShortCard(html) ? " yz-short" : ""}"></div></div>`;
     // Deck CSS and HTML are set as text / cleaned nodes, never spliced into markup (no </style> breakout, no handlers).
-    const sheets = root.querySelectorAll("style"); sheets[0].textContent = BASE_CSS; sheets[1].textContent = sanitizeCss(deckCss ? css + "\n" + deckCss : css); if (skin) sheets[2].textContent = SKIN_CSS;
+    const sheets = root.querySelectorAll("style"); sheets[0].textContent = BASE_CSS; sheets[1].textContent = sanitizeCss(deckCss ? css + "\n" + deckCss : css); if (skin) sheets[2].textContent = SKIN_CSS; if (themed) sheets[3].textContent = themed; host.dataset.theme = themed ? theme! : "";
     root.querySelector(".card")!.append(sanitizeFragment(html));
     host.scrollTop = 0;
     const own = wireSounds(root, side);
     if (quiet) return;
     if (autoplay && own.length) playSounds(own); else stopSounds();
-  }, [html, css, dark, look.own, deckCss]);
+  }, [html, css, dark, look.own, deckCss, theme]);
   useEffect(() => () => { if (!quiet) stopSounds(); }, []);
   return <div ref={ref} className={"card-host" + (dark ? " dark" : "") + (quiet ? " card-tail" : "")} />;
 }
@@ -87,8 +92,8 @@ const TIPS = [
 /** First letters of each cloze answer: a near-miss helper for cards that are on the tip of the tongue. */
 function hintFor(note: { fields: string[] } | undefined, ord: number): string | null {
   if (!note) return null;
-  const re = new RegExp(`\\{\\{c${ord + 1}::([\\s\\S]*?)(?:::[^}]*)?\\}\\}`, "g");
-  const answers = [...(note.fields[0] ?? "").matchAll(re)].map((m) => m[1].replace(/<[^>]+>/g, "").trim()).filter(Boolean);
+  const answers: string[] = []; mapClozes(note.fields[0] ?? "", (ans, _h, nums) => { if (nums.includes(ord + 1)) answers.push(ans.replace(/<[^>]+>/g, "").trim()); return ""; });
+  answers.splice(0, answers.length, ...answers.filter(Boolean));
   if (!answers.length) return null;
   return answers.map((a) => a.split(/\s+/).map((w) => w[0] + "·".repeat(Math.max(1, Math.min(6, w.length - 1)))).join(" ")).join("  /  ");
 }
@@ -153,13 +158,21 @@ const STAMP_HINT: Record<string, string> = {
 export function Paper({ card, html, css, dark, side, children }: { card: Card; html: string; css: string; dark: boolean; side?: "front" | "back"; children?: React.ReactNode }) {
   const note = store.noteFor(card);
   const system = note?.tags.find((t) => t.startsWith("auto::System::"))?.slice(14);
+  // the subject design: the card's system drawn in the margin (never on a deck shown in its own look)
+  const level = store.settings.cardArt ?? "rich";
+  const artOn = level !== "off" && !store.lookFor(card.source).own && store.optsFor(card.source).opts.art !== false;
+  const dt = artOn ? deckTheme(card.source, store.langFor(card.source)) : null; const theme = dt === "none" ? null : dt;
+  const art = artOn && dt !== "none" ? artFor(system, theme, systemColor(system)) : null;
+  const spine = theme ? THEME_COLORS[theme].spine : systemColor(system);
   return (
-    <div className="paper-stage" style={{ "--spine": systemColor(system), "--tilt": `${tilt(card.id)}deg` } as any}>
+    <div className="paper-stage" style={{ "--spine": spine, "--tilt": `${tilt(card.id)}deg` } as any}>
       <div className="paper-under" />
-      <div className={"paper" + (dark ? " slate" : "")}>
+      <div className={"paper" + (dark ? " slate" : "") + (art ? ` art art-${level}` : "")} data-art={art?.key} style={art ? ({ "--art-strip": art.strip, ...(art.foot ? { "--art-foot": art.foot } : {}), ...(art.head ? { "--art-head": art.head } : {}) } as any) : undefined}>
+        {art?.head && level === "rich" && <i className="paper-art-head" aria-hidden="true" />}
+        {art?.foot && level === "rich" && <i className="paper-art-foot" aria-hidden="true" />}
         <span className="stamp" data-hint={`Card state|${STAMP_HINT[card.suspended ? "suspended" : card.state] ?? ""}`}>{stamp(card)}</span>
         <span className="spine-hit" data-hint={`${system ?? "Unclassified"}|The coloured spine shows the body system this card belongs to.`} />
-        <CardView html={html} css={css} dark={dark} side={side} autoplay={store.settings.autoplay} deck={card.source} />
+        <CardView html={html} css={css} dark={dark} side={side} autoplay={store.settings.autoplay} deck={card.source} theme={theme} />
         {children}
       </div>
     </div>
@@ -220,7 +233,7 @@ export function CardInfo({ card, onClose, onSaved, onTag }: { card: Card; onClos
   );
 }
 
-export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string; resume?: SavedSession; /** a suggested session length (the plan screen starts there) */ minutes?: number };
+export type StudyScope = { path: string; view?: View; only?: "all" | "due" | "new"; preset?: Card[]; title?: string; resume?: SavedSession; /** a suggested session length (the plan screen starts there) */ minutes?: number; /** practice: answers change nothing (no rescheduling, no review log); Again brings the card back a few cards later */ practice?: boolean };
 
 /** A study session saved as it goes, so a refresh (or Android reloading the app in the background) picks it up again. */
 export interface SavedSession { scope: { path: string; view?: View; only?: "all" | "due" | "new"; title?: string }; ids: string[]; idx: number; plan: number | null; done: number; results: { id: string; g: Rating; ms: number; sure?: boolean }[]; startedAt: number; savedAt: number }
@@ -230,7 +243,7 @@ export function loadSession(): SavedSession | null {
 }
 function saveSession(s: SavedSession | null) { try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch { /* storage unavailable: sessions just don't survive a reload */ } }
 
-export function Study({ path, view = "decks", only = "all", preset, title, resume, minutes, onExit: exit, onBrowseTag, onSearch }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void; onSearch?: (q: string) => void }) {
+export function Study({ path, view = "decks", only = "all", preset, title, resume, minutes, practice = false, onExit: exit, onBrowseTag, onSearch }: StudyScope & { onExit: () => void; onBrowseTag?: (tag: string) => void; onSearch?: (q: string) => void }) {
   // Resuming: the same cards in the same order, minus any deleted meanwhile (cards are re-read, so their schedule is current).
   const resumed = useMemo(() => (resume ? resume.ids.map((id) => store.cards.get(id)).filter((c): c is Card => !!c) : null), []);
   const fullQueue = useMemo(() => resumed ?? preset ?? store.queue(path, Date.now(), view, only), [path, view, only]);
@@ -244,7 +257,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const onExit = () => { saveSession(null); exit(); };
   // Save the session after every step (cheap: ids only). Cleared on exit and when the session is finished.
   useEffect(() => {
-    if (plan === null) return;
+    if (plan === null || practice) return; // a practice run isn't resumed after a reload (it changes nothing to lose)
     if (idx >= queue.length) { saveSession(null); return; }
     saveSession({ scope: { path, view, only, title }, ids: queue.map((c) => c.id), idx, plan, done: doneCount, results, startedAt: startedAt.current, savedAt: Date.now() });
   }, [queue, idx, plan, doneCount, results]);
@@ -252,6 +265,10 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const inputMode = useInputMode();
   // What happened this session that a toast announced, kept for the summary (a toast on the last card is gone in 1.4 s).
   const [events, setEvents] = useState<{ goal: boolean; matured: number; leeches: { lapses: number; act: string }[] }>({ goal: false, matured: 0, leeches: [] });
+  // A break reminder every `timebox` minutes of this session (Settings → During a session), said once per mark.
+  useEffect(() => { const m = store.settings.timebox ?? 0; if (!m) return; let said = Math.floor((Date.now() - startedAt.current) / (m * 60000));
+    const t = setInterval(() => { const k = Math.floor((Date.now() - startedAt.current) / (m * 60000)); if (k > said) { said = k; setToast(`${k * m} minutes — a good moment for a short break`); setTimeout(() => setToast(""), 4000); } }, 15000);
+    return () => clearInterval(t); }, []);
   const [grew, setGrew] = useState<{ n: number; at: number } | null>(null); // missed cards put back into the queue just now
   useEffect(() => { if (!grew) return; const t = setTimeout(() => setGrew(null), 2600); return () => clearTimeout(t); }, [grew]);
   const [info, setInfo] = useState(false);
@@ -271,6 +288,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const [menu, setMenu] = useState(false); const [hands, setHands] = useState(false);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null); useEffect(() => { if (!menu) setMenuAt(null); }, [menu]); // a right-click opens it at the pointer
   const [word, setWord] = useState<WordHit | null>(null);
+  const [drawing, setDrawing] = useState(false); const bodyRef = useRef<HTMLDivElement>(null); // Draw on the card
   // Tap a word on the back: its meaning from your own vocab cards, in a small bubble by the word.
   const [bubble, setBubble] = useState<{ hit: WordHit; entries: Entry[]; x: number; y: number; up: boolean } | null>(null);
   const holdMode = (() => { try { return localStorage.getItem("yuzu-hold") === "system" ? "system" : "yuzu"; } catch { return "yuzu"; } })();
@@ -303,7 +321,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   // Learning cards from this session that became due again (rated Again/Hard minutes ago) come back
   // at their due time, interleaved into what is left; the planned size is otherwise respected.
   useEffect(() => {
-    if (plan === null) return;
+    if (plan === null || practice) return;
     const now = Date.now(); const remaining = new Set(queue.slice(idx).map((c) => c.id));
     const back = queue.slice(0, idx).map((c) => store.cards.get(c.id)!).filter((c) => c && !c.suspended && (c.state === "learning" || c.state === "relearning") && c.due <= now && !remaining.has(c.id));
     if (!back.length) return;
@@ -345,6 +363,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       if (e.key === "m") setMenu((m) => !m);
       if (e.key === "h" && !showAnswer) setHint(true);
       if (e.key === "l" && showAnswer && canRead) readLine();
+      if (e.key === "d") setDrawing((d) => !d);
       if (e.key === "r") playSounds(cardSounds(document.querySelector(".study .card-host")?.shadowRoot));
       if (e.key === "z" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
       // Escape is handled by useBack (topmost overlay only), so an info sheet on top closes first.
@@ -359,7 +378,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const nt = note && store.notetypeFor(note);
   const mediaRev = useSyncExternalStore(store.subscribe, () => store.mediaVersion, () => store.mediaVersion); // a file fetched from Drive re-renders the card
   const rendered = useMemo(() => (card && note && nt ? renderCard({ note, notetype: nt, ord: card.ord, deck: card.source, resolveMedia: store.mediaUrl }) : null), [card?.id, rev, mediaRev]);
-  const intervals = useMemo(() => (card ? previewIntervals(card, Date.now(), store.settings.scheduler) : null), [card?.id, rev]);
+  const intervals = useMemo(() => (card && !practice ? previewIntervals(card, Date.now(), store.settings.scheduler) : card ? (["", "again soon", "practice", "practice", "practice"] as any) : null), [card?.id, rev]);
   // Typed answers for language cards: the answer is whatever the back shows that the front did not.
   const mcq = useMemo(() => (card && note && nt && nt.id === MCQ_ID ? shuffled(parseOptions(note.fields[1] ?? ""), card.id + ":" + card.reps) : null), [card?.id, card?.reps, rev]);
   const mcqRight = picked !== null && !!mcq && !!mcq[picked]?.correct;
@@ -436,6 +455,12 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
   const busy = useRef(false);
   async function answer(g: Rating) {
     if (!card || busy.current) return;
+    if (practice) { // nothing is saved: Again puts the card back 4 cards on, so the run ends when each was known once
+      const view = snap(); push({ kind: "grade", cardId: card.id, view }); sfx.answer(g);
+      setResults((r) => [...r, { id: card.id, g, ms: Date.now() - shownAt.current }]); setDoneCount((d) => d + 1);
+      if (g === 1) setQueue((q) => { const at = Math.min(q.length, idx + 5); return [...q.slice(0, at), card, ...q.slice(at)]; });
+      setIdx((i) => i + 1); buzz(g === 1 ? [30, 40, 30] : 12); return;
+    }
     busy.current = true;
     const ms = Date.now() - shownAt.current;
     const before = store.reviewedToday().reviews; // not stats(): that walks the whole review log for a streak this throws away
@@ -486,6 +511,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
       setDoneCount((d) => Math.max(0, d - 1)); setResults((r) => r.slice(0, -1)); flash("Answer undone"); return;
     }
     acts.current = acts.current.slice(0, -1);
+    if (a.kind === "grade" && practice) { restore(a.view); flash("Answer undone"); return; }
     if (a.kind === "grade") {
       if (store.canUndoLast() !== a.cardId) { flash("Too late to undo that answer"); return; }
       if (a.unpause) await store.setSuspended(a.cardId, false);
@@ -584,6 +610,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
           <div className="done">
             <div className="big">{doneCount}</div>
             <div>{doneCount === 1 ? "card" : "cards"} in {mins} min{results.length ? ` · ${Math.round((ok / results.length) * 100)}% recalled` : ""}</div>
+            {practice && <p className="small muted" data-testid="practice-done" style={{ margin: "8px 0 0" }}>Practice: nothing was rescheduled and no review was saved. {[...new Set(results.filter((r) => r.g === 1).map((r) => r.id))].length ? `${[...new Set(results.filter((r) => r.g === 1).map((r) => r.id))].length} needed a second go.` : "Every card known."}</p>}
             {acts.current.length > 0 && <p className="small" style={{ margin: "8px 0 0" }}><button className="btn" onClick={undo}><IconUndo /> {{ grade: "Undo the last answer", pause: "Undo the pause", flag: "Undo the flag", delete: "Undo the delete", master: "Undo retiring it" }[acts.current[acts.current.length - 1].kind]}</button></p>}
             <p className="small muted tip">{TIPS[(doneCount + new Date().getDate()) % TIPS.length]}</p>
             {surprises.length > 0 && (
@@ -635,6 +662,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         <button className="icon-btn" onClick={onExit} aria-label="Close"><IconClose /></button>
         <div className="progress"><i style={{ width: `${total ? (idx / total) * 100 : 0}%` }} /></div>
         <span className="small muted num" style={{ minWidth: 64, textAlign: "right" }} title="cards left · minutes left">{total - idx} left · {Math.max(1, Math.round(((total - idx) * secs) / 60))}m</span>
+        {practice && <span className="chip practice-chip small" title="Answers here don't change when cards come back" data-testid="practice-chip">practice</span>}
         {grew && <span className="left-grew small" key={grew.at} title="Cards you just missed come back after their short step">+{grew.n} missed card{grew.n > 1 ? "s" : ""} back</span>}
         <button className="icon-btn" onClick={undo} aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!canUndo}><IconUndo /></button>
         <button className={"icon-btn" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-label="More"><IconMore /></button>
@@ -664,6 +692,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         }}>
           <button role="menuitem" onClick={() => { setMenu(false); setInfo(true); }}><IconInfo /> Card info and edit</button>
           {voiceSupported() && <button role="menuitem" onClick={() => { setMenu(false); setHands((h) => !h); flash(hands ? "Hands-free off" : "Hands-free on — say again, hard, good or easy"); }}>{hands ? "Stop hands-free" : "Hands-free (read aloud, answer by voice)"}</button>}
+          <button role="menuitem" onClick={() => { setMenu(false); setDrawing((d) => !d); }}><IconEdit /> {drawing ? "Stop drawing" : "Draw on the card"}</button>
           <button role="menuitem" onClick={() => { setMenu(false); setShowAnswer(true); setHookOpen(true); }}><IconEdit /> {hookText ? "Edit my hook" : "Add my hook"}</button>
           <button role="menuitem" onClick={() => { setMenu(false); push({ kind: "flag", cardId: card.id, flag: card.flag }); store.setFlag(card.id, card.flag ? 0 : 1); }}><IconFlag /> {card.flag ? "Remove flag" : "Flag this card"}</button>
           <button role="menuitem" onClick={() => { setMenu(false); setImproveOpen(true); }}><IconEdit /> {store.improveFor(card.nid) ? "Marked to improve — change" : "Needs improving…"}</button>
@@ -678,7 +707,8 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
         {lineInfo?.showNo && <span className="line-no small muted num" title="This line's place in its deck" data-testid="line-no">line {lineInfo.n.toLocaleString()} of {lineInfo.total.toLocaleString()}</span>}
         {showAnswer && canRead && lineToSay && <button className="btn read-line" onClick={readLine} aria-label="Read the line aloud" title="Read the line aloud (L). Again: slower"><IconSound size={18} /> Read</button>}
       </div>
-      <div className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onContextMenu={(e) => { if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; e.preventDefault(); setMenuAt(e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : null); setMenu(true); }} onClick={(e) => { if (holdPaper.wasHeld()) return; if (bubble) { setBubble(null); return; } if (!showAnswer) { setShowAnswer(true); return; } if (tapWords) tapWord(e); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+      {drawing && <Whiteboard key={card.id} target={bodyRef.current} onClose={() => setDrawing(false)} />}
+      <div ref={bodyRef} className={"study-body" + (flying ? " fly-off" : "")} data-hold-mode={holdMode} {...holdPaper.bind} onContextMenu={(e) => { if ((e.nativeEvent as PointerEvent).pointerType === "touch") return; e.preventDefault(); setMenuAt(e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : null); setMenu(true); }} onClick={(e) => { if (holdPaper.wasHeld()) return; if (bubble) { setBubble(null); return; } if (!showAnswer) { setShowAnswer(true); return; } if (tapWords) tapWord(e); }} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         style={flying ? { transform: flyTo[flying] } : { transform: drag ? `translate(${drag.dx * 0.45}px, ${drag.dy * 0.35}px)` : undefined, transition: drag ? "none" : "transform .15s" }}>
         {drag && showAnswer && (() => { const g = dirOf(drag); const near = g ?? dirOf({ dx: drag.dx * 1.6, dy: drag.dy * 1.6 }); if (!near) return null; const [t, col] = SWIPE_LABEL[near]; return <div className="swipe-label" style={{ color: col, opacity: g ? 1 : 0.55, left: Math.max(8, Math.min(window.innerWidth - 110, drag.x - 50)), top: Math.max(60, drag.y - 120), position: "fixed" }}>{t}</div>; })()}
         {prevTexts.length > 0 && <div className="prev-line" data-testid="prev-line" title={prevTexts.length > 1 ? `The ${prevTexts.length} lines before this one` : "The line before this one"}><span className="pl-tag">before</span><span className="pl-text" lang={lang ?? undefined}>{prevTexts.map((t, i) => <span key={i} className="pl-one">{t}</span>)}</span></div>}
@@ -704,6 +734,7 @@ export function Study({ path, view = "decks", only = "all", preset, title, resum
               ) : <button className="hook-text" onClick={() => setHookOpen(true)}><span className="small muted">my hook</span>{hookText}</button>}
             </div>
           )}
+          {showAnswer && lang && lineToSay && dOpts.sayIt !== false && canRecord() && <SayIt key={card.id} model={async () => { const own = cardSounds(document.querySelector(".study .paper .card-host")?.shadowRoot); if (own.length) { playSounds(own); await new Promise((r) => setTimeout(r, 200)); await whenSoundsDone(15000); } else await speak(lineToSay, lang); }} />}
           {typing && showAnswer && typed && <div className="typed-res" style={{ marginTop: 10 }}><span className={"chip " + (typedOk ? "ok" : verdict && !verdict.ok && verdict.near ? "near" : "no")}>{typedOk ? "✓ " : verdict && !verdict.ok && verdict.near ? "≈ " : "✗ "}{typed}{!typedOk && answerText ? ` → ${answerText}` : ""}</span>{verdict && !verdict.ok && verdict.near && <span className="small muted typed-near">{verdict.near}</span>}</div>}
         </Paper>}
       </div>

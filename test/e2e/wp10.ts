@@ -113,7 +113,7 @@ try {
   const stampWorst: string[] = [];
   for (const ui of ["arcade", "paper"]) for (const th of ["yuzu", "gameboy", "night"]) for (const dark of [false, true]) {
     await look(p, ui, th); await p.evaluate(async (d) => { await (window as any).yuzu.saveSettings({ nightCards: d }); }, dark); await study(p, "Medicine");
-    const sw = await p.evaluate(() => { const sys = ["#D65A3C", "#4FA3A3", "#8A6FD1", "#E8A83E", "#4D86C6", "#E0B93A", "#B23A48", "#6FA34A", "#A9794B", "#E07C9A", "#9C8AD6", "#D96C8F", "#3F9C8C", "#8C9A3A", "#FF7A1A", "#3FA7C9", "#8C8373"];
+    const sw = await p.evaluate(() => { const sys = ["#D65A3C", "#4FA3A3", "#D9A43C", "#E8A83E", "#4D86C6", "#9AB83E", "#B23A48", "#6FA34A", "#A9794B", "#E07C9A", "#9C8AD6", "#D96C8F", "#3F9C8C", "#8C9A3A", "#FF7A1A", "#3FA7C9", "#8C8373"];
       const stage = document.querySelector(".paper-stage") as HTMLElement; const st = document.querySelector(".stamp") as HTMLElement; const paper = document.querySelector(".paper") as HTMLElement; let worst = 99;
       const parse = (x: string) => { const m = x.match(/rgba?\(([^)]+)\)|color\(srgb ([^)]+)\)/)!; return m[1] ? m[1].split(/[ ,/]+/).filter(Boolean).map(Number) : m[2].split(/[ /]+/).filter(Boolean).map((v, i) => (i < 3 ? Number(v) * 255 : Number(v))); };
       const lum = (c: number[]) => { const f = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };

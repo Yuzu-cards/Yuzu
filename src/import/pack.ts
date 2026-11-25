@@ -26,6 +26,7 @@ import { noteTitle } from "../lib/render";
 import { IO_ID, parseMasks, formatMasks, type Mask } from "../lib/occlusion";
 import { MCQ_ID, optionsFromPack, formatOptions, valid } from "../lib/mcq";
 import { str, strTags, normCategory, dataUrlOk } from "../lib/coerce";
+import { clozeNumbers, fillClozes } from "../lib/cloze";
 
 export const PACK_CLOZE: Notetype = {
   id: "yuzu-cloze", name: "Yuzu Cloze", kind: "cloze",
@@ -95,7 +96,7 @@ export function hash(s: string): string {
 }
 
 export function normalizeText(s: string): string {
-  return s.replace(/\{\{c\d+::(.*?)(::[^}]*)?\}\}/g, "$1").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  return fillClozes(s).replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
 }
 function shingles(s: string): Set<string> { const w = s.split(" "); return new Set(w.length > 1 ? w.slice(1).map((x, i) => w[i] + " " + x) : w); }
 
@@ -209,7 +210,7 @@ export function parsePack(json: unknown, existing: Iterable<Note>, now = Date.no
       : type === "occlusion" ? (!imageField ? "ioImage" : !masks.length ? "ioMasks" : null)
       : !fields[0].trim() ? "text"
       : type === "vocab" && !meaning.trim() ? "vocab"
-      : type === "cloze" && !/\{\{c[1-9]\d*::/.test(text) ? "gap" : null;
+      : type === "cloze" && !clozeNumbers(text).length ? "gap" : null;
     if (bad) { invalid.push({ index: i, reason: bad }); return; }
     if (cid) seenIds.add(cid);
     const warn = () => { if (imageBad) badImages++; if (audioBad) badAudio++; };
@@ -299,7 +300,7 @@ export function packOrds(type: string, text?: string, masks?: number): number[] 
   if (type === "occlusion") return Array.from({ length: Math.max(1, masks ?? 1) }, (_, i) => i);
   if (type === "vocab") return [0, 1];
   if (type !== "cloze") return [0];
-  const o = [...new Set([...(text ?? "").matchAll(/\{\{c([1-9]\d*)::/g)].map((m) => Number(m[1]) - 1))].sort((a, b) => a - b);
+  const o = clozeNumbers(text ?? "").map((n) => n - 1);
   return o.length ? o : [0];
 }
 

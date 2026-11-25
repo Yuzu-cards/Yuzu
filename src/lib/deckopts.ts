@@ -21,16 +21,24 @@ export interface DeckOpts {
   /** Tap a word on the back for its meaning from your own vocab cards (default on in a language deck). */
   tapWord?: boolean;
   /** Strict order by line only (default), or subdeck by subdeck first ("Kapitel 2" before "Kapitel 10"), like Anki's deck order. */
-  orderBy?: "line" | "subdeck";
+  orderBy?: "line" | "subdeck" | "field";
+  /** With orderBy "field": the note field whose number is the order (a Goethe deck's "Nr", "Index", "Sort"…). */
+  orderField?: string;
+  /** New cards from this deck come first each day (up to its own cap), before the other decks take turns. */
+  priority?: boolean;
+  /** "Say it" (record yourself and compare) on the back of this deck's cards (default on in a language deck). */
+  sayIt?: boolean;
   /** How many lines before this one to show (1–3, default 1). */
   prevLines?: number;
   /** Reading pace for "Read the line": normal (default) or slow from the first tap. */
   readPace?: "normal" | "slow";
   /** Show "line N of M" above the card (default on in an ordered deck). */
   lineNo?: boolean;
+  /** The subject design (Settings → Look) on this deck's cards; false turns it off here. */
+  art?: boolean;
 }
 export type DeckOptsMap = Record<string, DeckOpts | null>;
-export const OPT_KEYS = ["ordered", "newPerDay", "look", "prevLine", "lang", "readAloud", "tapWord", "orderBy", "prevLines", "readPace", "lineNo"] as const;
+export const OPT_KEYS = ["ordered", "newPerDay", "look", "prevLine", "lang", "readAloud", "tapWord", "orderBy", "prevLines", "readPace", "lineNo", "art", "orderField", "priority", "sayIt"] as const;
 export type OptKey = (typeof OPT_KEYS)[number];
 
 /** A deck's look, shared by all its cards instead of repeated in every card (and so in every file): CSS, and fonts kept as media. */
@@ -53,10 +61,14 @@ export function cleanDeckOpts(v: unknown): DeckOptsMap {
     if (typeof x.lang === "string" && (x.lang === "off" || /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(x.lang))) d.lang = x.lang;
     if (x.readAloud === "button" || x.readAloud === "auto" || x.readAloud === "off") d.readAloud = x.readAloud;
     if (typeof x.tapWord === "boolean") d.tapWord = x.tapWord;
-    if (x.orderBy === "line" || x.orderBy === "subdeck") d.orderBy = x.orderBy;
+    if (x.orderBy === "line" || x.orderBy === "subdeck" || x.orderBy === "field") d.orderBy = x.orderBy;
+    if (typeof x.orderField === "string" && x.orderField.length <= 80) d.orderField = x.orderField;
+    if (typeof x.priority === "boolean") d.priority = x.priority;
+    if (typeof x.sayIt === "boolean") d.sayIt = x.sayIt;
     if (typeof x.prevLines === "number" && Number.isFinite(x.prevLines)) d.prevLines = Math.max(1, Math.min(3, Math.round(x.prevLines)));
     if (x.readPace === "normal" || x.readPace === "slow") d.readPace = x.readPace;
     if (typeof x.lineNo === "boolean") d.lineNo = x.lineNo;
+    if (typeof x.art === "boolean") d.art = x.art;
     out[path] = d;
   }
   return out;

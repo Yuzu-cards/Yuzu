@@ -9,6 +9,7 @@ import { useBack } from "./useBack";
 import { Recap } from "./Recap";
 import { DiagnoseSheet } from "./Diagnose";
 import { heatWeeks } from "../lib/heat";
+import { hourStats } from "../lib/hours";
 
 /** What each mastery label means, with the stability thresholds from Settings. */
 function masteryHint(k: string) {
@@ -123,6 +124,7 @@ function ProgressView({ stats, counts, heat, retention, systems, mastery, week, 
         <b>Last 7 days</b>
         <div className="small muted" style={{ marginTop: 4 }}>{week.n.toLocaleString()} reviews in {week.mins < 1 && week.n ? "under a minute" : `${week.mins} min`}{week.recall !== null ? `, ${week.recall}% recalled` : ""}. {lastWeek.n ? `The 7 days before: ${lastWeek.n.toLocaleString()} in ${lastWeek.mins} min${lastWeek.recall !== null ? `, ${lastWeek.recall}%` : ""}.` : "No reviews in the 7 days before."}</div>
       </div>
+      <BestHours />
       <h2>Last 12 weeks</h2>
       <Heatmap heat={heat} />
       <h2>Cards</h2>
@@ -248,4 +250,19 @@ function Areas() {
     </div>
     <p className="small muted" style={{ margin: "6px 0 14px" }}>{all.length > 8 && <button className="btn" style={{ marginRight: 8 }} onClick={() => setMore(!more)}>{more ? "Show fewer" : `All ${all.length} areas`}</button>}Bar: mastered (solid) and started (faint) out of each area's cards.</p>
   </>);
+}
+
+/** Reviews and recall by hour of day (60 days), with the best two-hour window. */
+function BestHours() {
+  const { hours, best } = useMemo(() => hourStats(store.reviews), [store.reviews.length]);
+  const max = Math.max(1, ...hours.map((h) => h.n)); if (hours.every((h) => !h.n)) return null;
+  const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
+  return (
+    <div className="card-box best-hours" style={{ marginTop: 12 }} data-testid="best-hours" data-hint="By hour of day|Bars: how many answers you gave in that hour over the last 60 days. Colour: the share you recalled (hours with at least 10 answers).">
+      <b>When you study best</b>
+      <div className="small muted" style={{ marginTop: 4 }}>{best ? `${hh(best.from)}–${hh(best.to)}: ${best.recall}% recalled (${best.n.toLocaleString()} answers, last 60 days)` : "A few more days of reviews and your best hours show here."}</div>
+      <div className="hours" aria-label="Answers by hour of day">{hours.map((h) => <i key={h.hour} title={`${hh(h.hour)} · ${h.n} answers${h.recall !== null ? ` · ${h.recall}% recalled` : ""}`} className={best && (h.hour === best.from || h.hour === (best.from + 1) % 24) ? "best" : ""} style={{ height: `${Math.max(2, (h.n / max) * 100)}%`, opacity: h.recall === null ? 0.35 : 0.45 + Math.max(0, h.recall - 60) / 80 }} />)}</div>
+      <div className="row small muted" style={{ justifyContent: "space-between" }}><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+    </div>
+  );
 }

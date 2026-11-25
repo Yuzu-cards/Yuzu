@@ -2,6 +2,7 @@
 import type { Note, Notetype } from "./model";
 import { IO_ID, parseMasks } from "./occlusion";
 import { MCQ_ID } from "./mcq";
+import { CLOZE_RE, gapHas } from "./cloze";
 
 export interface RenderCtx {
   note: Note;
@@ -11,7 +12,7 @@ export interface RenderCtx {
   resolveMedia?: (name: string) => string | null; // returns URL or null when missing
 }
 
-const clozeRe = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
+const clozeRe = CLOZE_RE; // {{c1::…}} and {{c1,2::…}} (lib/cloze.ts)
 
 /** Fields the user never wants to see (e.g. AnKing's "Sketchy" fields): rendered as empty, so their sections vanish. */
 let hidden = new Set<string>();
@@ -27,10 +28,10 @@ function stripHtml(s: string): string { return s.replace(/<[^>]+>/g, "").replace
 
 function applyCloze(text: string, ord: number, side: "q" | "a"): string {
   const n = ord + 1;
-  return text.replace(clozeRe, (_, num, body, hint) => {
-    if (Number(num) === n) {
-      if (side === "q") return `<span class="cloze" data-cloze="${num}">[${hint ? escapeHtml(hint) : "..."}]</span>`;
-      return `<span class="cloze" data-cloze="${num}">${body}</span>`;
+  return text.replace(clozeRe, (_, spec, body, hint) => {
+    if (gapHas(spec, n)) {
+      if (side === "q") return `<span class="cloze" data-cloze="${n}">[${hint ? escapeHtml(hint) : "..."}]</span>`;
+      return `<span class="cloze" data-cloze="${n}">${body}</span>`;
     }
     return side === "q" ? body : `<span class="cloze-inactive">${body}</span>`;
   });

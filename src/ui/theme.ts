@@ -4,8 +4,8 @@ import type { Card } from "../lib/model";
 import { humanInterval } from "../scheduler/fsrs";
 
 export const SYSTEM_COLORS: Record<string, string> = {
-  Cardiovascular: "#D65A3C", Respiratory: "#4FA3A3", Neurology: "#8A6FD1", Gastrointestinal: "#E8A83E", Renal: "#4D86C6",
-  Endocrine: "#E0B93A", "Hematology & Oncology": "#B23A48", "Infectious Disease": "#6FA34A", "Musculoskeletal & Rheumatology": "#A9794B",
+  Cardiovascular: "#D65A3C", Respiratory: "#4FA3A3", Neurology: "#D9A43C", Gastrointestinal: "#E8A83E", Renal: "#4D86C6",
+  Endocrine: "#9AB83E", "Hematology & Oncology": "#B23A48", "Infectious Disease": "#6FA34A", "Musculoskeletal & Rheumatology": "#A9794B",
   Dermatology: "#E07C9A", Psychiatry: "#9C8AD6", Reproductive: "#D96C8F", Immunology: "#3F9C8C", Biochemistry: "#8C9A3A",
   Pharmacology: "#FF7A1A", "ENT & Eye": "#3FA7C9",
 };

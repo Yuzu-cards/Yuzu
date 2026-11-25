@@ -455,6 +455,12 @@ export function stampCard(c: Card, next: Card, now: number, parts: ("u" | "d")[]
   if (parts.includes("d")) pm.d = [now, h32(next.source)]; else if (p.d) pm.d = [p.d, h32(next.source)];
   return { ...next, mod: now, pm };
 }
+/** `next` is `c` rescheduled by hand at `now` (Set due date, Reset): the scheduling part is stamped now, the others keep theirs. */
+export function stampSchedule(c: Card, next: Card, now: number): Card {
+  const p = cardParts(c); const pm: NonNullable<Card["pm"]> = { s: [now, h32(schedKey(next))] };
+  if (p.u) pm.u = [p.u, h32(userKey(next))]; if (p.d) pm.d = [p.d, h32(next.source)];
+  return { ...next, mod: now, pm };
+}
 /** One card known on two devices. Each part goes to the side that changed it last (ties: the later `mod`, then a fixed order),
  *  so merge(a, b) and merge(b, a) agree and both devices end up with the same card. */
 export function mergeCard(l: Card, r: Card): Card {

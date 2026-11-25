@@ -905,6 +905,71 @@ body:has(.sheet-backdrop) .kit-snack { bottom: auto; top: calc(12px + var(--safe
 .wipe-type { width: 100%; }
 .exam-past { opacity: 0.55; }
 
+/* ---- zz-art.css */
+/* Subject designs (1.10.0, ui/subjectart.ts): the card's body system drawn as fine line art in a margin of its own on the
+   right, never under the text; "Rich" adds a faint wash of the system's colour and a band along the foot. */
+.paper.art { padding-right: 60px; }
+.paper.art::after { content: ""; position: absolute; right: 8px; top: 34px; bottom: 8px; width: 44px; pointer-events: none;
+  background: var(--art-strip) repeat-y center top / 44px 147px; opacity: .3; }
+.paper.art-rich::after { opacity: .55; }
+.paper.art-rich { background: color-mix(in srgb, var(--spine) 6%, var(--paper)); }
+.paper.art-rich.slate { background: color-mix(in srgb, var(--spine) 7%, var(--slate)); }
+.paper.art.slate::after { opacity: .4; } .paper.art-rich.slate::after { opacity: .62; }
+.paper.art-rich:has(> .paper-art-foot) { padding-bottom: 38px; }
+.paper-art-foot { position: absolute; left: 26px; right: 60px; bottom: 8px; height: 22px; pointer-events: none; background: var(--art-foot) repeat-x left center / 160px 22px; opacity: .5; }
+.paper.slate .paper-art-foot { opacity: .6; }
+/* a language deck: a notebook page, the lines in a soft blue */
+.paper.art[data-art="Languages"]::after { width: 48px; right: 4px; background-size: 48px 160px; }
+@media (max-width: 600px) {
+  .paper.art { padding-right: 44px; }
+  .paper.art::after { width: 30px; right: 5px; background-size: 30px 100px; }
+  .paper-art-foot { right: 44px; }
+}
+@media (prefers-reduced-transparency: reduce) { .paper.art-rich { background: var(--paper); } .paper.art-rich.slate { background: var(--slate); } }
+.practice-chip { color: var(--accent); border-color: var(--accent); min-height: 24px; padding: 2px 8px; }
+
+/* German decks (not the Mephisto deck, which brings its own): gothic — vellum and gilt, ultramarine like stained glass,
+   cathedral tracery in the margin, an arcade frieze along the foot, a gilt double rule on top; the type inside the card
+   comes from THEME_CSS (EB Garamond, the headword in UnifrakturMaguntia). Fonts: OFL, public/font-licenses/. */
+@font-face { font-family: "EB Garamond"; src: url("../fonts/eb-garamond-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "EB Garamond"; src: url("../fonts/eb-garamond-latin-400-italic.woff2") format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: "EB Garamond"; src: url("../fonts/eb-garamond-latin-600-normal.woff2") format("woff2"); font-weight: 600 800; font-style: normal; font-display: swap; }
+@font-face { font-family: "UnifrakturMaguntia"; src: url("../fonts/unifrakturmaguntia-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+.paper.art[data-art="German"] { background: radial-gradient(ellipse at 28% 12%, #fbf5e6 0%, #f1e5c8 70%, #e8d8b4 100%); border-color: #6b5320; box-shadow: inset 0 0 0 3px rgba(184,137,44,.18), inset 0 0 34px rgba(120,86,20,.16); }
+.paper.art.slate[data-art="German"] { background: radial-gradient(ellipse at 28% 8%, #1f2538 0%, #151a29 65%, #10131e 100%); border-color: #5a4a22; box-shadow: inset 0 0 0 3px rgba(226,190,106,.12), inset 0 0 40px rgba(0,0,0,.45); }
+.paper.art[data-art="German"]::after { opacity: .6; } .paper.art.slate[data-art="German"]::after { opacity: .7; }
+.paper.art-subtle[data-art="German"]::after { opacity: .38; }
+.paper.art[data-art="German"] .stamp { color: #2F4A8A; } .paper.art.slate[data-art="German"] .stamp { color: #E2BE6A; }
+.paper-art-head { position: absolute; left: 26px; right: 60px; top: 12px; height: 14px; pointer-events: none; background: var(--art-head) no-repeat center / 160px 14px; opacity: .75; }
+.paper-art-head::before, .paper-art-head::after { content: ""; position: absolute; top: 4px; height: 5px; border-top: 1px solid #B8892C; border-bottom: 1px solid #B8892C; opacity: .8; }
+.paper-art-head::before { left: 0; right: calc(50% + 10px); } .paper-art-head::after { right: 0; left: calc(50% + 10px); }
+@media (max-width: 600px) { .paper-art-head { right: 44px; } }
+.paper.art[data-art="German"] .paper-art-foot { opacity: .65; }
+
+/* Draw on the card */
+.whiteboard { position: fixed; z-index: 30; touch-action: none; cursor: crosshair; background: transparent; }
+.wb-bar { position: fixed; z-index: 31; display: flex; gap: 6px; align-items: center; padding: 6px; background: var(--ink-2); border: 2px solid var(--line); box-shadow: 2px 2px 0 rgba(0,0,0,.35); flex-wrap: wrap; max-width: calc(100vw - 16px); }
+.wb-bar .btn { min-height: 34px; padding: 2px 10px; font-size: 13px; }
+.wb-ink { width: 26px; height: 26px; border: 2px solid var(--line); padding: 0; cursor: pointer; }
+.wb-ink.on { outline: 3px solid var(--text); outline-offset: 1px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .wb-bar { border-radius: 10px; } :root:is([data-ui="clean"], [data-ui="paper"]) .wb-ink { border-radius: 50%; }
+/* Say it: record yourself, compare */
+.say-it { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.say-it .btn { min-height: 36px; padding: 2px 12px; font-size: 14px; gap: 6px; }
+.say-it .rec { animation: yzrec 1s steps(2) infinite; } @keyframes yzrec { 50% { opacity: .7; } }
+/* Read and make cards */
+.read-make .rm-lines { max-height: min(56vh, 560px); overflow-y: auto; padding-right: 4px; }
+.rm-line { margin: 0 0 6px; padding: 6px 8px; line-height: 2; font-size: 17px; border-left: 3px solid transparent; }
+.rm-line.has { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.rm-no { display: inline-block; min-width: 28px; }
+.rm-w { background: none; border: 0; padding: 1px 2px; margin: 0; font: inherit; color: var(--text); cursor: pointer; border-bottom: 1px dotted var(--line); min-height: 0; }
+.rm-w:hover { background: var(--ink-3); }
+.rm-w.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); font-weight: 700; border-bottom: 2px solid var(--accent); }
+/* When you study best */
+.best-hours .hours { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; align-items: end; height: 64px; margin: 10px 0 4px; }
+.best-hours .hours i { display: block; background: var(--accent); min-height: 2px; }
+.best-hours .hours i.best { background: var(--yuzu, #f2d34b); opacity: 1 !important; }
+
 /* ---- zz-settings.css */
 /* Settings chapters (25/11/2026: "the settings is just a mess, I can't tell what's what").
    Five chapters, each with its own colour, shown on: the chapter heading's icon tile and rule, the spine of every group

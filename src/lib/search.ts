@@ -4,6 +4,7 @@
 import { latinDigits } from "./num";
 import type { Note } from "./model";
 import { IO_ID } from "./occlusion";
+import { CLOZE_RE } from "./cloze";
 
 /** Tags that are bookkeeping, not topics: AnKing's #/!/~ trees, Yuzu's auto:: and manual:: labels, AnkiHub
  *  markers, anki::/needs-review:: queues, bare numbers and "…". Search skips them unless the query asks for them. */
@@ -18,7 +19,7 @@ export function stripForSearch(html: string): string {
   if (!html) return "";
   return html
     .replace(/<(style|script)\b[\s\S]*?<\/\1>/gi, " ")
-    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, "$1")
+    .replace(CLOZE_RE, "$2")
     .replace(/\[sound:[^\]]*\]/g, " ")
     .replace(/<br\s*\/?>|<\/?(div|p|li|ul|ol|tr|td|th|h\d|table|hr)\b[^>]*>/gi, " ")
     .replace(/<[^>]*>/g, "")

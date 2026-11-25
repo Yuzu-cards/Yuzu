@@ -25,7 +25,9 @@ import { resolveOpts, resolveStyle, compareLines, comparePaths, deckLang, rename
 import { mergeSettings, stampChanges, sanitizeSettings, shareable, withoutDeviceFields } from "./settingsync";
 import { buildSearchDoc, housekeepingText, parseQuery, scoreDoc } from "./search";
 declare const __VERSION__: string;
+import { stampSchedule } from "./sync";
 import { GitHubSync, SyncError, COMPACT_EVERY, MEDIA_BATCH_BYTES, type MediaIndex, type MediaWant, type MasteredEntry, type ImproveMark, wantPath, mergeCards, mergeNotes, mergeReviews, mergeTombstones, stampCard, stampNote, type NoteConflict, type ShardCache, type SyncConfig } from "./sync";
+import { clozeNumbers, hasCloze, mapClozes } from "./cloze";
 
 export interface Settings {
   newPerDay: number;
@@ -55,6 +57,8 @@ export interface Settings {
   retireAskYears: number; retireAutoYears: number;
   /** Ask "how long?" before a session (off: start straight away with everything ready). */
   planScreen: boolean;
+  /** A gentle "time for a break?" every this many minutes of one session (0: never). Synced. */
+  timebox: number;
   /** Show the day streak (the goal ring stays either way). */
   showStreak: boolean;
   /** A card forgotten `leechThreshold` times: send it to Claude to rewrite (outbox), pause it, or ask. */
@@ -78,6 +82,8 @@ export interface Settings {
   autoplay: boolean;
   /** "yuzu" lays one reading style over every deck's CSS; "deck" shows each deck's own look (per device). */
   cardStyle: "yuzu" | "deck";
+  /** Subject designs on cards in the Yuzu look (ui/subjectart.ts): per device. */
+  cardArt: "off" | "subtle" | "rich";
   /** Note fields never shown and whose media is never kept (synced), e.g. AnKing's Sketchy fields. */
   hiddenFields: string[];
   /** Anki deck path → Yuzu category, learned from curation files; applied to new cards on every later Anki import (synced). */
@@ -97,10 +103,10 @@ export const DEFAULT_SETTINGS: Settings = {
   newPerDay: 20, dailyGoal: 60, maxReviewsPerDay: 0, dueOrder: "forgotten", rollover: 4, scheduler: DEFAULT_CONFIG, deviceName: "", nightCards: true, swipe: true, burySiblings: true, restDays: 1,
   sync: { owner: "", repo: "yuzu-data", token: "", auto: true }, pins: [], smart: [], deadlines: [],
   google: { clientId: "", shiftDays: true, driveMedia: true, rotaName: "Amro", rota: {} },
-  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", planScreen: false, showStreak: false, leechAction: "claude", citrusPlans: false, applied: [], retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {}, deckOpts: {}, deckStyles: {},
+  fit: null, mastery: { developing: 7, mastered: 30, durable: 90 }, leechThreshold: 8, easyDays: [1, 1, 1, 1, 1, 1, 1], breakFrom: "", breakTo: "", planScreen: false, showStreak: false, leechAction: "claude", citrusPlans: false, applied: [], retireAskYears: 5, retireAutoYears: 20, bosses: {}, typeAnswers: true, mediaSync: false, mediaDownload: true, theme: "yuzu", sfx: true, autoplay: true, cardStyle: "yuzu", cardArt: "rich", timebox: 0, hiddenFields: ["Sketchy", "Sketchy 2", "Sketchy Extra"], deckMap: {}, deckOpts: {}, deckStyles: {},
 };
 /** Settings that belong to one device (its name, look, sounds, gestures): never uploaded, never taken from another device. */
-export const DEVICE_ONLY_SETTINGS = ["sync", "deviceName", "nightCards", "swipe", "typeAnswers", "mediaDownload", "theme", "sfx", "autoplay", "cardStyle"] as const;
+export const DEVICE_ONLY_SETTINGS = ["sync", "deviceName", "nightCards", "swipe", "typeAnswers", "mediaDownload", "theme", "sfx", "autoplay", "cardStyle", "cardArt"] as const;
 /** The settings as they go into settings.json: without the per-device ones, so two devices with the same synced settings upload the same file (no churn every sync). */
 export function syncedSettings(s: Settings | Record<string, unknown>): Record<string, unknown> { const out: Record<string, unknown> = { ...s, updatedAt: (s as any).updatedAt ?? 0 }; for (const k of DEVICE_ONLY_SETTINGS) delete out[k]; return out; }
 /** A capture's few words for its outbox file's appProperties (Drive allows 124 bytes per key and value), so every device can list it. */
@@ -1878,9 +1884,9 @@ export class Store {
     const n = this.notes.get(c.nid); if (!n) return { front: "", back: "" };
     const plain = (h: string) => h.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<br\s*\/?>|<\/(div|p|li)>/gi, " ").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\[sound:[^\]]+\]/g, "").replace(/\s+/g, " ").trim();
     const all = n.fields.join(" ");
-    if (/\{\{c\d+::/.test(all)) {
-      const k = c.ord + 1; const answers: string[] = []; const txt = n.fields.find((f) => new RegExp(`\\{\\{c${k}::`).test(f)) ?? n.fields[0];
-      const front = txt.replace(/\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g, (_m, num, ans, hint) => { if (+num === k) { answers.push(ans); return hint ? `[${hint}]` : "[…]"; } return ans; });
+    if (hasCloze(all)) {
+      const k = c.ord + 1; const answers: string[] = []; const txt = n.fields.find((f) => clozeNumbers(f).includes(k)) ?? n.fields[0];
+      const front = mapClozes(txt, (ans, hint, nums) => { if (nums.includes(k)) { answers.push(ans); return hint ? `[${hint}]` : "[…]"; } return ans; });
       return { front: plain(front).slice(0, 400), back: plain(answers.join(" · ")).slice(0, 300) };
     }
     return { front: plain(n.fields[0] ?? "").slice(0, 400), back: plain(n.fields[1] ?? "").slice(0, 300) };
@@ -2383,11 +2389,11 @@ export class Store {
     review = interleaveBySystem(review, (c) => this.notes.get(c.nid)?.tags.find((t) => t.startsWith("auto::System::")) ?? this.catOf(c.source));
     // New cards: oldest first within each category, categories taken in turns so one deck can't hog the daily budget.
     // Only the first few of each category are ever taken, so they are picked in order rather than sorting 100k new cards.
-    const lineCmp = (a: Card, b: Card) => compareLines(this.notes.get(a.nid), this.notes.get(b.nid)) || a.ord - b.ord || a.created - b.created;
-    const deckCmp = (a: Card, b: Card) => comparePaths(a.source, b.source) || lineCmp(a, b); // subdeck by subdeck, then line by line
     const lists = [...byCat].map(([k, l]) => { const root = k.startsWith("§") ? k.slice(1) : null;
-      const cmp = root === null ? (a: Card, b: Card) => a.due - b.due || a.created - b.created : this.optsFor(root).opts.orderBy === "subdeck" ? deckCmp : lineCmp;
-      return Object.assign(Store.orderedTaker(l, cmp), { key: root ?? k, dead: false }); });
+      let cmp = (a: Card, b: Card) => a.due - b.due || a.created - b.created;
+      if (root !== null) { const nc = this.noteOrder(root); const sub = this.optsFor(root).opts.orderBy === "subdeck"; cmp = (a, b) => (sub ? comparePaths(a.source, b.source) : 0) || nc(this.notes.get(a.nid), this.notes.get(b.nid)) || a.ord - b.ord || a.created - b.created; }
+      return Object.assign(Store.orderedTaker(l, cmp), { key: root ?? k, dead: false, first: !!this.optsFor(root ?? k).opts.priority }); });
+    lists.sort((a, b) => Number(b.first) - Number(a.first)); // priority decks first (their turn comes before the others' in every round)
     // Bury siblings: one card per note a day (notes seen today and learning cards count). Reviews are filtered; new cards are
     // picked around it, so a buried sibling's place goes to the next new card and the day's new-card count stays full.
     const seenNotes = new Set<string>(); const bury = this.settings.burySiblings;
@@ -2398,8 +2404,11 @@ export class Store {
       review = review.filter((c) => { if (seenNotes.has(c.nid)) return false; seenNotes.add(c.nid); return true; });
     }
     const fresh: Card[] = [];
+    const firstN = lists.filter((l) => l.first).length;
     for (let i = 0; fresh.length < budget && lists.some((l) => !l.dead && l.left() > 0); i++) {
-      const l = lists[i % lists.length]; if (l.dead || !l.left()) continue;
+      // a priority deck is drained (to its cap) before the round robin of the rest begins
+      const live = firstN ? lists.slice(0, firstN).find((l) => !l.dead && l.left() > 0) : undefined;
+      const l = live ?? lists[i % lists.length]; if (l.dead || !l.left()) continue;
       const c = l.take();
       const capped = caps && caps.size ? this.capPaths(c.source).find((p) => (caps.get(p) ?? 1) <= 0) : undefined;
       if (capped !== undefined) { if (l.key === capped || l.key.startsWith(capped + "::")) l.dead = true; continue; } // this deck's day is full (the whole list, when the cap covers it)
@@ -2495,13 +2504,23 @@ export class Store {
   }
   /** What your own cards say a word means (best first). */
   meaningOf(word: string, near?: string, not?: string): Entry[] { return lookup(this.lexicon(), word, { near, not }); }
+  /** How an ordered deck sorts its notes: by a number field when it says so (notes without one after, by line), else by line. */
+  noteOrder(root: string): (a: Note | undefined, b: Note | undefined) => number {
+    const o = this.optsFor(root).opts; if (o.orderBy !== "field" || !o.orderField) return compareLines;
+    const name = o.orderField; const idx = new Map<string, number>();
+    const num = (n: Note | undefined) => { if (!n) return Infinity; let i = idx.get(n.ntid); if (i === undefined) { i = this.notetypes.get(n.ntid)?.fields.indexOf(name) ?? -1; idx.set(n.ntid, i); } if (i < 0) return Infinity; const m = /-?\d+(?:[.,]\d+)?/.exec((n.fields[i] ?? "").replace(/<[^>]+>/g, "")); return m ? Number(m[0].replace(",", ".")) : Infinity; };
+    return (a, b) => { const x = num(a), y = num(b); return x !== y ? (x === Infinity ? 1 : y === Infinity ? -1 : x - y) : compareLines(a, b); };
+  }
+  /** The fields of the notes in a deck (for "order by a field"), most common first. */
+  deckFields(root: string): string[] { const n = new Map<string, number>(); let k = 0; for (const c of this.cardsIn(root, "decks")) { if (++k > 3000) break; const nt = this.notetypes.get(this.notes.get(c.nid)?.ntid ?? ""); for (const f of nt?.fields ?? []) n.set(f, (n.get(f) ?? 0) + 1); } return [...n].sort((a, b) => b[1] - a[1]).map((x) => x[0]); }
   private lineCache = new Map<string, { sv: number; by: unknown; nids: string[]; pos: Map<string, number> }>();
   /** The notes of an ordered deck in line order (cached per structure version). */
   lineOrder(root: string): { nids: string[]; pos: Map<string, number> } {
-    const by = this.optsFor(root).opts.orderBy ?? "line";
+    const o = this.optsFor(root).opts; const by = `${o.orderBy ?? "line"}|${o.orderField ?? ""}`;
     const hit = this.lineCache.get(root); if (hit && hit.sv === this.structureVersion && hit.by === by) return hit;
     const deck = new Map<string, string>(); for (const c of this.cardsIn(root, "decks")) { const d = deck.get(c.nid); if (d === undefined || comparePaths(c.source, d) < 0) deck.set(c.nid, c.source); }
-    const nids = [...deck.keys()].sort((a, b) => (by === "subdeck" ? comparePaths(deck.get(a)!, deck.get(b)!) : 0) || compareLines(this.notes.get(a), this.notes.get(b)));
+    const nc = this.noteOrder(root);
+    const nids = [...deck.keys()].sort((a, b) => (o.orderBy === "subdeck" ? comparePaths(deck.get(a)!, deck.get(b)!) : 0) || nc(this.notes.get(a), this.notes.get(b)));
     const pos = new Map<string, number>(); nids.forEach((id, i) => pos.set(id, i));
     const out = { sv: this.structureVersion, by, nids, pos }; if (this.lineCache.size > 12) this.lineCache.clear(); this.lineCache.set(root, out); return out;
   }
@@ -2511,6 +2530,17 @@ export class Store {
     const root = r.at.ordered ?? r.at.prevLine!; const o = this.lineOrder(root); const i = o.pos.get(card.nid); if (i === undefined) return null;
     const prevs: Note[] = []; if (r.opts.prevLine) for (let k = Math.max(0, i - (r.opts.prevLines ?? 1)); k < i; k++) { const n = this.notes.get(o.nids[k]); if (n) prevs.push(n); }
     return { n: i + 1, total: o.nids.length, root, prev: prevs[prevs.length - 1] ?? null, prevs, showNo: r.opts.lineNo !== false };
+  }
+  /** Cards to practise without touching the schedule: the shakiest seen ones, new ones to preview (in the deck's order),
+   *  a random mix, or the whole deck (in line order for an ordered deck, else shuffled). Paused cards are left out. */
+  practiceCards(path: string, kind: "weakest" | "new" | "random" | "all", n = 30, view: View = "decks", now = Date.now()): Card[] {
+    const all = this.cardsIn(path, view).filter((c) => !c.suspended);
+    const shuffle = (l: Card[]) => { const a = [...l]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+    const ordered = !!this.optsFor(path).opts.ordered; const line = (a: Card, b: Card) => compareLines(this.notes.get(a.nid), this.notes.get(b.nid)) || a.ord - b.ord;
+    if (kind === "weakest") return all.filter((c) => c.state !== "new").map((c) => [c, retrievability(Math.max(0, now - c.lastReview) / DAY, c.stability)] as const).sort((a, b) => a[1] - b[1]).slice(0, n).map((x) => x[0]);
+    if (kind === "new") { const l = all.filter((c) => c.state === "new"); return (ordered ? l.sort(line) : l.sort((a, b) => a.due - b.due || a.created - b.created)).slice(0, n); }
+    if (kind === "random") return shuffle(all).slice(0, n);
+    return ordered ? all.sort(line) : shuffle(all);
   }
   /** Where a deck is in its order: lines started (any card of the note seen) and the next new line. */
   lineProgress(root: string): { started: number; total: number; next: number | null } {
@@ -2882,6 +2912,56 @@ export class Store {
     this.bump(); this.touch();
   }
 
+  // ---- Bulk tools (1.10.0, from Anki): Find & Replace, Set due date, Reset. Each keeps what it changed for one Undo.
+  lastBulkEdit: { kind: "replace" | "due" | "reset"; notes?: Note[]; cards?: Card[] } | null = null;
+  /** Find text in notes (only in the text, never inside HTML tags): how many notes and places would change. */
+  findMatches(nids: string[], find: string, opts: { field?: string; regex?: boolean; caseSensitive?: boolean } = {}): { notes: number; places: number } {
+    const re = this.findRe(find, opts); if (!re) return { notes: 0, places: 0 }; let notes = 0, places = 0;
+    for (const id of new Set(nids)) { const n = this.notes.get(id); if (!n) continue; let k = 0; for (const i of this.fieldIdx(n, opts.field)) k += replaceText(n.fields[i] ?? "", re, null).count; if (k) { notes++; places += k; } }
+    return { notes, places };
+  }
+  private findRe(find: string, opts: { regex?: boolean; caseSensitive?: boolean }): RegExp | null {
+    if (!find) return null; try { return new RegExp(opts.regex ? find : find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g" + (opts.caseSensitive ? "" : "i") + "u"); } catch { return null; }
+  }
+  private fieldIdx(n: Note, field?: string): number[] { const nt = this.notetypeFor(n); const all = n.fields.map((_, i) => i); if (!field) return all; const i = nt?.fields.indexOf(field) ?? -1; return i >= 0 ? [i] : []; }
+  /** Replace in the notes' text (tags and markup untouched); the edit syncs field by field and can be undone once. */
+  async findReplace(nids: string[], find: string, repl: string, opts: { field?: string; regex?: boolean; caseSensitive?: boolean } = {}): Promise<number> {
+    const re = this.findRe(find, opts); if (!re) return 0; const t = stamp(); const out: Note[] = []; const before: Note[] = [];
+    for (const id of new Set(nids)) {
+      const n = this.notes.get(id); if (!n) continue; const fields = [...n.fields]; let hit = 0;
+      for (const i of this.fieldIdx(n, opts.field)) { const r = replaceText(fields[i] ?? "", re, repl); if (r.count) { fields[i] = r.text; hit += r.count; } }
+      if (!hit) continue; before.push(n); const next = stampNote(n, { ...n, fields, modified: t, edited: t }, t); this.notes.set(id, next); out.push(next);
+    }
+    if (!out.length) return 0;
+    await this.persist("replacing text", db.putMany("notes", out)); this.lastBulkEdit = { kind: "replace", notes: before }; this.bump(); this.touch(); return out.length;
+  }
+  /** Set when cards come back: in `from`–`to` days (a spread when they differ). New cards are left as they are (study or Reset decide those). */
+  async setDueDays(cardIds: string[], from: number, to = from): Promise<{ changed: number; skippedNew: number }> {
+    const now = stamp(); const out: Card[] = [], before: Card[] = []; let skippedNew = 0;
+    const lo = Math.max(0, Math.min(from, to)), hi = Math.max(from, to);
+    for (const id of cardIds) {
+      const c = this.cards.get(id); if (!c) continue; if (c.state === "new") { skippedNew++; continue; }
+      const d = lo + Math.floor(Math.random() * (hi - lo + 1)); const due = d === 0 ? this.dayStart(now) : this.dayStart(now) + d * DAY + 60_000; // today: due at once (the edit clock can run a few ms ahead of now)
+      before.push(c); const next = stampSchedule(c, { ...c, due, ...(c.state !== "review" ? { state: "review" as const, step: 0, stability: Math.max(c.stability, d || 1) } : {}) }, now); this.cards.set(id, next); out.push(next);
+    }
+    if (out.length) { await this.persist("setting due dates", db.putMany("cards", out)); this.lastBulkEdit = { kind: "due", cards: before }; this.dueByDay = null; this.bump(); this.touch(); }
+    return { changed: out.length, skippedNew };
+  }
+  /** Reset cards to new (their review history stays in the log; counts kept). */
+  async resetCards(cardIds: string[]): Promise<number> {
+    const now = stamp(); const out: Card[] = [], before: Card[] = [];
+    for (const id of cardIds) { const c = this.cards.get(id); if (!c || c.state === "new") continue; before.push(c); const next = stampSchedule(c, { ...c, state: "new", due: now, stability: 0, difficulty: 0, step: 0, lastReview: 0 }, now); this.cards.set(id, next); out.push(next); }
+    if (out.length) { await this.persist("resetting cards", db.putMany("cards", out)); this.lastBulkEdit = { kind: "reset", cards: before }; this.dueByDay = null; this.bump(); this.touch(); }
+    return out.length;
+  }
+  /** Undo the last Find & Replace, Set due date or Reset (as a new change, so it syncs). */
+  async undoBulkEdit(): Promise<number> {
+    const u = this.lastBulkEdit; if (!u) return 0; this.lastBulkEdit = null; const t = stamp();
+    if (u.notes) { const out = u.notes.map((old) => { const cur = this.notes.get(old.id); if (!cur) return null; const n = stampNote(cur, { ...cur, fields: old.fields, modified: t, edited: t }, t); this.notes.set(old.id, n); return n; }).filter(Boolean) as Note[]; await this.persist("undoing", db.putMany("notes", out)); this.bump(); this.touch(); return out.length; }
+    const out = (u.cards ?? []).map((old) => { const cur = this.cards.get(old.id); if (!cur) return null; const c = stampSchedule(cur, { ...cur, state: old.state, due: old.due, stability: old.stability, difficulty: old.difficulty, step: old.step, lastReview: old.lastReview }, t); this.cards.set(old.id, c); return c; }).filter(Boolean) as Card[];
+    await this.persist("undoing", db.putMany("cards", out)); this.dueByDay = null; this.bump(); this.touch(); return out.length;
+  }
+
   /** Full backup as a plain object (token excluded). */
   backup() {
     const { sync, ...settings } = this.settings;
@@ -2946,7 +3026,7 @@ export class Store {
   async addClozeCards(noteId: string): Promise<number> {
     const n = this.notes.get(noteId); const nt = n && this.notetypeFor(n); if (!n || nt?.kind !== "cloze") return 0;
     const have = this.cardsOfNote(noteId); if (!have.length) return 0; const ords = new Set(have.map((c) => c.ord));
-    const want = [...new Set([...n.fields.join(" ").matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]) - 1))];
+    const want = clozeNumbers(n.fields.join(" ")).map((x) => x - 1);
     const now = stamp(); const out: Card[] = [];
     for (const ord of want) { if (ords.has(ord)) continue; let id = `${noteId}-${ord}`; while (this.cards.has(id)) id += "x";
       out.push({ ...have[0], id, nid: noteId, ord, state: "new", suspended: false, flag: 0, due: now, stability: 0, difficulty: 0, reps: 0, lapses: 0, lastReview: 0, step: 0, created: now, mod: now }); }
@@ -3119,3 +3199,14 @@ export class Store {
 }
 
 export const store = new Store();
+
+/** Replace `re` in the text of an HTML field, never inside a tag (<img src=…>, <span class=…>), nor in [sound:…] or a
+ *  cloze's {{c1:: marker. `repl` null counts only. */
+export function replaceText(html: string, re: RegExp, repl: string | null): { text: string; count: number } {
+  let count = 0;
+  const text = html.split(/(<[^>]*>|\[sound:[^\]]*\]|\{\{c\d+(?:,c?\d+)*::|::[^}]*\}\}|\}\})/g).map((part, i) => {
+    if (i % 2 === 1) return part; // a tag or marker
+    return part.replace(re, (...m) => { count++; if (repl === null) return m[0]; const groups = m.slice(1, -2); return repl.replace(/\$(\d)/g, (_, d) => String(groups[Number(d) - 1] ?? "")); });
+  }).join("");
+  return { text, count };
+}

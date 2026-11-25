@@ -215,3 +215,22 @@ test("the line: cloze filled, vocab with its article and example, other notes by
   assert.equal(lineText(g, BASIC, { lang: "de-DE" }), "der Arzt", "Front/Back: the German side");
   assert.equal(lineText({ fields: ["Wie geht es dir?", "How are you?"] } as any, BASIC, { lang: "de-DE" }), "Wie geht es dir?");
 });
+
+test("gaps that cover several cards: {{c1,2::…}} (Anki 26.05) asks on each of those cards", async () => {
+  const { clozeNumbers, fillClozes: fill, gapNums } = await import("../src/lib/cloze.ts");
+  const { renderCard } = await import("../src/lib/render.ts");
+  const { packOrds } = await import("../src/import/pack.ts");
+  const t = "{{c1,2::Aspirin}} blocks {{c2::COX-1}} and {{c3,c1::COX-2::enzyme}}";
+  assert.deepEqual(clozeNumbers(t), [1, 2, 3]); assert.deepEqual(gapNums("1, c2,3"), [1, 2, 3]);
+  assert.equal(fill(t), "Aspirin blocks COX-1 and COX-2");
+  assert.deepEqual(packOrds("cloze", t), [0, 1, 2]);
+  const note = { id: "n", ntid: "c", guid: "n", fields: [t, ""], tags: [], created: 1, modified: 1 } as any;
+  const nt = { id: "c", name: "Cloze", kind: "cloze", fields: ["Text", "Extra"], templates: [{ name: "Cloze", qfmt: "{{cloze:Text}}", afmt: "{{cloze:Text}}" }], css: "" } as any;
+  const f = (ord: number) => renderCard({ note, notetype: nt, ord }).front.replace(/<[^>]+>/g, "");
+  assert.equal(f(0), "[...] blocks COX-1 and [enzyme]", "card 1 hides both gaps marked 1");
+  assert.equal(f(1), "[...] blocks [...] and COX-2", "card 2");
+  assert.equal(f(2), "Aspirin blocks COX-1 and [enzyme]", "card 3");
+  assert.match(renderCard({ note, notetype: nt, ord: 1 }).back, /<span class="cloze" data-cloze="2">Aspirin<\/span>/);
+  const p = parsePack({ yuzu_pack: 1, cards: [{ text: "{{c1,2::Ja}} oder {{c2::nein}}" }] }, []);
+  assert.deepEqual(p.cards.map((c) => c.ord), [0, 1]); assert.equal(p.invalid.length, 0);
+});

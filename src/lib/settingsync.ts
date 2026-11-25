@@ -6,7 +6,7 @@
 import { cleanDeckOpts, cleanDeckStyles } from "./deckopts";
 
 /** Settings that belong to this phone, tablet or computer: never sent, never taken from another device or from a backup file. */
-export const DEVICE_ONLY = ["sync", "deviceName", "nightCards", "swipe", "typeAnswers", "mediaDownload", "theme", "sfx", "autoplay", "cardStyle"] as const;
+export const DEVICE_ONLY = ["sync", "deviceName", "nightCards", "swipe", "typeAnswers", "mediaDownload", "theme", "sfx", "autoplay", "cardStyle", "cardArt"] as const;
 const DEVICE = new Set<string>(DEVICE_ONLY);
 const META = new Set(["updatedAt", "stamps"]);
 /** Objects whose fields are stamped one by one (the rota read on one device, Drive-is-master toggled on another). */
@@ -91,6 +91,7 @@ export function sanitizeSettings<T extends Obj>(s: T, d: Obj): T {
   o.dailyGoal = num(o.dailyGoal, 1, 99999, d.dailyGoal);
   o.maxReviewsPerDay = num(o.maxReviewsPerDay, 0, 99999, d.maxReviewsPerDay);
   o.rollover = num(o.rollover, 0, 23, d.rollover);
+  o.timebox = num(o.timebox, 0, 240, d.timebox ?? 0);
   o.restDays = num(o.restDays, 0, 6, d.restDays);
   o.leechThreshold = num(o.leechThreshold, 2, 99, d.leechThreshold);
   o.retireAskYears = num(o.retireAskYears, 1, 100, d.retireAskYears);
@@ -99,6 +100,7 @@ export function sanitizeSettings<T extends Obj>(s: T, d: Obj): T {
   o.leechAction = oneOf(o.leechAction, ["claude", "pause", "ask"] as const, d.leechAction);
   o.theme = oneOf(o.theme, ["yuzu", "orange", "gameboy", "night"] as const, d.theme);
   o.cardStyle = oneOf(o.cardStyle, ["yuzu", "deck"] as const, d.cardStyle);
+  o.cardArt = oneOf(o.cardArt, ["off", "subtle", "rich"] as const, d.cardArt);
   const ed = arr(o.easyDays, d.easyDays); o.easyDays = ed.length === 7 ? ed.map((x: unknown, i: number) => num(x, 0, 1, d.easyDays[i] ?? 1, false)) : d.easyDays.slice();
   for (const k of ["pins", "smart", "deadlines", "hiddenFields", "applied"]) o[k] = arr(o[k], d[k]);
   for (const k of ["bosses", "deckMap"]) o[k] = obj(o[k], d[k]);

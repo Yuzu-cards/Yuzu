@@ -11,6 +11,7 @@ import { IconClose } from "./icons";
 import { FileButton, Sheet, snackbar } from "./kit";
 import { shrinkImage } from "./Occlusion";
 import { CardView } from "./Study";
+import { clozeNumbers } from "../lib/cloze";
 
 type Kind = "cloze" | "basic" | "mcq" | "vocab";
 interface Opt { text: string; why: string }
@@ -18,10 +19,10 @@ const remember = (k: string, v?: string) => { try { if (v === undefined) return 
 /** Wrap the selection [a, b) in the next cloze number. Null when nothing is selected (the user is told to select words first). */
 export function wrapGap(text: string, a: number, b: number): { text: string; a: number; b: number } | null {
   if (a === b || !text.slice(a, b).trim()) return null;
-  const n = Math.max(0, ...[...text.matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]))) + 1; const open = `{{c${n}::`;
+  const n = Math.max(0, ...clozeNumbers(text)) + 1; const open = `{{c${n}::`;
   return { text: text.slice(0, a) + open + text.slice(a, b) + "}}" + text.slice(b), a: a + open.length, b: a + open.length + (b - a) };
 }
-const clozeCount = (t: string) => new Set([...t.matchAll(/\{\{c(\d+)::/g)].map((m) => m[1])).size;
+const clozeCount = (t: string) => clozeNumbers(t).length;
 const readFile = (f: Blob) => new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
 
 export function CardEditor({ full = false, onClose, onSimilar }: { full?: boolean; onClose: () => void; /** open the similar-cards review */ onSimilar?: () => void }) {
@@ -35,6 +36,8 @@ export function CardEditor({ full = false, onClose, onSimilar }: { full?: boolea
   const [image, setImage] = useState(""); const [busy, setBusy] = useState(false); const [side, setSide] = useState<"front" | "back">("front"); const [ord, setOrd] = useState(0);
   const area = useRef<HTMLTextAreaElement>(null);
   const [gapHint, setGapHint] = useState(false); const [similar, setSimilar] = useState(false);
+  // Keep the extra text and the picture for the next card too (Anki's sticky fields), remembered on this device
+  const [keep, setKeep] = useState(() => remember("yuzu-edit-keep") === "1");
   const decks = useMemo(() => store.tree("decks").children.flatMap((c) => [c.path, ...c.children.map((g) => g.path)]), []);
 
   const card = (): any => {
@@ -44,7 +47,7 @@ export function CardEditor({ full = false, onClose, onSimilar }: { full?: boolea
     if (kind === "mcq") return { ...base, type: "mcq", question, options: opts.filter((o) => o.text.trim()).map((o, i) => ({ text: o.text.trim(), why: o.why.trim(), correct: i === right })), explanation: expl };
     return { ...base, image: undefined, type: "vocab", word: word.trim(), article: article || undefined, plural: plural.trim() || undefined, meaning: meaning.trim(), example: example.trim() || undefined, audio: audio || undefined, lang: "de-DE" };
   };
-  const ready = kind === "cloze" ? /\{\{c\d+::.+?\}\}/.test(text) : kind === "basic" ? !!front.trim() && !!back.trim() : kind === "mcq" ? !!question.trim() && opts.filter((o) => o.text.trim()).length >= 2 && !!opts[right]?.text.trim() : !!word.trim() && !!meaning.trim();
+  const ready = kind === "cloze" ? clozeNumbers(text).length > 0 : kind === "basic" ? !!front.trim() && !!back.trim() : kind === "mcq" ? !!question.trim() && opts.filter((o) => o.text.trim()).length >= 2 && !!opts[right]?.text.trim() : !!word.trim() && !!meaning.trim();
   const pack = () => ({ yuzu_pack: 1, id: `written-${store.isoToday()}`, name: "Written in Yuzu", category: deck.trim() || "Medicine::Inbox", tags: tags.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean), cards: [card()] });
 
   // live preview: the same parser and renderer the study screen uses
@@ -65,7 +68,7 @@ export function CardEditor({ full = false, onClose, onSimilar }: { full?: boolea
   };
   // right after a save (save → clear): did the card look like one already in the collection?
   const clear = () => {
-    setSimilar(store.takeSimilar().length > 0); setGapHint(false); setText(""); setExtra(""); setFront(""); setBack(""); setQuestion(""); setOpts([{ text: "", why: "" }, { text: "", why: "" }, { text: "", why: "" }]); setRight(0); setExpl(""); setWord(""); setArticle(""); setPlural(""); setMeaning(""); setExample(""); setAudio(""); setImage(""); setOrd(0); setSide("front"); };
+    setSimilar(store.takeSimilar().length > 0); setGapHint(false); setText(""); if (!keep) setExtra(""); setFront(""); setBack(""); setQuestion(""); setOpts([{ text: "", why: "" }, { text: "", why: "" }, { text: "", why: "" }]); setRight(0); if (!keep) setExpl(""); setWord(""); setArticle(""); setPlural(""); setMeaning(""); setExample(""); setAudio(""); if (!keep) setImage(""); setOrd(0); setSide("front"); };
   const save = async () => {
     setBusy(true);
     try { const r = await store.importPackDetailed(pack()); remember("yuzu-edit-kind", kind); remember("yuzu-edit-deck", deck.trim()); if (r.added + r.updated + r.repaired > 0) { snackbar(`Saved to ${(deck.trim() || "Medicine::Inbox").split("::").filter((x) => x.trim()).slice(-1)[0] ?? "Inbox"}`); clear(); } else snackbar(r.skippedDuplicate ? "Already in your collection — not added. Your text is still here." : r.message); }
@@ -114,7 +117,8 @@ export function CardEditor({ full = false, onClose, onSimilar }: { full?: boolea
         </div>}
         <div className="field"><label>Deck</label><input list="yuzu-decks" aria-label="Deck" autoCapitalize="none" value={deck} onChange={(e) => setDeck(e.target.value)} /><datalist id="yuzu-decks">{decks.map((d) => <option key={d} value={d} />)}</datalist></div>
         {full && <>{field("Tags (space or comma)", tags, setTags)}{field("Source", source, setSource, { ph: "ERC 2025, UpToDate 2026…" })}
-          {(tags.trim() || source.trim()) && <div className="ed-kept small muted"><span className="grow">Tags and source stay for the next card (cleared when you switch to or from Vocab).</span><button className="chip" onClick={() => { setTags(""); setSource(""); }}>Clear tags and source</button></div>}</>}
+          {(tags.trim() || source.trim()) && <div className="ed-kept small muted"><span className="grow">Tags and source stay for the next card (cleared when you switch to or from Vocab).</span><button className="chip" onClick={() => { setTags(""); setSource(""); }}>Clear tags and source</button></div>}
+          <label className="row small muted" style={{ margin: "6px 0" }}><input type="checkbox" checked={keep} onChange={(e) => { setKeep(e.target.checked); remember("yuzu-edit-keep", e.target.checked ? "1" : "0"); }} data-testid="ed-keep" /> Also keep the extra text and the picture for the next card</label></>}
         {similar && <div className="ed-similar small" role="status"><span className="grow">Saved — but it looks like a card you already have.</span>{onSimilar && <button className="chip orange" onClick={onSimilar}>Review the pair</button>}<button className="icon-btn" aria-label="Dismiss" onClick={() => setSimilar(false)}><IconClose /></button></div>}
       </div>
       {full && <div className="editor-preview">
@@ -147,7 +151,7 @@ export function NoteEditor({ card, onClose, onTag }: { card: Card; onClose: () =
   const preview = useMemo(() => {
     if (!note0 || !nt) return null;
     const have = store.cardsOfNote(note0.id).map((c) => c.ord);
-    const ords = cloze ? [...new Set([...have, ...[...fields.join(" ").matchAll(/\{\{c(\d+)::/g)].map((m) => Number(m[1]) - 1)])].sort((a, b) => a - b) : have.sort((a, b) => a - b);
+    const ords = cloze ? [...new Set([...have, ...clozeNumbers(fields.join(" ")).map((n) => n - 1)])].sort((a, b) => a - b) : have.sort((a, b) => a - b);
     const o = ords.includes(ord) ? ord : ords[0] ?? 0;
     try { const out = renderCard({ note: { ...note0, fields }, notetype: nt, ord: o, deck, resolveMedia: store.mediaUrl }); return { ...out, ords, ord: o }; } catch { return null; }
   }, [fields, ord, deck]);
