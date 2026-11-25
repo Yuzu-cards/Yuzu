@@ -141,7 +141,7 @@ try {
     await y.saveSettings({ smart: [{ id: "s1", name: "ED", systems: [], specialties: [], decks: ["Emergency Medicine"], tags: [], states: [] }], deadlines: [{ id: "d1", name: "Exam", date: "2027-01-01", view: "decks", path: "Emergency Medicine::Trauma" }], pins: [{ view: "decks", path: "Emergency Medicine" }] });
     localStorage.setItem("yuzu-edit-deck", "Emergency Medicine::Trauma"); });
   await R.click("nav.tabs >> text=Library"); await R.click(".tree-row:has-text('Emergency Medicine')"); await R.click('button[aria-label="Rename or move"]');
-  await R.fill('.sheet input[list="deckpaths"]', "Languages"); await R.click(".sheet >> button:has-text('Apply')"); await R.waitForTimeout(200);
+  await R.fill('.sheet .field input', "Languages"); await R.click(".sheet button.rename-apply"); await R.waitForTimeout(200);
   const warn = await R.locator(".kit-sheet").innerText().catch(() => "");
   ok("renaming onto an existing category asks before merging", /already exists — merge 3 cards into it/.test(warn), warn.replace(/\n/g, " | "));
   await shot(R, "rename-merge");
@@ -153,7 +153,7 @@ try {
   const undone = await R.evaluate(() => { const y = (window as any).yuzu; return { srcs: [...y.cards.values()].map((c: any) => c.source).sort(), smart: y.settings.smart[0].decks, dl: y.settings.deadlines[0].path, ed: localStorage.getItem("yuzu-edit-deck") }; });
   ok("Undo takes the merge apart again (the German card stays put)", JSON.stringify(undone.srcs) === JSON.stringify(["Emergency Medicine::Trauma", "Emergency Medicine::Trauma", "Emergency Medicine::Trauma", "Languages::German"]) && undone.smart[0] === "Emergency Medicine" && undone.dl === "Emergency Medicine::Trauma" && undone.ed === "Emergency Medicine::Trauma", JSON.stringify(undone));
   // a plain rename (no clash) goes straight through
-  await R.waitForTimeout(200); await R.click('button[aria-label="Rename or move"]'); await R.fill('.sheet input[list="deckpaths"]', "Emergency Med"); await R.click(".sheet >> button:has-text('Apply')"); await R.waitForTimeout(400);
+  await R.waitForTimeout(200); await R.click('button[aria-label="Rename or move"]'); await R.fill('.sheet .field input', "Emergency Med"); await R.click(".sheet button.rename-apply"); await R.waitForTimeout(400);
   ok("a rename onto a new name asks nothing and updates the smart deck", (await R.locator(".kit-sheet").count()) === 0 && (await R.evaluate(() => (window as any).yuzu.settings.smart[0].decks[0])) === "Emergency Med");
   // ---- Smart decks: breadcrumb back, Tags group, delete asks
   await R.click(".seg >> text=Smart"); await R.click(".tree-row:has-text('ED')"); await R.waitForTimeout(150);

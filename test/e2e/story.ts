@@ -114,6 +114,49 @@ try {
     ok("a renamed deck keeps its options and its look; the old place is cleared", moved.o.ordered === true && moved.o.newPerDay === 7 && moved.old === null && moved.look && moved.css, JSON.stringify(moved));
     await ctx.close(); }
 
+  // ======== moving a deck: "cut the new Mephisto deck from the outside German into Languages › German"
+  { const { ctx, page } = await device(1280, 800, false);
+    await page.evaluate(async () => { const y = (window as any).yuzu;
+      await y.importPack({ yuzu_pack: 1, id: "m", category: "German::Mephisto", ordered: true, cards: [{ id: "1", text: "Eins {{c1::a}}" }, { id: "2", text: "Zwei {{c1::b}}" }] });
+      await y.importPack({ yuzu_pack: 1, id: "g", category: "Languages::German::Goethe A1", cards: [{ front: "der Hund", back: "dog" }] });
+      await y.importPack({ yuzu_pack: 1, id: "o", category: "German::Other", cards: [{ front: "x", back: "y" }] }); });
+    await page.click("nav.tabs >> text=Library"); await page.waitForTimeout(300);
+    await page.locator(".tree-row", { hasText: "German" }).first().click(); await page.waitForTimeout(200);
+    await page.locator(".tree-row", { hasText: "Mephisto" }).first().click({ button: "right" }); await page.waitForTimeout(250);
+    ok("a deck's menu offers Move to…, Cut, Rename…", ["Move to…", "Cut", "Rename…"].every((t) => true) && await page.locator(".kit-sheet button:has-text('Move to…')").count() === 1 && await page.locator(".kit-sheet button:has-text('Cut')").count() === 1 && await page.locator(".kit-sheet button:has-text('Rename…')").count() === 1);
+    await page.locator(".kit-sheet button:has-text('Move to…')").click(); await page.waitForTimeout(250);
+    const rows = await page.locator(".move-deck .move-row").allInnerTexts();
+    ok("the picker lists the decks, not the deck itself, and marks where it is now", rows.some((r) => /^German\s/.test(r) && /here now/.test(r)) && !rows.some((r) => /^Mephisto/.test(r)) && rows.some((r) => /^Top level/.test(r)), JSON.stringify(rows));
+    await page.screenshot({ path: `${shots}/move-picker.png` });
+    await page.fill(".move-deck input", "languages ger"); await page.waitForTimeout(100);
+    await page.fill(".move-deck input", "Languages::German"); await page.waitForTimeout(100);
+    const found = await page.locator(".move-deck .move-row").allInnerTexts();
+    await page.fill(".move-deck input", "goethe"); await page.waitForTimeout(100);
+    ok("…and finds a deck by name", (await page.locator(".move-deck .move-row").allInnerTexts()).some((r) => /Goethe A1/.test(r)), JSON.stringify(found));
+    await page.fill(".move-deck input", ""); await page.locator(".move-deck .move-row", { hasText: /^German/ }).nth(1).click(); await page.waitForTimeout(400);
+    const after = await page.evaluate(() => { const y = (window as any).yuzu; return { srcs: [...new Set([...y.cards.values()].map((c: any) => c.source))].sort(), ordered: y.optsFor("Languages::German::Mephisto").opts.ordered }; });
+    ok("Mephisto moved into Languages › German, its order option with it", JSON.stringify(after.srcs) === JSON.stringify(["German::Other", "Languages::German::Goethe A1", "Languages::German::Mephisto"]) && after.ordered === true, JSON.stringify(after));
+    ok("…with an Undo", await page.locator(".kit-snack button:has-text('Undo')").isVisible());
+    // Cut and Paste here: the other deck too
+    await page.locator(".crumbs button").first().click(); await page.waitForTimeout(200);
+    await page.locator(".tree-row", { hasText: "German" }).first().click(); await page.waitForTimeout(200);
+    await page.locator(".tree-row", { hasText: "Other" }).first().click({ button: "right" }); await page.waitForTimeout(200);
+    await page.locator(".kit-sheet button:has-text('Cut')").click(); await page.waitForTimeout(200);
+    ok("cut: the bar says it's already here", /already here/.test(await page.locator(".cut-bar").innerText()) && await page.locator(".cut-bar button:has-text('Paste here')").isDisabled());
+    await page.locator(".crumbs button").first().click(); await page.waitForTimeout(200);
+    await page.locator(".tree-row", { hasText: "Languages" }).first().click(); await page.waitForTimeout(200);
+    await page.locator(".tree-row", { hasText: "German" }).first().click(); await page.waitForTimeout(200);
+    ok("…open the deck it goes into: Paste here", /→ Languages › German/.test(await page.locator(".cut-bar").innerText()));
+    await page.locator(".cut-bar button:has-text('Paste here')").click(); await page.waitForTimeout(400);
+    const srcs = await page.evaluate(() => [...new Set([...(window as any).yuzu.cards.values()].map((c: any) => c.source))].sort());
+    ok("…pasted: the outside German is gone, everything under Languages › German", JSON.stringify(srcs) === JSON.stringify(["Languages::German::Goethe A1", "Languages::German::Mephisto", "Languages::German::Other"]) && await page.locator(".cut-bar").count() === 0, JSON.stringify(srcs));
+    // rename by name
+    ok("after a move you land in the deck, where it now is", /Languages.*German.*Other/s.test(await page.locator(".crumbs").innerText()));
+    await page.click("button[aria-label='Rename or move']"); await page.waitForTimeout(200);
+    await page.fill(".sheet .field input", "Extras"); await page.keyboard.press("Enter"); await page.waitForTimeout(400);
+    ok("Rename… changes just the name, in place", await page.evaluate(() => [...(window as any).yuzu.cards.values()].some((c: any) => c.source === "Languages::German::Extras")));
+    await ctx.close(); }
+
   // ======== phone (touch)
   { const { ctx, page } = await device(412, 915, true);
     await page.evaluate(async ([v, a]) => { const y = (window as any).yuzu; await y.importPack(v); await y.importPack(a); }, [VOCAB, part(1, ["Der {{c1::Hund}} bellt laut.", "Dann {{c1::geht}} er nach Hause, wo der Hund schläft und träumt."])] as const);

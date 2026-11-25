@@ -36,7 +36,8 @@ try {
   await A.waitForFunction(() => (window as any).yuzu?.syncBackend?.() === "drive", null, { timeout: 20000 });
   await A.waitForFunction(() => /media files on Drive/.test((window as any).yuzu.googleStatus.message), null, { timeout: 60000 }).catch(() => {});
   const s1 = await waitSync(A); await idle(A);
-  ok("06-9: first connect on a Drive without My Apps makes exactly one", live("My Apps").length === 1 && live("Yuzu").length === 1 && live("hub").length === 1, `${live("My Apps").length} My Apps · ${s1.message}`);
+  for (let i = 0; i < 60 && !live("hub").length; i++) await A.waitForTimeout(250); // status.json (and so hub/) is written after the first good sync, a moment later
+  ok("06-9: first connect on a Drive without My Apps makes exactly one", live("My Apps").length === 1 && live("Yuzu").length === 1 && live("hub").length === 1, `${live("My Apps").length} My Apps · ${live("Yuzu").length} Yuzu · ${live("hub").length} hub · ${s1.message}`);
   // ---- 06-14: three new pictures, one bundle (plus its table of contents)
   const b0 = [...G.files.values()].filter((f) => !f.trashed && f.props?.yzb === "1").length;
   await A.evaluate(async () => { const y = (window as any).yuzu; const add: any[] = []; for (let i = 0; i < 3; i++) { const blob = new Blob([new Uint8Array(700 + i * 800).fill(i + 1)], { type: "image/png" }); y.media.set(`wp04-${i}.png`, blob); add.push({ name: `wp04-${i}.png`, blob }); } await y._db.putMany("media", add); await y.googleRefresh("auto"); });

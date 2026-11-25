@@ -7,6 +7,7 @@ import { SYSTEM_NAMES } from "../lib/classify";
 import type { Card, CardState } from "../lib/model";
 import { IconChevron, IconPlay, IconClose, IconPin, IconEdit, IconSettings } from "./icons";
 import { DeckOptions } from "./DeckOptions";
+import { MoveDeck } from "./MoveDeck";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Duplicates } from "./Duplicates";
 import { OcclusionEditor } from "./Occlusion";
@@ -140,7 +141,20 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
   const [moveTo, setMoveTo] = useState<string | null>(null);
   const [tagTo, setTagTo] = useState<string | null>(null);
   const [tool, setTool] = useState<"dupes" | "occlusion" | "card" | null>(null);
-  const [rename, setRename] = useState<string | null>(null);
+  const [rename, setRename] = useState<string | null>(null); const [renameFrom, setRenameFrom] = useState("");
+  const openRename = (p: string) => { setRenameFrom(p); setRename(p.split("::").pop() ?? p); };
+  const [moving, setMoving] = useState<string | null>(null); // the Move to… picker
+  const [cut, setCut] = useState<string | null>(null); // a deck cut, waiting for "Paste here"
+  /** Move or rename a deck (and everything in it): asks before merging into a deck that exists, then offers Undo. */
+  async function moveDeck(from: string, to: string): Promise<boolean> {
+    to = to.trim().replace(/\s*::\s*/g, "::").replace(/^::|::$/g, ""); if (!to || to === from) return false;
+    if (to.startsWith(from + "::")) { snackbar("A deck can't go inside itself"); return false; }
+    const k = store.renameClash(from, to);
+    if (k.existing && !(await confirmSheet({ title: `“${to.split("::").pop()}” already exists — merge ${k.moving.toLocaleString()} card${k.moving === 1 ? "" : "s"} into it?`, sub: `${to.replace(/::/g, " › ")} already has ${k.existing.toLocaleString()} card${k.existing === 1 ? "" : "s"}. The two become one deck. You can undo right after.`, yes: "Merge" }))) return false;
+    const n = await store.renamePath(from, to); go(to);
+    snackbar(`${k.existing ? "Merged" : "Moved"} ${n.toLocaleString()} card${n === 1 ? "" : "s"} into ${to.replace(/::/g, " › ")}`, async () => { await store.undoRename(); go(from); });
+    return true;
+  }
   const [deckOpts, setDeckOpts] = useState<string | null>(null);
   const [classify, setClassify] = useState<"System" | "Specialty" | null>(null);
   const v = store.getVersion();
@@ -209,7 +223,12 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
     { label: "New only", onClick: () => onStudy(c.path, view, { only: "new" }), disabled: !c.newCount },
     ...(view === "systems" ? [{ label: "Boss fight", onClick: () => onBoss(c.path, view, c.name) }] : []),
     isPinned(c.path, view) ? { label: "Unpin from Today", onClick: () => store.saveSettings({ pins: store.settings.pins.filter((x) => !(x.path === c.path && x.view === view)) }) } : { label: "Pin to Today", onClick: () => store.saveSettings({ pins: [...store.settings.pins, { path: c.path, view }] }) },
-    ...(view === "decks" ? [{ label: "Deck options…", hint: store.settings.deckOpts?.[c.path] ? "set" : undefined, onClick: () => setDeckOpts(c.path) }] : []),
+    ...(view === "decks" ? [
+      { label: "Move to…", hint: "pick where", onClick: () => setMoving(c.path) },
+      { label: "Cut", hint: "then Paste here in another deck", onClick: () => { setCut(c.path); snackbar(`Cut “${c.name}” — open the deck it goes into and press Paste here`); } },
+      { label: "Rename…", onClick: () => openRename(c.path) },
+      { label: "Deck options…", hint: store.settings.deckOpts?.[c.path] ? "set" : undefined, onClick: () => setDeckOpts(c.path) },
+    ] : []),
     { label: "Show its cards", onClick: () => { go(c.path); setShowCards(true); } },
     { label: "Select all its cards", onClick: () => { go(c.path); setShowCards(true); setSelecting(true); setTimeout(() => setSelected(new Set(store.cardsIn(c.path, view).map((x) => x.id))), 0); } },
   ] });
@@ -267,7 +286,7 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
                 <div className="small muted">{counts.total.toLocaleString()} cards · {counts.susp.toLocaleString()} paused · {counts.studied.toLocaleString()} studied</div>
               </div>
               {view === "decks" && path && <button className={"icon-btn" + (store.settings.deckOpts?.[path] ? " on" : "")} aria-label="Deck options" title="Deck options: order, new cards a day, look, language" onClick={() => setDeckOpts(path)}><IconSettings /></button>}
-              {view === "decks" && path && <button className="icon-btn" aria-label="Rename or move" title="Rename or move this category" onClick={() => setRename(path)}><IconEdit /></button>}
+              {view === "decks" && path && <button className="icon-btn" aria-label="Rename or move" title="Rename or move this category" onClick={() => openRename(path)}><IconEdit /></button>}
               <button className={"icon-btn" + (pinned ? " on" : "")} aria-label="Pin" onClick={() => store.saveSettings({ pins: pinned ? store.settings.pins.filter((p) => !(p.view === view && p.path === path)) : [...store.settings.pins, { view, path }] })}><IconPin /></button>
               <button className="btn primary" onClick={() => onStudy(path, view)} disabled={counts.due + counts.fresh + counts.learning === 0}><IconPlay /> Study</button>
             </div>
@@ -361,17 +380,22 @@ export function Library({ onStudy, onBoss, initial }: { onStudy: (path: string, 
         </Sheet>
       )}
       {deckOpts !== null && <DeckOptions path={deckOpts} onClose={() => setDeckOpts(null)} />}
+      {moving !== null && <MoveDeck from={moving} onClose={() => setMoving(null)} onMove={async (to) => { const from = moving; if (await moveDeck(from, to)) { setMoving(null); if (cut === from) setCut(null); } }} />}
+      {cut !== null && view === "decks" && (() => { const name = cut.split("::").pop(); const into = path; const bad = into === cut || into.startsWith(cut + "::") || into === cut.split("::").slice(0, -1).join("::");
+        return <div className="bulk-bar cut-bar" role="status"><span className="small grow">Cut: <b>{name}</b>{bad ? (into === cut || into.startsWith(cut + "::") ? " — open another deck" : " — it's already here") : ` → ${into ? into.replace(/::/g, " › ") : "top level"}`}</span>
+          <button className="btn primary" disabled={bad} onClick={async () => { const from = cut; if (await moveDeck(from, into ? `${into}::${name}` : name!)) setCut(null); }}>Paste here</button>
+          <button className="btn" onClick={() => setCut(null)}>Cancel</button></div>; })()}
       {rename !== null && (
-        <Sheet title={`Rename or move “${path.split("::").pop()}”`} onClose={() => setRename(null)}>
-          <p className="small muted" style={{ marginTop: 4 }}>Edit the full path. Change the last part to rename; change the part before it to move the category (and everything inside it) somewhere else.</p>
-          <div className="field"><label>Full path</label><input value={rename} list="deckpaths" onChange={(e) => setRename(e.target.value)} /></div>
-          <datalist id="deckpaths">{[...new Set([...store.cards.values()].map((c) => c.source))].sort().map((p) => <option key={p} value={p} />)}</datalist>
-          <button className="btn primary block" disabled={!rename.trim() || rename.trim() === path} onClick={async () => {
-            const from = path, to = rename.trim().replace(/\s*::\s*/g, "::").replace(/^::|::$/g, ""); const k = store.renameClash(from, to);
-            if (k.existing && !(await confirmSheet({ title: `“${to.split("::").pop()}” already exists — merge ${k.moving.toLocaleString()} card${k.moving === 1 ? "" : "s"} into it?`, sub: `${to.replace(/::/g, " › ")} already has ${k.existing.toLocaleString()} card${k.existing === 1 ? "" : "s"}. The two become one category. You can undo right after.`, yes: "Merge" }))) return;
-            const n = await store.renamePath(from, to); setRename(null); go(to);
-            snackbar(`${k.existing ? "Merged" : "Moved"} ${n.toLocaleString()} card${n === 1 ? "" : "s"} into ${to.replace(/::/g, " › ")}`, async () => { await store.undoRename(); go(from); });
-          }}>Apply</button>
+        <Sheet title={`Rename “${renameFrom.split("::").pop()}”`} onClose={() => setRename(null)}>
+          <div className="field"><label>Name</label><input value={rename} autoFocus onChange={(e) => setRename(e.target.value.replace(/::/g, ""))} onKeyDown={(e) => { if (e.key === "Enter") (e.currentTarget.closest(".sheet")?.querySelector(".rename-apply") as HTMLButtonElement | null)?.click(); }} /></div>
+          <p className="small muted" style={{ marginTop: 0 }}>In {renameFrom.includes("::") ? renameFrom.split("::").slice(0, -1).join(" › ") : "the top level"}. Its cards, the decks inside it, options and pins keep working.</p>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn grow" onClick={() => { const f = renameFrom; setRename(null); setMoving(f); }}>Move somewhere else…</button>
+            <button className="btn primary grow rename-apply" disabled={!rename.trim() || rename.trim() === renameFrom.split("::").pop()} onClick={async () => {
+              const parent = renameFrom.split("::").slice(0, -1).join("::"); const to = parent ? `${parent}::${rename.trim()}` : rename.trim();
+              if (await moveDeck(renameFrom, to)) setRename(null);
+            }}>Rename</button>
+          </div>
         </Sheet>
       )}
       {classify && (

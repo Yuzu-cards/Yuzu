@@ -1012,3 +1012,11 @@ body:has(.sheet-backdrop) .kit-snack { bottom: auto; top: calc(12px + var(--safe
   .deck-opts .opt-row > .seg { width: 100%; } .deck-opts .opt-row > .seg > button { flex: 1; }
   .deck-opts .opt-row > select { max-width: none; width: 100%; }
 }
+
+/* Move a deck: the deck list to pick from, and the cut bar */
+.move-list { display: grid; gap: 2px; max-height: min(55vh, 520px); overflow-y: auto; margin-top: 4px; }
+.move-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 12px; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line-soft); color: var(--text); font: inherit; cursor: pointer; }
+.move-row:hover:not(:disabled), .move-row:focus-visible { background: var(--ink-3); }
+.move-row:disabled { opacity: .55; cursor: default; }
+.move-row.top { flex-direction: column; align-items: flex-start; gap: 0; }
+.cut-bar b { color: var(--accent); }
