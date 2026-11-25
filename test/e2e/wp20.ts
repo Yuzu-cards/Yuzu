@@ -102,7 +102,7 @@ try {
   await page.evaluate(async () => { localStorage.setItem("yuzu-google", JSON.stringify({ access: "t", expires: Date.now() + 3600e3, email: "a@b", scope: "" }));
     const y = (window as any).yuzu; await y.saveSettings({ sync: { ...y.settings.sync, backend: "drive" } }); y.backups = { ...y.backups, list: [{ name: "2026-11-12", id: "b1", rev: null, at: new Date("2026-11-12T21:05:00").getTime(), counts: { notes: 5, cards: 6, reviews: 7 } }], at: "now" }; });
   await page.click("nav.tabs >> text=Today"); await page.click("nav.tabs >> text=Settings"); await page.waitForTimeout(300);
-  await page.evaluate(() => { const y = (window as any).yuzu; y.refreshBackups = async () => y.backups.list; document.querySelectorAll("#s-google details").forEach((d) => { (d as HTMLDetailsElement).open = true; }); }); await page.waitForTimeout(300);
+  await page.evaluate(() => { const y = (window as any).yuzu; y.refreshBackups = async () => y.backups.list; (document.getElementById("s-google") as HTMLDetailsElement).open = true; document.querySelectorAll("#s-google details").forEach((d) => { (d as HTMLDetailsElement).open = true; }); }); await page.waitForTimeout(300);
   ok("no 'Use GitHub instead' while GitHub isn't set up", await page.locator("#s-google button:has-text('Use GitHub instead')").count() === 0);
   await page.locator("#s-google button:has-text('Disconnect')").tap(); await page.waitForTimeout(200);
   ok("Disconnect asks first, saying sync stops", await page.locator('[role=dialog][aria-label="Stop syncing through Drive?"]').count() === 1);

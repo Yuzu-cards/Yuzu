@@ -1,5 +1,6 @@
 import { lastSignInEvent, setSignInMode, signInMode, type SignInMode } from "../lib/google";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { IconBrush, IconCap, IconCards, IconCloud, IconHelp } from "./icons";
 import { fmtDate, fmtDateTime, fmtTime } from "../lib/dates";
 import { store } from "../lib/store";
 import { ImproveSection, improveRoute } from "./Improve";
@@ -147,14 +148,29 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
   }
 
   const [ui, setUiState] = useState(uiMode()); const [size, setSizeState] = useState(textSize());
+  // Groups start closed (an overview first), but the ones you opened stay open for this session, across tabs and reloads.
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = root.current; if (!el) return;
+    let open: string[] = []; try { open = JSON.parse(sessionStorage.getItem("yuzu-settings-open") || "[]"); } catch { /* fine */ }
+    for (const id of open) { const d = document.getElementById(id); if (d instanceof HTMLDetailsElement && d.classList.contains("section")) d.open = true; }
+    const save = (e: Event) => {
+      const d = e.target as HTMLElement; if (!(d instanceof HTMLDetailsElement) || !d.classList.contains("section") || !d.id) return;
+      const ids = [...el.querySelectorAll<HTMLDetailsElement>("details.section[open]")].map((x) => x.id).filter(Boolean);
+      try { sessionStorage.setItem("yuzu-settings-open", JSON.stringify(ids)); } catch { /* fine */ }
+    };
+    el.addEventListener("toggle", save, true); return () => el.removeEventListener("toggle", save, true);
+  }, []);
   return (
-    <div className="screen">
+    <div className="screen" ref={root}>
       <h1>Settings</h1>
       <JumpRow hide={reversible.length ? [] : ["s-lang"]} />
       <div className="settings-cols">
       <div className="settings-col">
-      <details className="section" id="s-look" open><summary>Look and sound <span className="small muted">interface, colours, sound</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
+      <Chapter id="look" title="Look & feel" sub="this device only" icon={<IconBrush size={18} />}>
+      <details className="section" id="s-look"><summary>Look and sound <span className="small muted">{({ arcade: "Arcade", clean: "Clean", paper: "Paper" } as Record<string, string>)[ui] ?? ui} · {size} text · {THEMES.find((t) => t.id === s.theme)?.name ?? s.theme} colours{s.sfx ? " · sounds on" : ""}</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
         <div className="card-box">
+        <fieldset className="set-group"><legend>Screen</legend>
           <div className="row" style={{ gap: 8, margin: "0 0 4px" }}><span className="small grow">Interface</span></div>
           <div className="seg" role="radiogroup" aria-label="Interface">{([["arcade", "Arcade"], ["clean", "Clean"], ["paper", "Paper"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={ui === k} className={ui === k ? "on" : ""} onClick={() => { setUi(k); setUiState(k); sfx.tap(); }}>{l}</button>)}</div>
           <p className="small muted" style={{ margin: "-6px 0 10px" }}>{ui === "arcade" ? "8-bit: pixel type, square notched panels." : ui === "clean" ? "Dark, soft corners, plain type." : "Light, for daylight and long reading."}</p>
@@ -162,18 +178,30 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           <div className="seg" role="radiogroup" aria-label="Text size">{([["small", "Small"], ["normal", "Normal"], ["large", "Large"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={size === k} className={size === k ? "on" : ""} onClick={() => { setTextSize(k); setSizeState(k); }}>{l}</button>)}</div>
           <div className="row" style={{ gap: 8, margin: "4px 0 4px" }}><span className="small grow">Colours</span></div>
           <div className="themes">{THEMES.map((t) => <button key={t.id} className={s.theme === t.id ? "on" : ""} aria-pressed={s.theme === t.id} onClick={() => { store.saveSettings({ theme: t.id }); sfx.tap(); }}><span className="sw">{t.sw.map((c) => <i key={c} style={{ background: c }} />)}</span>{t.name}</button>)}</div>
-          <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={s.sfx} onChange={(e) => { store.saveSettings({ sfx: e.target.checked }); if (e.target.checked) setTimeout(() => sfx.answer(3), 50); }} /> Sound effects (short 8-bit blips on answers, goal and boss fights)</label>
           <div className="row" style={{ gap: 8, margin: "12px 0 4px" }}><span className="small grow">Card look</span></div>
           <div className="seg card-seg" role="radiogroup" aria-label="Card look">{(["yuzu", "deck"] as const).map((v) => <button key={v} role="radio" aria-checked={s.cardStyle === v} className={s.cardStyle === v ? "on" : ""} onClick={() => store.saveSettings({ cardStyle: v })}>{v === "yuzu" ? "Yuzu" : "Deck's own"}</button>)}</div>
           <p className="small muted" style={{ margin: "6px 0 0" }}>Yuzu gives every deck the same calm type, orange cloze answers and tidy extras; the deck's own look shows each Anki deck as it was designed.</p>
+        </fieldset>
+        <fieldset className="set-group"><legend>Sound and feel</legend>
+          <label className="row small" style={{ margin: "12px 0 0" }}><input type="checkbox" checked={s.sfx} onChange={(e) => { store.saveSettings({ sfx: e.target.checked }); if (e.target.checked) setTimeout(() => sfx.answer(3), 50); }} /> Sound effects (short 8-bit blips on answers, goal and boss fights)</label>
           <DeviceToggles />
+        </fieldset>
         </div>
       </details>
-      <details className="section" id="s-study" open><summary>Studying <span className="small muted">new cards, goal, order, scheduler</span><span className="where sync mix" title="Kept the same on all your devices, except Slate cards, Swipe to rate and Type the answer, which stay on this device">syncs · 3 this device</span></summary>
+      </Chapter>
+      <Chapter id="study" title="Studying" sub="what you learn, and when" icon={<IconCap size={18} />}>
+      <details className="section" id="s-study"><summary>Daily study <span className="small muted">{s.newPerDay} new a day · goal {s.dailyGoal} · {Math.round(s.scheduler.desiredRetention * 100)}% recall · day starts {String(s.rollover).padStart(2, "0")}:00</span><span className="where sync mix" title="Kept the same on all your devices, except Slate cards, Swipe to rate and Type the answer, which stay on this device">syncs · 3 this device</span></summary>
       <div className="card-box">
+        <fieldset className="set-group"><legend>How much each day</legend>
         <Slider label="New cards per day" value={s.newPerDay} min={0} max={100} step={1} onCommit={(v) => store.saveSettings({ newPerDay: v })} sub="Each new card brings about 10 reviews over its first year." />
         <Slider label="Daily review goal" value={Math.min(s.dailyGoal, 500)} min={10} max={500} step={10} onCommit={(v) => store.saveSettings({ dailyGoal: v })} />
         <Slider label="Max due cards per day" value={Math.min(s.maxReviewsPerDay, 1000)} min={0} max={1000} step={25} format={(v) => (v ? String(v) : "no limit")} onCommit={(v) => store.saveSettings({ maxReviewsPerDay: v })} sub="With a backlog, keeps each day to a size you'll actually finish. The rest waits; nothing is lost." />
+        <div className="field"><label>New day starts at</label>
+          <select value={s.rollover} onChange={(e) => store.saveSettings({ rollover: Number(e.target.value) })}>
+            {Array.from({ length: 13 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+          </select><span className="small muted">After a night shift (to 08:00), 09:00 or 10:00 keeps the whole post-shift session in one day.</span></div>
+        </fieldset>
+        <fieldset className="set-group"><legend>Memory and order</legend>
         <div className="field"><label>Order of due cards</label>
           <select value={s.dueOrder} onChange={(e) => store.saveSettings({ dueOrder: e.target.value as any })}>
             <option value="forgotten">Most forgotten first</option>
@@ -182,20 +210,30 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             <option value="shuffle">Shuffled</option>
           </select><span className="small muted">{({ forgotten: "Lowest recall probability first. ", rescue: "Highest recall probability first — best for clearing a backlog. ", due: "Oldest due date first. ", shuffle: "In random order. " } as Record<string, string>)[s.dueOrder] ?? ""}Cards are also spread across systems so neighbours differ.</span></div>
         <RetentionSlider />
-        <EasyDays />
         <div className="field"><label>Scheduler weights</label>
           <div className="row"><button className="btn grow" disabled={!!store.fitting} onClick={async () => { setFitMsg("Fitting…"); setFitMsg(await store.optimizeScheduler()); }}>{store.fitting ? `Fitting… ${Math.round(store.fitting.progress * 100)}%` : "Tune to my history"}</button></div>
           <p className="small muted" style={{ marginBottom: 0 }}>{fitMsg || (s.fit ? `FSRS-6, fitted ${fmtDate(s.fit.at)} on ${s.fit.n.toLocaleString()} reviews (error ${s.fit.before.toFixed(3)} → ${s.fit.after.toFixed(3)}). Re-runs automatically every ~1000 reviews.` : "Default FSRS-6 weights. Tuning to your history runs automatically once you have ~400 spaced reviews.")}</p>
         </div>
+        </fieldset>
+        <fieldset className="set-group"><legend>Light days and breaks</legend>
+        <EasyDays />
+        <div className="field"><label>Streak rest days per week</label>
+          <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
+            {[0, 1, 2].map((h) => <option key={h} value={h}>{h}</option>)}
+          </select></div>
+        </fieldset>
+        <fieldset className="set-group"><legend>During a session</legend>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.nightCards} onChange={(e) => store.saveSettings({ nightCards: e.target.checked })} /> Slate cards (dark card paper, easier at night)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.swipe} onChange={(e) => store.saveSettings({ swipe: e.target.checked })} /> Swipe to rate (← Again · ↓ Hard · → Good · ↑ Easy)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.typeAnswers} onChange={(e) => store.saveSettings({ typeAnswers: e.target.checked })} /> Type the answer on language cards</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.planScreen} onChange={(e) => store.saveSettings({ planScreen: e.target.checked })} /> Ask how long before a session (off: start straight away)</label>
         <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.showStreak} onChange={(e) => store.saveSettings({ showStreak: e.target.checked })} /> Show the day streak</label>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
+        </fieldset>
+        <fieldset className="set-group"><legend>Hard and mastered cards</legend>
         <div className="row small" style={{ margin: "10px 0 4px" }}><span className="grow">A card forgotten {s.leechThreshold} times</span></div>
         <div className="seg" role="radiogroup" aria-label="Leech action">{([["claude", "Send to Claude"], ["pause", "Pause it"], ["ask", "Ask me"]] as const).map(([k, l]) => <button key={k} role="radio" aria-checked={s.leechAction === k} className={s.leechAction === k ? "on" : ""} onClick={() => store.saveSettings({ leechAction: k })}>{l}</button>)}</div>
         <p className="small muted" style={{ margin: "-6px 0 8px" }}>{s.leechAction === "claude" ? `It's marked “Needs improving”. ${improveRoute()}` : s.leechAction === "pause" ? "It's suspended until you look at it (Library → Leeches)." : "A sheet asks what went wrong each time."}</p>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={s.burySiblings} onChange={(e) => store.saveSettings({ burySiblings: e.target.checked })} /> Bury siblings (don't show two cards of one note in a session)</label>
         <Slider label="Offer to retire as mastered when reviews are more than this apart" value={s.retireAskYears ?? 5} min={1} max={10} format={(v) => `${v} y`} onCommit={(v) => store.saveSettings({ retireAskYears: v, ...((s.retireAutoYears ?? 20) && (s.retireAutoYears ?? 20) <= v ? { retireAutoYears: 0 } : {}) })} sub="Those cards are listed in Progress → Mastered for you to decide." />
         <Slider label="Retire automatically when reviews are more than this apart" value={s.retireAutoYears ?? 20} min={0} max={30} step={5} format={(v) => (v ? `${v} y` : "never")} sub={`Must be above the offer line (${s.retireAskYears ?? 5} y). Retired cards are deleted and kept in the Mastered log.`}
           onCommit={async (v) => {
@@ -203,14 +241,7 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
             if (v) { const n = store.countBeyond(v); if (n && !(await confirmSheet({ title: `Retire ${n.toLocaleString()} card${n === 1 ? "" : "s"} now?`, sub: `${n === 1 ? "It is" : "They are"} already past ${v} years: deleted, kept in the Mastered log.`, yes: "Retire them" }))) return false; }
             await store.saveSettings({ retireAutoYears: v }); if (v) store.autoMaster();
           }} />
-        <div className="field"><label>Streak rest days per week</label>
-          <select value={s.restDays} onChange={(e) => store.saveSettings({ restDays: Number(e.target.value) })}>
-            {[0, 1, 2].map((h) => <option key={h} value={h}>{h}</option>)}
-          </select></div>
-        <div className="field"><label>New day starts at</label>
-          <select value={s.rollover} onChange={(e) => store.saveSettings({ rollover: Number(e.target.value) })}>
-            {Array.from({ length: 13 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
-          </select><span className="small muted">After a night shift (to 08:00), 09:00 or 10:00 keeps the whole post-shift session in one day.</span></div>
+        </fieldset>
       </div>
 
       </details>
@@ -225,53 +256,9 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
           {revMsg && <p className="small muted" style={{ marginBottom: 0 }}>{revMsg}</p>}
         </div>
       </details>}
+      </Chapter>
       </div><div className="settings-col">
-      <GoogleSection />
-      <details className="section" id="s-sync" open><summary>Sync between devices<span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
-      <div className="card-box">
-        {store.syncBackend() === "drive"
-          ? <p className="small muted" style={{ marginTop: 0 }}>Cards sync through <b>Google Drive</b> (My Apps › Yuzu › collection), with your Google sign-in — no tokens to manage. Change it under Google above.</p>
-          : null}
-        {store.syncBackend() === "drive" ? <details className="how" style={{ margin: "0 0 8px" }}><summary className="small">GitHub (fallback)</summary>
-        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
-        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
-        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
-        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
-        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
-        </details> : <>
-        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
-        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
-        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
-        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
-        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
-        </>}
-        <div className="field"><label>This device's name</label><input defaultValue={s.deviceName} onBlur={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
-        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={sy.auto} onChange={(e) => setSync({ auto: e.target.checked })} /> Sync automatically after changes</label>
-        <div className="row" style={{ marginTop: 8 }}>
-          {store.syncBackend() !== "drive" && <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>}
-          <button className="btn primary grow" disabled={!store.syncConfigured() || store.syncStatus.state === "syncing"} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "Syncing…" : "Sync now"}</button>
-        </div>
-        <p className="small" style={{ marginBottom: 0, color: store.syncStatus.state === "error" ? "var(--again)" : undefined }}>{syncMsg || store.syncStatus.message}{store.syncStatus.at && store.syncStatus.state !== "syncing" ? ` · ${fmtTime(store.syncStatus.at)}` : ""}</p>
-        {store.syncLog.length > 0 && (
-          <details style={{ marginTop: 8 }}>
-            <summary className="small muted">Sync history</summary>
-            <ul className="small" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-              {store.syncLog.map((l) => <li key={l.at} className={l.ok ? "" : "muted"}>{fmtDateTime(l.at)} · {l.ok ? "✓" : "✗"} {l.message} ({(l.ms / 1000).toFixed(1)} s)</li>)}
-            </ul>
-            <div className="row" style={{ marginTop: 8 }}>
-              <button className="btn" onClick={async () => { if (await confirmSheet({ title: "Re-check everything?", sub: "Nothing is deleted. The next sync compares every file with the repository and re-sends what differs.", yes: "Re-check on next sync", danger: false })) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
-              {store.syncBackend() !== "drive" && <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>}
-            </div>
-            {store.syncBackend() !== "drive" && <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>}
-          </details>
-        )}
-        <ReplacedEdits />
-      </div>
-
-      </details>
-      <details className="section" id="s-improve"><summary>Cards to improve <span className="small muted">send to Claude</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
-      <ImproveSection />
-      </details>
+      <Chapter id="cards" title="Cards & files" sub="bringing cards and pictures in" icon={<IconCards size={18} />}>
       <details className="section" id="s-import"><summary>Import <span className="small muted">Anki, packs, Claude files</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>Export from Anki as a <b>collection package (.colpkg)</b> or a deck (.apkg) with scheduling included; if it includes media, the images and sounds are added right after the cards. Importing again later only adds what's new. Also accepts <b>Yuzu card packs</b> and <b>curation files</b> (.json) made by Claude: duplicates are skipped or merged, cards move to their categories, similar cards get the tag <i>needs-review::similar</i>. Large collections: import on a PC first, then sync to the phone.</p>
@@ -284,7 +271,17 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
-      <details className="section" id="s-media" open><summary>Images and sounds <span className="small muted">files for your cards</span><span className="where dev mix" title="The files, playing sounds automatically and downloading shared images stay on this device; Hidden fields and Share images between devices are the same on all your devices">this device · 2 sync</span></summary>
+      <details className="section" id="s-inbox"><summary>Inbox <span className="small muted">{store.inbox.length ? `${store.inbox.length} pack${store.inbox.length === 1 ? "" : "s"} waiting` : "packs from Claude · empty"}</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
+      <div className="card-box">
+        <p className="small muted" style={{ marginTop: 0 }}>Packs placed in the <b>inbox</b> folder {store.syncBackend() === "drive" ? <>on Drive (My Apps › Yuzu › collection › inbox)</> : <>of your sync repository</>} arrive here on the next sync and wait for your review. {store.inbox.length ? `${store.inbox.length} waiting.` : "Nothing waiting."}{store.packLog.length ? ` ${store.packLog.length} packs added so far (removable).` : ""}</p>
+        <button className="btn block" onClick={onInbox}>Open inbox</button>
+      </div>
+
+      </details>
+      <details className="section" id="s-improve"><summary>Cards to improve <span className="small muted">{(() => { const n = store.improveList().length; return n ? `${n.toLocaleString()} marked for Claude` : "none marked"; })()}</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
+      <ImproveSection />
+      </details>
+      <details className="section" id="s-media"><summary>Images and sounds <span className="small muted">files for your cards</span><span className="where dev mix" title="The files, playing sounds automatically and downloading shared images stay on this device; Hidden fields and Share images between devices are the same on all your devices">this device · 2 sync</span></summary>
       <div className="card-box">
         {(() => { const m = mediaStat; const pct = m.total ? Math.round((m.stored / m.total) * 100) : 100; return (<>
           <div className="stat-grid" style={{ marginTop: 0 }}>
@@ -350,14 +347,52 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
       </div>
 
       </details>
-      <details className="section" id="s-inbox"><summary>Inbox <span className="small muted">packs from Claude</span><span className="where sync" title="Kept the same on all your devices">syncs</span></summary>
+      </Chapter>
+      <Chapter id="sync" title="Google, sync & backups" sub="where your cards are kept" icon={<IconCloud size={18} />}>
+      <GoogleSection />
+      <details className="section" id="s-sync"><summary>Sync between devices <span className="small muted">{store.syncBackend() === "drive" ? "through Google Drive" : s.sync.owner && s.sync.repo && s.sync.token ? "through GitHub" : "not set up"}{store.syncStatus.at ? ` · last ${fmtTime(store.syncStatus.at)}` : ""}</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
-        <p className="small muted" style={{ marginTop: 0 }}>Packs placed in the <b>inbox</b> folder {store.syncBackend() === "drive" ? <>on Drive (My Apps › Yuzu › collection › inbox)</> : <>of your sync repository</>} arrive here on the next sync and wait for your review. {store.inbox.length ? `${store.inbox.length} waiting.` : "Nothing waiting."}{store.packLog.length ? ` ${store.packLog.length} packs added so far (removable).` : ""}</p>
-        <button className="btn block" onClick={onInbox}>Open inbox</button>
+        {store.syncBackend() === "drive"
+          ? <p className="small muted" style={{ marginTop: 0 }}>Cards sync through <b>Google Drive</b> (My Apps › Yuzu › collection), with your Google sign-in — no tokens to manage. Change it under Google above.</p>
+          : null}
+        {store.syncBackend() === "drive" ? <details className="how" style={{ margin: "0 0 8px" }}><summary className="small">GitHub (fallback)</summary>
+        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
+        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
+        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
+        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
+        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
+        </details> : <>
+        {store.syncOwnerMoved && <p className="small" style={{ marginTop: 0, color: "var(--orange)" }}>The repositories moved to the <b>Yuzu-cards</b> organisation on 02/11/2026: the owner here was updated. Your old token belongs to the old owner, so make a new fine-grained token with resource owner Yuzu-cards and paste it below.</p>}
+        <p className="small muted" style={{ marginTop: 0 }}>Uses a <b>private</b> GitHub repository, like Orange. Create one named <b>yuzu-data</b>, then a fine-grained token limited to it with <b>Contents: read and write</b>. The token stays on this device.</p>
+        <div className="field"><label>GitHub username</label><input defaultValue={sy.owner} autoCapitalize="none" onBlur={(e) => setSync({ owner: e.target.value.trim() })} placeholder="Yuzu-cards" /></div>
+        <div className="field"><label>Repository</label><input defaultValue={sy.repo} autoCapitalize="none" onBlur={(e) => setSync({ repo: e.target.value.trim() })} /></div>
+        <div className="field"><label>Token</label><div className="row"><input className="grow" type={showToken ? "text" : "password"} defaultValue={sy.token} autoCapitalize="none" onBlur={(e) => setSync({ token: e.target.value.trim() })} placeholder="github_pat_…" /><button className="btn" onClick={() => setShowToken(!showToken)}>{showToken ? "Hide" : "Show"}</button></div></div>
+        </>}
+        <div className="field"><label>This device's name</label><input defaultValue={s.deviceName} onBlur={(e) => store.saveSettings({ deviceName: e.target.value })} placeholder="S25 Ultra" /></div>
+        <label className="row small" style={{ margin: "8px 0" }}><input type="checkbox" checked={sy.auto} onChange={(e) => setSync({ auto: e.target.checked })} /> Sync automatically after changes</label>
+        <div className="row" style={{ marginTop: 8 }}>
+          {store.syncBackend() !== "drive" && <button className="btn" disabled={!store.syncConfigured()} onClick={async () => { setSyncMsg("Checking…"); const r = await new GitHubSync({ owner: sy.owner, repo: sy.repo, token: sy.token }).check(); setSyncMsg(r.message); }}>Test</button>}
+          <button className="btn primary grow" disabled={!store.syncConfigured() || store.syncStatus.state === "syncing"} onClick={() => store.sync()}>{store.syncStatus.state === "syncing" ? "Syncing…" : "Sync now"}</button>
+        </div>
+        <p className="small" style={{ marginBottom: 0, color: store.syncStatus.state === "error" ? "var(--again)" : undefined }}>{syncMsg || store.syncStatus.message}{store.syncStatus.at && store.syncStatus.state !== "syncing" ? ` · ${fmtTime(store.syncStatus.at)}` : ""}</p>
+        {store.syncLog.length > 0 && (
+          <details style={{ marginTop: 8 }}>
+            <summary className="small muted">Sync history</summary>
+            <ul className="small" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {store.syncLog.map((l) => <li key={l.at} className={l.ok ? "" : "muted"}>{fmtDateTime(l.at)} · {l.ok ? "✓" : "✗"} {l.message} ({(l.ms / 1000).toFixed(1)} s)</li>)}
+            </ul>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="btn" onClick={async () => { if (await confirmSheet({ title: "Re-check everything?", sub: "Nothing is deleted. The next sync compares every file with the repository and re-sends what differs.", yes: "Re-check on next sync", danger: false })) { await store.resetSyncState(); store.sync(); } }}>Re-check everything</button>
+              {store.syncBackend() !== "drive" && <button className="btn" onClick={async () => { setSyncMsg("Compacting…"); setSyncMsg(await store.compactNow()); }}>Compact history</button>}
+            </div>
+            {store.syncBackend() !== "drive" && <p className="small muted" style={{ marginBottom: 0 }}>Compacting folds the repository's history into one commit so it stays the size of your collection; Yuzu does this by itself every 300 syncs.</p>}
+          </details>
+        )}
+        <ReplacedEdits />
       </div>
 
       </details>
-      <details className="section" id="s-data"><summary>Data <span className="small muted">back up, restore, wipe</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
+      <details className="section" id="s-data"><summary>Backups and data <span className="small muted">{(() => { let at = 0; try { at = Number(localStorage.getItem("yuzu-last-backup") ?? 0); } catch { /* fine */ } return at ? `last backup ${fmtDate(at)}` : "no backup file yet"; })()} · restore · wipe</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <div className="card-box">
         <SketchyRow />
         <div className="small muted">{store.notes.size.toLocaleString()} notes · {store.cards.size.toLocaleString()} cards · {store.reviews.length.toLocaleString()} reviews on this device. A quick backup holds only what cannot be rebuilt (reviews, scheduling, settings, your hooks; about 1 MB); the full one includes every card's text.</div>
@@ -380,9 +415,12 @@ export function Settings({ onInbox }: { onInbox?: () => void } = {}) {
         <WipeButton media={mediaStat.stored} />
       </div>
       </details>
-      <details className="section" id="s-diag"><summary>Diagnostics <span className="small muted">storage, errors, repair</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
+      </Chapter>
+      <Chapter id="help" title="Help" sub="when something looks wrong" icon={<IconHelp size={18} />}>
+      <details className="section" id="s-diag"><summary>Diagnostics <span className="small muted">storage, errors, repair the app</span><span className="where dev" title="Only this phone, tablet or computer">this device</span></summary>
       <Diagnostics />
       </details>
+      </Chapter>
       </div>
       <p className="small muted" style={{ textAlign: "center", marginTop: 24 }}>Yuzu {__VERSION__}</p>
       </div>
@@ -516,7 +554,7 @@ function EasyDays() {
   const next = (v: number) => (v >= 1 ? 0.5 : v > 0 ? 0 : 1);
   return (
     <div className="field">
-      <label>Light days and breaks</label>
+      <label>Each weekday (tap to change)</label>
       <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
         {order.map((d) => <button key={d} className={"chip" + (days[d] < 1 ? " orange" : "")} data-hint={`${names[d]}|Tap to cycle: normal → light (about half the reviews) → off (as few as the schedule allows).`} onClick={() => { const e = [...days]; e[d] = next(e[d]); store.saveSettings({ easyDays: e }); }}>{names[d]} · {days[d] >= 1 ? "normal" : days[d] > 0 ? "light" : "off"}</button>)}
       </div>
@@ -543,7 +581,7 @@ function GoogleSection() {
   for (let i = 0; i < 10; i++) { const iso = store.isoToday(d); const sh = store.shiftOn(iso); if (sh && sh.kind !== "off") coming.push(`${iso.slice(8, 10)}/${iso.slice(5, 7)} ${sh.kind === "night" ? "🌙" : sh.kind === "leave" ? "✈" : "☀️"} ${sh.code}`); d.setDate(d.getDate() + 1); }
   const plan = store.planToday(); const months = Object.keys(g.rota ?? {}).sort();
   return (
-    <details className="section" id="s-google" open><summary>Google <span className="small muted">Drive home · Citrus Maxima</span><span className="where sync mix" title="Kept the same on all your devices, except the Google sign-in and whether cards sync through Drive or GitHub, which belong to this device">syncs · sign-in this device</span></summary>
+    <details className="section" id="s-google"><summary>Google <span className="small muted">{on ? "connected" : signed ? "connected, needs a tap to renew" : "not connected"} · Drive home · Citrus Maxima</span><span className="where sync mix" title="Kept the same on all your devices, except the Google sign-in and whether cards sync through Drive or GitHub, which belong to this device">syncs · sign-in this device</span></summary>
       <div className="card-box">
         <p className="small muted" style={{ marginTop: 0 }}>One Google sign-in shared with Citrus Maxima, Orange and your other apps. <b>Drive</b> keeps the collection and the master copy of every image and sound (<b>My Apps › Yuzu</b>). Yuzu reports what it needs to <b>Citrus</b> (My Apps › hub › yuzu) and reads back Citrus's plan and your shifts, so nights become light days.</p>
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
@@ -662,8 +700,8 @@ function ReminderSettings() {
 }
 
 /** Jump row (Orange 8.11.0): one tap to a group; it opens the group and scrolls to it. */
-// In page order: on a desktop the first five are the left column and the rest the right one (two fixed columns).
-const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"], ["s-exam", "Exams"], ["s-remind", "Reminders"], ["s-lang", "Languages"], ["s-google", "Google"], ["s-sync", "Sync"], ["s-improve", "Improve"], ["s-import", "Import"], ["s-media", "Media"], ["s-inbox", "Inbox"], ["s-data", "Data"], ["s-diag", "Diagnostics"]];
+// In page order, chapter by chapter (Look · Studying · Cards & files · Google, sync & backups · Help); on a desktop the first two chapters are the left column.
+const GROUPS: [string, string][] = [["s-look", "Look"], ["s-study", "Studying"], ["s-exam", "Exams"], ["s-remind", "Reminders"], ["s-lang", "Languages"], ["s-import", "Import"], ["s-inbox", "Inbox"], ["s-improve", "Improve"], ["s-media", "Media"], ["s-google", "Google"], ["s-sync", "Sync"], ["s-data", "Backups"], ["s-diag", "Diagnostics"]];
 function JumpRow({ hide = [] }: { hide?: string[] }) {
   const go = (id: string) => { const d = document.getElementById(id) as HTMLDetailsElement | null; if (!d) return; d.open = true; d.scrollIntoView({ block: "start", behavior: "smooth" }); };
   return <nav className="jump-row" aria-label="Settings groups">{GROUPS.filter(([id]) => !hide.includes(id)).map(([id, l]) => <button key={id} className="chip" data-to={id} onClick={() => go(id)}>{l}</button>)}<button className="chip" data-hint="Controls|Every keyboard key, mouse action and gamepad button (also ? or View on a pad)." onClick={() => window.dispatchEvent(new CustomEvent("yuzu-keys"))}>Controls ⌨</button></nav>;
@@ -732,4 +770,13 @@ function SignInWay() {
     <p className="small muted" style={{ margin: "4px 0 0" }}>{mode === "page" ? "Yuzu goes to Google and comes back signed in. Use this when the small window never opens or closes without signing in (the Steam Deck's browser, some installed apps). This device only." : "If the window never opens, or closes without signing you in, switch to \u201cIn this page\u201d. Yuzu also switches by itself after a failed window. This device only."}
       {ev && when ? <> Last step: <b>{ev.what}</b> at {String(when.getDate()).padStart(2, "0")}/{String(when.getMonth() + 1).padStart(2, "0")}/{when.getFullYear()} {String(when.getHours()).padStart(2, "0")}:{String(when.getMinutes()).padStart(2, "0")}.</> : null}</p>
   </div>;
+}
+
+/** A chapter of Settings (25/11/2026: "I can't tell what's what"): a heading with its own colour and icon, the colour
+ * repeated on every group inside it, so Look, Studying, Google/sync, Cards and Help read as different places. */
+function Chapter({ id, title, sub, icon, children }: { id: string; title: string; sub: string; icon: ReactNode; children: ReactNode }) {
+  return <section className="set-chapter" data-ch={id} aria-labelledby={"ch-" + id}>
+    <h2 className="ch-head" id={"ch-" + id}><span className="ch-icon" aria-hidden>{icon}</span><span className="ch-title">{title}</span><span className="ch-sub">{sub}</span></h2>
+    {children}
+  </section>;
 }

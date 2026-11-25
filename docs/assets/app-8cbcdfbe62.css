@@ -904,3 +904,63 @@ body:has(.sheet-backdrop) .kit-snack { bottom: auto; top: calc(12px + var(--safe
 .wipe-list { margin: 4px 0 8px; padding-left: 18px; }
 .wipe-type { width: 100%; }
 .exam-past { opacity: 0.55; }
+
+/* ---- zz-settings.css */
+/* Settings chapters (25/11/2026: "the settings is just a mess, I can't tell what's what").
+   Five chapters, each with its own colour, shown on: the chapter heading's icon tile and rule, the spine of every group
+   inside it, a faint tint on its boxes, the open group's title, and the jump-row chips. The colours are fixed (not the
+   theme's accent), so the chapters stay distinct in every theme; they are never used for body text. */
+.set-chapter { --ch: #ff8a3d; margin: 26px 0 0; }
+.set-chapter[data-ch="look"]  { --ch: #ff8a3d; }
+.set-chapter[data-ch="study"] { --ch: #6cc04a; }
+.set-chapter[data-ch="sync"]  { --ch: #4aa3ff; }
+.set-chapter[data-ch="cards"] { --ch: #b48cff; }
+.set-chapter[data-ch="help"]  { --ch: #a3a8b5; }
+:root[data-ui="paper"] .set-chapter[data-ch="look"]  { --ch: #d9661a; }
+:root[data-ui="paper"] .set-chapter[data-ch="study"] { --ch: #3f8f24; }
+:root[data-ui="paper"] .set-chapter[data-ch="sync"]  { --ch: #1f6fc4; }
+:root[data-ui="paper"] .set-chapter[data-ch="cards"] { --ch: #7a4fd6; }
+:root[data-ui="paper"] .set-chapter[data-ch="help"]  { --ch: #6b7080; }
+@media (min-width: 1100px) { .settings-col > .set-chapter:first-child { margin-top: 6px; } }
+
+/* the heading: icon tile · title · what it covers, over a rule in the chapter's colour */
+.ch-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 4px; padding: 0 0 8px; border-bottom: 3px solid var(--ch); font-size: 20px; line-height: 1.15; color: var(--text); }
+.ch-icon { display: inline-grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; background: var(--ch); color: #14110c; }
+.ch-icon .px-icon { width: 18px; height: 18px; }
+.ch-title { flex: 0 1 auto; }
+.ch-sub { font-family: var(--sans); font-size: 13px; line-height: 1.2; color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .ch-head { font-size: 19px; font-weight: 800; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .ch-icon { border-radius: 8px; }
+
+/* every group in a chapter: a spine in the chapter's colour, so the eye groups them */
+.set-chapter details.section { border-left: 4px solid var(--ch); padding-left: 12px; margin-left: 0; }
+.set-chapter details.section > summary { margin-top: 8px; }
+.set-chapter details.section[open] { padding-bottom: 6px; }
+.set-chapter details.section[open] > summary::before { content: ""; position: absolute; left: -16px; top: 0; bottom: 0; width: 4px; background: var(--ch); filter: brightness(1.25); }
+.set-chapter details.section > summary { position: relative; }
+.set-chapter details.section > summary > .small:not(.where) { flex-basis: 100%; order: 3; line-height: 1.35; font-weight: 400; }
+.set-chapter .card-box { background: color-mix(in srgb, var(--ch) 5%, var(--ink-2)); }
+:root[data-ui="paper"] .set-chapter .card-box { background: color-mix(in srgb, var(--ch) 4%, var(--ink-2)); }
+
+/* labelled boxes inside a big group (Studying, Look) */
+.set-group { border: 1px solid var(--line); margin: 0 0 12px; padding: 4px 12px 10px; min-width: 0; }
+.set-group:last-child { margin-bottom: 0; }
+.set-group > legend { font-family: var(--sans); font-size: 13px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text); padding: 0 6px; margin-left: -6px; display: flex; align-items: center; gap: 6px; }
+.set-group > legend::before { content: ""; width: 8px; height: 8px; background: var(--ch, var(--accent)); flex: 0 0 8px; }
+.set-group > legend span { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); }
+:root:is([data-ui="clean"], [data-ui="paper"]) .set-group { border-radius: 10px; }
+:root:is([data-ui="clean"], [data-ui="paper"]) .set-group > legend::before { border-radius: 50%; }
+
+/* the jump row: each chip carries its chapter's colour, and the chapters are separated */
+.jump-row .chip[data-to] { border-left: 4px solid var(--jc, var(--line)); }
+.jump-row .chip[data-to="s-look"] { --jc: #ff8a3d; }
+.jump-row .chip:is([data-to="s-study"], [data-to="s-exam"], [data-to="s-remind"], [data-to="s-lang"]) { --jc: #6cc04a; }
+.jump-row .chip:is([data-to="s-google"], [data-to="s-sync"], [data-to="s-data"]) { --jc: #4aa3ff; }
+.jump-row .chip:is([data-to="s-import"], [data-to="s-inbox"], [data-to="s-improve"], [data-to="s-media"]) { --jc: #b48cff; }
+.jump-row .chip[data-to="s-diag"] { --jc: #a3a8b5; }
+.jump-row .chip:is([data-to="s-study"], [data-to="s-import"], [data-to="s-google"], [data-to="s-diag"]) { margin-left: 10px; }
+@media (max-width: 600px) {
+  .set-chapter details.section { padding-left: 8px; }
+  .set-chapter .card-box { padding: 10px 10px; }
+  .set-group { padding: 2px 8px 8px; }
+}

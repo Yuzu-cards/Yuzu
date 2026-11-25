@@ -58,7 +58,7 @@ try {
   await c4.close();
   // ---- Interfaces and layout: Paper sticks from the first paint; the jump row opens a group; a desktop gets the side rail
   const c5 = await browser.newContext({ viewport: { width: 412, height: 915 } }); const L = await open(c5, "L"); await L.evaluate((p) => (window as any).yuzu.importPack(p), pack);
-  await L.click("nav.tabs >> text=Settings"); await L.click('[aria-label="Interface"] >> text=Paper');
+  await L.click("nav.tabs >> text=Settings"); await L.click("#s-look > summary"); await L.click('[aria-label="Interface"] >> text=Paper');
   ok("choosing Paper switches the interface at once", (await L.evaluate(() => document.documentElement.dataset.ui)) === "paper");
   await L.reload(); const first = await L.evaluate(() => ({ ui: document.documentElement.dataset.ui, bg: getComputedStyle(document.body).backgroundColor }));
   ok("…and it is there from the first paint after a reload (light background)", first.ui === "paper" && first.bg === "rgb(243, 244, 249)", JSON.stringify(first));

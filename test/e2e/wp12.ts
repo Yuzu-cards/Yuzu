@@ -23,6 +23,7 @@ try {
 
     // ---- 07-6: the pad changes sliders and dropdowns
     await P.click("nav.tabs >> text=Settings"); await P.waitForTimeout(150);
+    await P.click("#s-study > summary"); await P.waitForTimeout(150); // groups start closed (25/11/2026): open Daily study, as a person would
     const n0 = await P.evaluate(() => (window as any).yuzu.settings.newPerDay);
     await P.focus('input[aria-label="New cards per day"]'); await pad(RIGHT); await pad(RIGHT); await pad(RIGHT); await pad(LEFT);
     await P.waitForFunction((n) => (window as any).yuzu.settings.newPerDay === n, n0 + 2, { timeout: 3000 }).catch(() => {});
@@ -39,11 +40,11 @@ try {
 
     // ---- 07-17 / 05-18: two fixed columns in jump-row order
     const cols = await P.evaluate(() => { const c = [...document.querySelectorAll(".settings-col")]; return { n: c.length, lefts: c.map((x) => Math.round(x.getBoundingClientRect().left)), first: c.map((x) => x.querySelector("details.section")?.id) }; });
-    ok(`${tag} Settings has two side-by-side columns (Look | Google first)`, cols.n === 2 && cols.lefts[1] > cols.lefts[0] + 300 && cols.first[0] === "s-look" && cols.first[1] === "s-google", JSON.stringify(cols));
+    ok(`${tag} Settings has two side-by-side columns (Look | Import first)`, cols.n === 2 && cols.lefts[1] > cols.lefts[0] + 300 && cols.first[0] === "s-look" && cols.first[1] === "s-import", JSON.stringify(cols));
     const order = await P.evaluate(() => { const ids = [...document.querySelectorAll("details.section[id]")].map((d) => d.id); return ids; });
     const chips = await P.evaluate(() => [...document.querySelectorAll(".jump-row .chip")].map((b) => b.textContent));
-    const want = ["s-look", "s-study", "s-exam", "s-remind", "s-google", "s-sync", "s-improve", "s-import", "s-media", "s-inbox", "s-data", "s-diag"];
-    ok(`${tag} the page order of the groups matches the jump row`, JSON.stringify(order.filter((x) => want.includes(x))) === JSON.stringify(want) && chips[0] === "Look" && chips.indexOf("Google") === (chips.includes("Languages") ? chips.indexOf("Languages") : chips.indexOf("Reminders")) + 1, order.join(","));
+    const want = ["s-look", "s-study", "s-exam", "s-remind", "s-import", "s-inbox", "s-improve", "s-media", "s-google", "s-sync", "s-data", "s-diag"];
+    ok(`${tag} the page order of the groups matches the jump row`, JSON.stringify(order.filter((x) => want.includes(x))) === JSON.stringify(want) && chips[0] === "Look" && chips.indexOf("Import") === (chips.includes("Languages") ? chips.indexOf("Languages") : chips.indexOf("Reminders")) + 1, order.join(","));
     const gTop = () => P.evaluate(() => Math.round(document.getElementById("s-google")!.getBoundingClientRect().top + scrollY));
     const g0 = await gTop(); await P.click("#s-study > summary"); await P.waitForTimeout(150); const g1 = await gTop(); await P.click("#s-study > summary");
     ok(`${tag} closing a left-column group does not move the right column`, g0 === g1, `${g0} → ${g1}`);
