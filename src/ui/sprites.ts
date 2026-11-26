@@ -11,23 +11,28 @@ export const PALETTE: Record<string, string> = {
   B: "#6b4a1f", // stem
 };
 
-export const YUZU = [
-  "..........GG....",
-  ".........GGGD...",
-  "......KKBKDD....",
-  "....KKYYBYYKK...",
-  "...KYYHHYYYYYK..",
-  "..KYYHHYYYPYYSK.",
-  "..KYHHYYYYYYYSK.",
-  ".KYYHYYYPYYYYYSK",
-  ".KYYYYYYYYYYPYSK",
-  ".KYYPYYYYYYYYYSK",
-  ".KYYYYYYYYYYYSSK",
-  "..KYYYYYYPYYYSK.",
-  "..KSYYYYYYYYSSK.",
-  "...KSSYYYYYSSK..",
-  "....KKSSSSSKK...",
-  "......KKKKK.....",
+/** The Yuzu crest at 20 × 20 for the Arcade look (26/11/2026): G and # gold, K a hole (a pore or the sheen). */
+export const CREST_PX = [
+  ".......######.......",
+  ".....##......##.....",
+  "...##..........##...",
+  "..#.##.#....#.##.#..",
+  "..#..###....###..#..",
+  ".#.....######.....#.",
+  ".#........#.......#.",
+  "#......#######.....#",
+  "#.....##########...#",
+  "#....#..#########..#",
+  "#...#.####.#######.#",
+  "#...##########.###.#",
+  "#...###.##########.#",
+  ".#..#######.###.#.#.",
+  ".#...###.########.#.",
+  "..#...######.###.#..",
+  "..#.....#######..#..",
+  "...##..........##...",
+  ".....##......##.....",
+  ".......######.......",
 ];
 
 /** Pixels of a sprite as [x, y, color] triples. */
